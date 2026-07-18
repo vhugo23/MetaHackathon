@@ -335,19 +335,23 @@ Tests architecture.md Section 5's contract:
 
 ## 13. Incident Generation Testing
 
-- **Unit — candidate + fingerprint.** `IncidentFactory.build_candidate(violation)`
-  produces the exact evidence shape from domain-model.md Section 10 (no
-  duplicated `device_id`/`policy_id`; `evidence.source_snapshot_id`
-  straight from the violation), `severity = "Medium"`, and a
-  `recommendation.summary` substring-matching the ACL name, interface, and
-  device ID. `compute_fingerprint` is tested for both correctness (same
+- **Unit — candidate + fingerprint (Day 4A).** `IncidentFactory.build_candidate(violation)`
+  produces the exact `PolicyViolationIncidentEvidence` shape from
+  domain-model.md Section 7 (no duplicated `device_id`/`rule_ref`;
+  `evidence.source_snapshot_id` and `evidence.actual_acl_name` straight
+  from the violation), `severity = "Medium"`, `affected_resource` and
+  `recommendation` copied verbatim (plain string, not a
+  `recommendation.summary` object — domain-model.md Section 13), and
+  `observed_at` equal to `violation.detected_at`.
+  `compute_fingerprint` is tested for both correctness (same
   inputs → identical fingerprint; any differing input → a different one)
   and **collision safety** —
-  `test_compute_fingerprint__delimiter_and_unicode_values__remain_unambiguous`:
-  two distinct 4-tuples that *would* collide under a naive
-  `"|"`-delimited join (e.g., one where `acl_name` contains a literal
-  `"|"` or `":"`, or non-ASCII text) must still hash to different
-  fingerprints — proving the SHA-256-over-canonical-JSON construction
+  `test_compute_fingerprint__delimiter_quote_escape_and_unicode_values__remain_unambiguous`:
+  distinct input tuples that *would* collide under a naive
+  `"|"`-delimited join (e.g., a `"|"` split across two fields vs.
+  contained within one, or values containing `":"`, quotes, backslashes,
+  or non-ASCII text) must still hash to different fingerprints — proving
+  the SHA-256-over-canonical-JSON construction
   (domain-model.md Section 11) actually avoids the ambiguity a
   delimiter join would risk.
 - **Integration — satisfied policy, zero everything.**
@@ -549,7 +553,7 @@ alongside them (Section 14).
 | 16 | Controlled persistence failure — `POST` with an injected `FailingRepository` returns 500 / `PERSISTENCE_ERROR`, no stack trace leaked | Contract | `FailingRepository` (fails via `upsert_open_incident`) | `tests/contract/api/test_devices_api.py` |
 | 17 | Structured invalid-input response — missing `vendor` or empty body returns 422 / `SCHEMA_VALIDATION_ERROR` | Contract | none | `tests/contract/api/test_devices_api.py` |
 | 18 | Unexpected exception returns 500 / `INTERNAL_ERROR`, never a raw stack trace | Contract | exception-raising test double | `tests/contract/api/test_devices_api.py` |
-| 19 | `test_compute_fingerprint__delimiter_and_unicode_values__remain_unambiguous` (AC-11) | Unit | none | `tests/unit/detection/test_incident_factory.py` |
+| 19 | `test_compute_fingerprint__delimiter_quote_escape_and_unicode_values__remain_unambiguous` (AC-11) | Unit | none | `tests/unit/domain/test_incident.py` — `compute_fingerprint` is a `domain` service (domain-model.md Section 17), not a `detection` one; `IncidentFactory`'s own tests live in `tests/unit/detection/test_incident_factory.py` |
 | 20 | `test_policy_evaluator__given_observed_at__populates_violation_detected_at` | Unit | none | `tests/unit/detection/test_policy_evaluator.py` |
 
 **E2E** (one Playwright test, Section 7): start `api` + `db` from

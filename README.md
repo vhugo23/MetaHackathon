@@ -151,7 +151,7 @@ container startup sequence itself: PostgreSQL must pass its own
 accepting requests (architecture.md Section 11.2) — if either step fails,
 the API container never becomes healthy.
 
-### Current Day 3B scope
+### Current Day 4A scope
 
 See [CLAUDE.md](./CLAUDE.md) "Current Phase". Day 2 scaffolding
 (package structure, `GET /health`, Docker + PostgreSQL startup, Alembic
@@ -160,7 +160,41 @@ dependency: the `Normalized*` configuration value objects, the
 `VendorConfigAdapter` port, `AdapterRegistry`, and a representative Cisco
 IOS-XE parser (`meta_rne.adapters.cisco.CiscoAdapter`).
 
-Day 3B adds, also framework-independent (FR-03, NFR-02/NFR-03):
+Day 4A adds, also framework-independent (FR-07, NFR-02/NFR-03):
+
+- `IncidentSource`/`IncidentStatus` — the approved enums
+  (`meta_rne.domain.incident`).
+- `IncidentCandidate` and `PolicyViolationIncidentEvidence` — the
+  pre-fingerprint, pre-persistence shape `IncidentFactory` produces, and
+  its immutable evidence mapping from `ConfigurationViolation`.
+- `IncidentFactory.build_candidate(violation) -> IncidentCandidate`
+  (`meta_rne.detection.incident_factory`) — pure function of a single
+  `ConfigurationViolation`, no clock/repository/logger access. For a
+  `POLICY_VIOLATION` finding, `device_id`, `rule_ref`, `affected_resource`,
+  `severity`, and `recommendation` are copied verbatim (no template
+  rewriting); `observed_at` is copied from `violation.detected_at`;
+  `evidence` is remapped into `PolicyViolationIncidentEvidence`, adding
+  `violation_type`/`source_snapshot_id` and preserving `actual_acl_name`.
+- `compute_fingerprint(device_id, source, rule_ref, affected_resource) ->
+  str` (`meta_rne.domain.incident`) — SHA-256 hex digest of a canonical
+  JSON array (`separators=(",", ":")`, UTF-8), never a delimiter-joined
+  string.
+- **UTC timestamp validation**: `IncidentCandidate.observed_at` must be
+  timezone-aware UTC; naive or non-UTC-offset values raise `ValueError`,
+  same pattern as `ConfigurationPolicy.created_at`/`PolicyEvaluator.observed_at`.
+
+Backend test count: **93** (`pytest`, 100% line coverage on
+`domain/incident.py` and `detection/incident_factory.py`).
+
+**Not implemented yet** (deliberately, per the approved Day 4A plan): the
+persisted `Incident` dataclass, `IncidentRepository`/
+`upsert_open_incident`, actual deduplication (the fingerprint is computed
+but nothing yet enforces the one-open-incident-per-fingerprint invariant),
+`ConfigIngestionService`, FastAPI ingestion endpoints, SQLAlchemy
+repositories, structured logging, `DriftDetector`, `RuleEngine`,
+telemetry, and the React dashboard. These begin on a later day.
+
+Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 
 - `ConfigurationPolicy` and `RequiredAclRule` — a seeded, fixture-data
   representation of a required inbound/outbound ACL assignment, each
@@ -231,5 +265,25 @@ model, splitting "invalid interface IP address or subnet mask" into two
 separate parser failures, and adding the two new BGP parser-failure
 categories — all in architecture.md and test-strategy.md. See "Getting
 Started" above and "Current Day 3A scope" for exactly what is and is not
-implemented. Persistence, the ingestion API, policy evaluation, and
-incidents have not started.
+implemented at that point. Persistence and the ingestion API have not
+started.
+
+**Day 3B — Configuration Policy Domain and Deterministic Evaluation.**
+Adds `ConfigurationPolicy`/`RequiredAclRule`, `ConfigurationViolation`/
+`AclAssignmentEvidence`, and the deterministic `PolicyEvaluator`, all
+framework-independent, test-first, bringing the suite to 60 tests. See
+"Current Day 3B scope" (superseded by "Current Day 4A scope" above) for
+what was added.
+
+**Day 4A — Incident Domain, Deterministic Fingerprinting, and
+IncidentFactory.** Adds `IncidentSource`/`IncidentStatus`,
+`IncidentCandidate`/`PolicyViolationIncidentEvidence`,
+`IncidentFactory.build_candidate`, and `compute_fingerprint`, all
+framework-independent, test-first, bringing the suite to 93 tests.
+Resolved two documentation conflicts discovered during planning (see
+CLAUDE.md "Documentation corrections applied for Day 4A"): `recommendation`
+is a verbatim-copied plain string, not a templated value object, and
+`affected_resource` uses one format end-to-end rather than two. See
+"Current Day 4A scope" above for exactly what is and is not implemented.
+Persistence, deduplication enforcement, and the ingestion API have not
+started.

@@ -291,17 +291,44 @@ evaluator generated. No violation carries a generated ID of its own
 
 **Not persisted independently** — it is a transient value passed straight
 to `IncidentFactory` within the same request. Zero violations → zero
-incidents from this path. `IncidentFactory.build_candidate` for a
-`POLICY_VIOLATION` finding copies `rule_ref`, `severity`, `evidence`, and
-`recommendation` directly from the violation — it does not recompute them
-(Section 17's "single place that maps finding type to severity +
-recommendation" narrows to *anomaly and drift* findings for those three
-fields; a policy violation already carries them). `affected_resource` is
-the one field `IncidentFactory` still derives itself, since
-`ConfigurationViolation.affected_resource` uses a different, evaluator-
-level format (interface-centered, above) than `Incident.affected_resource`
-(Section 11's `"acl:{name}:{interface}:{direction}"` convention) — that
-derivation is unspecified until `IncidentFactory` is implemented.
+incidents from this path. **`IncidentFactory.build_candidate` (Day 4A)
+for a `POLICY_VIOLATION` finding copies `device_id`, `rule_ref`,
+`affected_resource`, `severity`, and `recommendation` directly from the
+violation, verbatim, and does not recompute or template any of them.**
+`ConfigurationViolation.affected_resource`'s interface-centered format
+(above) is not translated to a different format — it *is*
+`IncidentCandidate.affected_resource`/`Incident.affected_resource`; there
+is only one `affected_resource` convention for policy violations, not two
+(this corrects an earlier draft's two-format design, Section 13).
+`evidence` is **remapped, not copied as-is**: `IncidentFactory` builds a
+`PolicyViolationIncidentEvidence` (Section 16) from
+`ConfigurationViolation.evidence` (`AclAssignmentEvidence`) plus the
+violation's own `violation_type` and `source_snapshot_id`, so no
+information the violation carried is lost. `IncidentCandidate` also
+carries `observed_at = violation.detected_at`, copied directly — the
+factory never reads a clock or accepts a separate timestamp argument.
+
+```
+IncidentCandidate                        # Day 4A, pre-fingerprint, pre-persistence
+├── device_id: string
+├── source: IncidentSource                # POLICY_VIOLATION only, Day 4A
+├── rule_ref: string
+├── affected_resource: string             # copied verbatim from the violation
+├── severity: Severity
+├── evidence: PolicyViolationIncidentEvidence
+├── recommendation: string                # copied verbatim, Section 13
+├── observed_at: timestamp                # = violation.detected_at
+```
+
+```
+PolicyViolationIncidentEvidence
+├── source_snapshot_id: string
+├── violation_type: ViolationType
+├── expected_acl_name: string
+├── actual_acl_name: string | null
+├── interface_name: string
+├── direction: AclDirection
+```
 
 ---
 
@@ -371,11 +398,15 @@ Incident
 ├── device_id: string
 ├── source: IncidentSource             # "POLICY_VIOLATION" | "DRIFT" | "ANOMALY"
 ├── rule_ref: string                   # THE canonical source-rule/policy reference field
-├── affected_resource: string          # e.g. "acl:ACL-EXTERNAL-IN:GigabitEthernet0/1:in"
+├── affected_resource: string          # e.g. "interface:GigabitEthernet0/1:acl_in" (policy
+│                                       # violations); copied verbatim from the triggering
+│                                       # finding, Section 7/17
 ├── severity: Severity                 # "Critical" | "High" | "Medium" | "Low"
 ├── status: IncidentStatus             # "OPEN" (MVP's only reachable value)
 ├── evidence: object                   # finding-specific detail ONLY — see below
-├── recommendation: Recommendation     # Section 13, value object
+├── recommendation: string             # Section 13 — plain string, Day 4A; a richer
+│                                       # Recommendation{summary, details} object and
+│                                       # template generation are deferred
 ├── created_at: timestamp              # first detection
 ├── last_seen_at: timestamp            # most recent (re)detection
 ├── occurrence_count: int              # starts at 1, increments on dedup match
@@ -456,7 +487,7 @@ the same rule on two different interfaces) get different fingerprints:
 
 | Source | `affected_resource` |
 |---|---|
-| `POLICY_VIOLATION` | `"acl:{acl_name}:{interface_name}:{direction}"` |
+| `POLICY_VIOLATION` | `"interface:{interface_name}:acl_in"` or `"...acl_out"` — copied verbatim from `ConfigurationViolation.affected_resource` (Section 7), not a separate incident-level format |
 | `ANOMALY` (`RULE-CPU-HIGH`) | `"device"` |
 | `ANOMALY` (`RULE-LINK-FLAP`) | `"interface:{interface_name}"` |
 | `ANOMALY` (`RULE-BGP-DOWN`) | `"bgp-neighbor:{neighbor_ip}"` |
@@ -583,7 +614,8 @@ test doubles (test-strategy.md Section 9) — never in production
 its snapshot, Section 4), `ConfigurationViolation`/`Anomaly` (transient,
 Sections 7/9 — persisting them independently would need a second
 lifecycle that duplicates what `Incident` already provides), or
-`Recommendation` (value object, always accessed through its `Incident`).
+`Recommendation` (a plain string on `Incident` for now, Section 13 — not
+yet its own value object).
 
 `TelemetryRepository`'s in-memory test double retains samples with
 `sampled_at` within the last 5 minutes, or the last 100 samples per
@@ -598,18 +630,24 @@ storage-time one.
 ## 13. Recommendation
 
 **Purpose.** A human-readable remediation string on an incident (FR-07).
-No independent identity, repository, or lifecycle — it is a **value
-object embedded in `Incident`**, not a top-level entity.
 
-```
-Recommendation
-├── summary: string          # e.g. "Restore ACL ACL-EXTERNAL-IN (inbound) on GigabitEthernet0/1, spine-01"
-├── details: string | null
-```
+**Day 4A: `Incident.recommendation` (and `IncidentCandidate.recommendation`,
+Section 7) is a plain `string`, copied verbatim from the triggering
+finding** — for a policy violation, `IncidentFactory.build_candidate`
+copies `ConfigurationViolation.recommendation` (itself copied from the
+matched `RequiredAclRule.recommendation`, Section 6) without recomputing
+or reformatting it, e.g. `"Assign ACL-EXTERNAL-IN inbound to
+GigabitEthernet0/1"`.
 
-Generated by a template function keyed on `Incident.source` + `rule_ref`.
-Static strings with interpolated fields; no free-text authoring or
-localization.
+A richer `Recommendation{summary, details}` value object, generated by a
+template function keyed on `Incident.source` + `rule_ref`, is **deferred**
+— it is not needed until a finding type without its own
+caller-authored recommendation string (e.g. `ANOMALY`, `DRIFT`) exists.
+An earlier draft of this document showed `IncidentFactory` rewriting the
+copied string into a differently-worded, device-specific summary (e.g.
+"Restore ACL ACL-EXTERNAL-IN (inbound) on GigabitEthernet0/1, spine-01");
+that behavior is not implemented and the worked example in Section 18 has
+been corrected to match the verbatim-copy contract actually built.
 
 ---
 
@@ -692,8 +730,10 @@ deliberately **not** a UUID: it is a stable, human-readable name chosen
 by whoever writes the seed fixture (Section 6), so that seeding is
 idempotent by identity (`seed_if_missing`, Section 12) — a UUID
 regenerated on every app restart would defeat that idempotency entirely.
-`Recommendation` (Section 13) and `AclAssignmentEvidence` (Section 7) are
-this model's value objects: no identity, no repository, always embedded.
+`AclAssignmentEvidence` (Section 7) and `PolicyViolationIncidentEvidence`
+(Section 7, Day 4A) are this model's value objects: no identity, no
+repository, always embedded. `Recommendation` is deferred (Section 13) —
+`Incident.recommendation` is a plain string, not yet a value object.
 
 ---
 
@@ -712,10 +752,17 @@ is the caller's (`application` layer's) job.
 | `compute_fingerprint` | `(device_id, source, rule_ref, affected_resource) -> str` (SHA-256 hex, Section 11) | Section 11 |
 | `Clock` | `now_utc() -> timestamp` — `SystemClock` (production) / `FixedClock` (tests) | architecture.md Section 4.1 |
 
-`IncidentFactory` is the single place that maps a finding type to
-severity + recommendation template + `affected_resource` — kept in one
-place rather than scattered across `PolicyEvaluator`, `RuleEngine`, and
-`DriftDetector`. `PolicyEvaluator.evaluate` and `RuleEngine.evaluate` both
+`IncidentFactory` is the single place that reshapes a finding into an
+`IncidentCandidate` — kept in one place rather than scattered across
+`PolicyEvaluator`, `RuleEngine`, and `DriftDetector`. For `POLICY_VIOLATION`
+(Day 4A), it copies `device_id`, `rule_ref`, `affected_resource`,
+`severity`, `recommendation`, and `observed_at` (= `detected_at`) verbatim
+from the violation and remaps `evidence` into
+`PolicyViolationIncidentEvidence` (Section 7) — it does not compute a
+severity or recommendation template itself; that becomes relevant once
+`ANOMALY`/`DRIFT` findings (which carry no ready-made recommendation
+string of their own) are implemented. `PolicyEvaluator.evaluate` and
+`RuleEngine.evaluate` both
 take their timestamp (`observed_at`) as an explicit argument rather than
 calling `Clock` themselves — `Clock` is read exactly once per operation,
 by `application` (architecture.md Section 4.1), which is what lets both
@@ -796,7 +843,7 @@ config.
   "source_snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "rule_ref": "policy-acl-external-in",
   "violation_type": "MISSING_REQUIRED_ACL",
-  "affected_resource": "acl:ACL-EXTERNAL-IN:GigabitEthernet0/1:in",
+  "affected_resource": "interface:GigabitEthernet0/1:acl_in",
   "severity": "Medium",
   "evidence": {
     "expected_acl_name": "ACL-EXTERNAL-IN",
@@ -817,20 +864,18 @@ config.
   "device_id": "spine-01",
   "source": "POLICY_VIOLATION",
   "rule_ref": "policy-acl-external-in",
-  "affected_resource": "acl:ACL-EXTERNAL-IN:GigabitEthernet0/1:in",
+  "affected_resource": "interface:GigabitEthernet0/1:acl_in",
   "severity": "Medium",
   "status": "OPEN",
   "evidence": {
-    "acl_name": "ACL-EXTERNAL-IN",
-    "interface_name": "GigabitEthernet0/1",
-    "direction": "in",
+    "source_snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
     "violation_type": "MISSING_REQUIRED_ACL",
-    "source_snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+    "expected_acl_name": "ACL-EXTERNAL-IN",
+    "actual_acl_name": null,
+    "interface_name": "GigabitEthernet0/1",
+    "direction": "in"
   },
-  "recommendation": {
-    "summary": "Restore ACL ACL-EXTERNAL-IN (inbound) on GigabitEthernet0/1, spine-01",
-    "details": null
-  },
+  "recommendation": "Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1",
   "created_at": "2026-07-18T10:00:00Z",
   "last_seen_at": "2026-07-18T10:00:00Z",
   "occurrence_count": 1
@@ -846,14 +891,14 @@ config.
       "device_id": "spine-01",
       "source": "POLICY_VIOLATION",
       "rule_ref": "policy-acl-external-in",
-      "affected_resource": "acl:ACL-EXTERNAL-IN:GigabitEthernet0/1:in",
+      "affected_resource": "interface:GigabitEthernet0/1:acl_in",
       "severity": "Medium",
       "status": "OPEN",
       "created_at": "2026-07-18T10:00:00Z",
       "last_seen_at": "2026-07-18T10:00:00Z",
       "occurrence_count": 1,
-      "evidence": { "acl_name": "ACL-EXTERNAL-IN", "interface_name": "GigabitEthernet0/1", "direction": "in", "violation_type": "MISSING_REQUIRED_ACL", "source_snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6" },
-      "recommendation": { "summary": "Restore ACL ACL-EXTERNAL-IN (inbound) on GigabitEthernet0/1, spine-01", "details": null }
+      "evidence": { "source_snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "violation_type": "MISSING_REQUIRED_ACL", "expected_acl_name": "ACL-EXTERNAL-IN", "actual_acl_name": null, "interface_name": "GigabitEthernet0/1", "direction": "in" },
+      "recommendation": "Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1"
     }
   ],
   "error": null

@@ -424,17 +424,29 @@ finding: ConfigurationViolation | DriftFieldDiff | Anomaly
    │       (already carries source_snapshot_id and detected_at = observed_at)
    ▼
 IncidentFactory.build_candidate(finding) -> IncidentCandidate:
-    { device_id, source, rule_ref, affected_resource, severity, evidence, recommendation }
+    { device_id, source, rule_ref, affected_resource, severity, evidence,
+      recommendation, observed_at }
     # evidence.source_snapshot_id copied straight from finding.source_snapshot_id
+    # observed_at copied straight from finding.detected_at — the factory
+    # never reads a clock or accepts a separate timestamp argument (Day 4A)
 
     rule_ref:            POLICY_VIOLATION → copied from ConfigurationViolation.rule_ref
                           ANOMALY         → rule_id (e.g. "RULE-CPU-HIGH")
                           DRIFT           → field path (e.g. "acls.removed")
-    affected_resource:   POLICY_VIOLATION → "acl:{acl_name}:{interface_name}:{direction}"
+    affected_resource:   POLICY_VIOLATION → copied verbatim from
+                                             ConfigurationViolation.affected_resource,
+                                             e.g. "interface:{interface_name}:acl_in" —
+                                             NOT a separate "acl:{name}:{interface}:
+                                             {direction}" format; there is only one
+                                             affected_resource convention for policy
+                                             violations (corrects an earlier draft)
                           ANOMALY (CPU)    → "device"
                           ANOMALY (FLAP)   → "interface:{interface_name}"
                           ANOMALY (BGP)    → "bgp-neighbor:{neighbor_ip}"
                           DRIFT            → "{field_path}:{entity_name}"
+    recommendation:      POLICY_VIOLATION → copied verbatim from
+                                             ConfigurationViolation.recommendation
+                                             (plain string; no template/rewrite, Day 4A)
    │
    ▼
 fingerprint = compute_fingerprint(device_id, source, rule_ref, affected_resource)
@@ -472,10 +484,11 @@ observability.emit_json_log(result)   — stdout, FR-09 / AC-10
 |---|---|
 | `source` | `POLICY_VIOLATION` |
 | `rule_ref` | the seeded policy's `policy_id` (a stable string such as `"policy-acl-external-in"`, not a UUID — domain-model.md Section 16) |
-| `affected_resource` | `"acl:ACL-EXTERNAL-IN:GigabitEthernet0/1:in"` |
+| `affected_resource` | `"interface:GigabitEthernet0/1:acl_in"` — copied verbatim from `ConfigurationViolation.affected_resource` |
 | `severity` | `Medium` |
-| `evidence` | `{ acl_name, interface_name, direction, violation_type, source_snapshot_id }` — **not** `device_id`/`policy_id` again, since those are already top-level `Incident` fields |
-| `recommendation.summary` | `"Restore ACL ACL-EXTERNAL-IN (inbound) on GigabitEthernet0/1, spine-01"` |
+| `evidence` | `{ source_snapshot_id, violation_type, expected_acl_name, actual_acl_name, interface_name, direction }` (`PolicyViolationIncidentEvidence`, domain-model.md Section 7) — **not** `device_id`/`policy_id` again, since those are already top-level `Incident` fields |
+| `recommendation` | `"Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1"` — copied verbatim from `ConfigurationViolation.recommendation`, plain string (Day 4A; no `Recommendation` value object yet, domain-model.md Section 13) |
+| `observed_at` | copied verbatim from `ConfigurationViolation.detected_at` |
 
 `IncidentFactory` + `upsert_open_incident` together form the *only* path
 to incident creation — no manual-creation endpoint, and no code path may

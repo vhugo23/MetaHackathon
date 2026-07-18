@@ -19,6 +19,13 @@ from meta_rne.domain.config import (
     VendorType,
 )
 from meta_rne.domain.errors import ParseError, ParseErrorCode, UnsupportedVendorError
+from meta_rne.domain.incident import (
+    IncidentCandidate,
+    IncidentSource,
+    IncidentStatus,
+    PolicyViolationIncidentEvidence,
+    compute_fingerprint,
+)
 from meta_rne.domain.policy import (
     AclAssignmentEvidence,
     ConfigurationPolicy,
@@ -36,6 +43,9 @@ __all__ = [
     "AdminState",
     "ConfigurationPolicy",
     "ConfigurationViolation",
+    "IncidentCandidate",
+    "IncidentSource",
+    "IncidentStatus",
     "NormalizedAcl",
     "NormalizedAclEntry",
     "NormalizedBgpNeighbor",
@@ -44,10 +54,12 @@ __all__ = [
     "NormalizedRouting",
     "ParseError",
     "ParseErrorCode",
+    "PolicyViolationIncidentEvidence",
     "RequiredAclRule",
     "Severity",
     "UnsupportedVendorError",
     "VendorConfigAdapter",
     "VendorType",
     "ViolationType",
+    "compute_fingerprint",
 ]

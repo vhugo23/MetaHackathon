@@ -45,21 +45,26 @@ For each task:
 
 ## Current Phase
 
-**Day 3B — Configuration Policy Domain and Deterministic Evaluation.**
+**Day 4A — Incident Domain, Deterministic Fingerprinting, and
+IncidentFactory.**
 
-Day 1 planning, Day 2 scaffolding, and Day 3A are complete and approved.
-See README.md's "Current Project Status" for the full history.
+Day 1 planning, Day 2 scaffolding, Day 3A, and Day 3B are complete and
+approved. See README.md's "Current Project Status" for the full history.
 
-Application code is currently allowed **only** for the completed Day 3A
-and Day 3B capabilities:
+Application code is currently allowed **only** for the completed Day 3A,
+Day 3B, and Day 4A capabilities:
 
 - normalized configuration domain objects (Day 3A)
 - vendor adapter contracts, `AdapterRegistry`, Cisco IOS-XE parsing and
   normalization (Day 3A)
 - `ConfigurationPolicy`/`RequiredAclRule`, `ConfigurationViolation`/
   `AclAssignmentEvidence`, and the deterministic `PolicyEvaluator` (Day 3B)
+- `IncidentSource`/`IncidentStatus`, `IncidentCandidate`/
+  `PolicyViolationIncidentEvidence`, `IncidentFactory.build_candidate`,
+  and `compute_fingerprint` (Day 4A)
 - unit tests and representative fixtures
-- documentation corrections explicitly approved for Day 3A/3B (see below)
+- documentation corrections explicitly approved for Day 3A/3B/4A (see
+  below)
 
 **Documentation corrections applied for Day 3A:**
 
@@ -85,9 +90,39 @@ and Day 3B capabilities:
 3. `docs/test-strategy.md` §12/§19 — policy-evaluator sub-case list and
    one test name updated to match.
 
-**Still prohibited**: `IncidentFactory`/`Incident`, fingerprinting and
-deduplication, persistence (SQLAlchemy repositories, tables, Alembic
-business migrations), API ingestion endpoints, `DriftDetector`,
-`RuleEngine`, telemetry, and React. Those begin on a later day, against
-the domain model and architecture already documented, with tests written
-first per the Development Rules above.
+**Documentation corrections applied for Day 4A:**
+
+1. `docs/domain-model.md` §7/§10/§11/§13/§16/§17/§18 — resolved a
+   conflict where §7 said `IncidentFactory` copies `recommendation`
+   verbatim while §13 and the §18 worked example showed it templated
+   into different wording; `Incident.recommendation`/
+   `IncidentCandidate.recommendation` are now documented as a plain
+   `string`, copied verbatim, with a `Recommendation{summary, details}`
+   value object and template generation explicitly deferred. Also
+   resolved a second conflict where `ConfigurationViolation.
+   affected_resource` (interface-centered) and `Incident.
+   affected_resource` (`"acl:{name}:{interface}:{direction}"`) were
+   documented as two different formats needing an undefined derivation;
+   `affected_resource` is now copied verbatim end-to-end (only one
+   format), which also corrects a pre-existing §18 worked example that
+   didn't match §7's own contract. Documented the new
+   `PolicyViolationIncidentEvidence` value object (adds `violation_type`/
+   `source_snapshot_id`, keeps `actual_acl_name`, renames
+   `expected_acl_name`) and the `IncidentCandidate.observed_at` field
+   (= `violation.detected_at`, not read from a clock).
+2. `docs/architecture.md` §9 — the `IncidentFactory.build_candidate` flow
+   and the vertical-slice value table updated to match (verbatim
+   `affected_resource`/`recommendation`, added `observed_at`).
+3. `docs/test-strategy.md` §13/§19 — `IncidentFactory`/fingerprint test
+   descriptions updated to match the verbatim-copy contract and the
+   actual test name/location (`compute_fingerprint` lives in
+   `tests/unit/domain/test_incident.py`, a `domain` service per
+   domain-model.md §17, not `detection`).
+
+**Still prohibited**: the persisted `Incident` dataclass, `IncidentRepository`/
+`upsert_open_incident`, deduplication itself (fingerprint is computed but
+nothing yet enforces uniqueness), persistence (SQLAlchemy repositories,
+tables, Alembic business migrations), API ingestion endpoints,
+`DriftDetector`, `RuleEngine`, telemetry, and React. Those begin on a
+later day, against the domain model and architecture already documented,
+with tests written first per the Development Rules above.
