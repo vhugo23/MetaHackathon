@@ -45,24 +45,30 @@ For each task:
 
 ## Current Phase
 
-**Day 2 — Repository Scaffolding.**
+**Day 3A — Domain Foundations and Cisco IOS-XE Normalization.**
 
-Day 1 planning (product-spec.md, architecture.md, domain-model.md,
-test-strategy.md, both ADRs) is approved. See README.md's "Current
-Project Status" for the full history of the Day 1 correction passes.
+Day 1 planning and Day 2 scaffolding are complete and approved. See
+README.md's "Current Project Status" for the full history.
 
-Application code is allowed **only** for:
+Application code is currently allowed **only** for:
 
-- project/package scaffolding (`backend/` src-layout)
-- FastAPI application creation
-- `GET /health`
-- Docker and PostgreSQL startup (Dockerfile, docker-compose.yml)
-- Alembic configuration (no migrations yet — no models exist to migrate)
-- automated tests for the health endpoint
-- formatting, linting, type checking, and CI
+- normalized configuration domain objects
+- vendor adapter contracts
+- `AdapterRegistry`
+- Cisco IOS-XE parsing and normalization
+- unit tests and representative fixtures
+- documentation corrections explicitly approved for Day 3A (see below)
 
-**All Slice 1 business logic remains prohibited**: no configuration
-parsing, vendor adapters, policy evaluation, incidents, telemetry, or
-React. Those begin on a later day, against the domain model and
-architecture already documented, with tests written first per the
-Development Rules above.
+**Documentation corrections applied for Day 3A:**
+
+1. `docs/domain-model.md` — added `description: string | null` to the
+   normalized interface model.
+2. `docs/architecture.md` and `docs/test-strategy.md` — split "invalid
+   interface IP address or subnet mask" into two separate parser
+   failures (address vs. mask).
+
+**Still prohibited**: persistence (SQLAlchemy repositories, tables,
+Alembic business migrations), API ingestion endpoints, policy
+evaluation, incidents, telemetry, and React. Those begin on a later
+day, against the domain model and architecture already documented,
+with tests written first per the Development Rules above.

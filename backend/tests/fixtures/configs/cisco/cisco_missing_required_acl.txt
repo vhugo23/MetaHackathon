@@ -1,0 +1,11 @@
+hostname spine-01
+!
+interface GigabitEthernet0/1
+ description Uplink to core-01
+ ip address 10.0.0.1 255.255.255.252
+ no shutdown
+!
+router bgp 65001
+ neighbor 10.0.0.2 remote-as 65002
+!
+end

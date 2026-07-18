@@ -251,9 +251,12 @@ considered done:
 | 2 | Missing `hostname` declaration | `*` |
 | 3 | Malformed `hostname` declaration (e.g., `hostname` with no value) | |
 | 4 | Malformed `interface` declaration (e.g., no interface name after the keyword) | |
-| 5 | Invalid interface IP address or subnet mask (unparsable octets/prefix) | `*` |
+| 5a | Invalid interface IP address (unparsable octets) | `*` |
+| 5b | Invalid interface subnet mask (unparsable or non-contiguous) | `*` |
 | 6 | Invalid `ip access-group` direction (neither `in` nor `out`) | |
 | 7 | An `ip access-group` assignment referencing an ACL name never declared with `ip access-list` | |
+| 8a | BGP `neighbor` line with an invalid IPv4 neighbor address | |
+| 8b | BGP `neighbor` line with a non-integer or non-positive remote AS | |
 
 **Not** the primary example: an unterminated `interface` block is one
 possible instance of failure #4, not the representative case for the

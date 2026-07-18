@@ -1,0 +1,24 @@
+hostname spine-01
+!
+interface GigabitEthernet0/1
+ description Uplink to core-01
+ ip address 10.0.0.1 255.255.255.252
+ ip access-group ACL-EXTERNAL-IN in
+ ip access-group ACL-EXTERNAL-OUT out
+ no shutdown
+!
+interface GigabitEthernet0/2
+ description Downlink to leaf-01
+ shutdown
+!
+ip access-list extended ACL-EXTERNAL-IN
+ 10 permit ip any any
+ 20 deny ip any any
+!
+ip access-list extended ACL-EXTERNAL-OUT
+ permit ip any any
+!
+router bgp 65001
+ neighbor 10.0.0.2 remote-as 65002
+!
+end

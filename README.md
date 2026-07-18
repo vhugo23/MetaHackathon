@@ -151,18 +151,23 @@ container startup sequence itself: PostgreSQL must pass its own
 accepting requests (architecture.md Section 11.2) — if either step fails,
 the API container never becomes healthy.
 
-### Current Day 2 scope
+### Current Day 3A scope
 
-Scaffolding only — see [CLAUDE.md](./CLAUDE.md) "Current Phase":
-project/package structure, the FastAPI app, `GET /health`, Docker +
-PostgreSQL startup, Alembic wiring (no migrations yet), and CI
-(format/lint/type-check/tests/compose smoke test).
+See [CLAUDE.md](./CLAUDE.md) "Current Phase". Day 2 scaffolding
+(package structure, `GET /health`, Docker + PostgreSQL startup, Alembic
+wiring, CI) is done. Day 3A adds, as pure domain code with no framework
+dependency: the `Normalized*` configuration value objects, the
+`VendorConfigAdapter` port, `AdapterRegistry`, and a representative Cisco
+IOS-XE parser (`meta_rne.adapters.cisco.CiscoAdapter`), covered by 29
+unit tests and two fixtures under `backend/tests/fixtures/configs/cisco/`.
 
-**Not implemented yet** (deliberately, per the approved Day 2 plan):
-configuration parsing, vendor adapters, policy evaluation, incidents,
-telemetry, drift detection, the React dashboard, `compose.e2e.yml`, and
-the Playwright E2E suite. These begin on a later day, against the
-architecture and domain model already documented, tests written first.
+**Not implemented yet** (deliberately, per the approved Day 3A plan):
+FastAPI configuration-ingestion endpoints, SQLAlchemy repositories or
+tables, Alembic business migrations, `Device`/`ConfigurationSnapshot`
+persistence, policy evaluation, incidents, telemetry, the React
+dashboard, `compose.e2e.yml`, and the Playwright E2E suite. These begin
+on a later day, against the architecture and domain model already
+documented, tests written first.
 
 ## Planning Documents
 
@@ -176,22 +181,32 @@ architecture and domain model already documented, tests written first.
 
 ## Current Project Status
 
-**Day 2 — Repository Scaffolding.** Planning (product-spec.md,
-architecture.md, domain-model.md, test-strategy.md, both ADRs) went
-through two consistency correction passes on 2026-07-18 — the first
-resolved cross-document conflicts (positioning, technology stack,
-baseline semantics, incident deduplication, error taxonomy, FR/AC
+**Day 3A — Domain Foundations and Cisco IOS-XE Normalization.** Planning
+(product-spec.md, architecture.md, domain-model.md, test-strategy.md,
+both ADRs) went through two consistency correction passes on 2026-07-18
+— the first resolved cross-document conflicts (positioning, technology
+stack, baseline semantics, incident deduplication, error taxonomy, FR/AC
 numbering); the second was an implementation-readiness pass
 (deterministic normalization, the two-stage vendor-validation boundary,
 atomic incident deduplication via a PostgreSQL partial unique index, the
 exact Slice 1 endpoint list and `POST` response shape, identifier-format
 rules, the Cisco parser-failure contract, log-emission-after-commit
-semantics) — and was approved.
+semantics) — and was approved. Day 2 scaffolded the backend: package
+structure, a FastAPI app with `GET /health`, Docker Compose with
+PostgreSQL, Alembic wiring, pinned dependencies, and CI.
 
-Day 2 scaffolds the backend per [CLAUDE.md](./CLAUDE.md) "Current
-Phase": package structure, a FastAPI app with `GET /health`, Docker
-Compose with PostgreSQL, Alembic wiring, pinned dependencies, and CI. See
-"Getting Started" above for how to run it and "Current Day 2 scope" for
-exactly what is and is not implemented. Slice 1 business logic
-(configuration parsing, policy evaluation, incidents, deduplication) has
-not started.
+Day 3A adds framework-independent domain foundations and a representative
+Cisco IOS-XE adapter (`NormalizedConfiguration` and friends,
+`VendorConfigAdapter`, `AdapterRegistry`, `CiscoAdapter`), test-first,
+with 29 unit tests. A follow-up correctness patch fixed an ACL
+auto-sequence collision bug, made malformed-but-recognized BGP neighbor
+lines return structured `ParseError`s instead of being silently dropped,
+and documented the deferral of `routing.static_routes`. Small,
+explicitly-flagged documentation corrections were approved and applied
+alongside this work: adding `description` to the normalized interface
+model, splitting "invalid interface IP address or subnet mask" into two
+separate parser failures, and adding the two new BGP parser-failure
+categories — all in architecture.md and test-strategy.md. See "Getting
+Started" above and "Current Day 3A scope" for exactly what is and is not
+implemented. Persistence, the ingestion API, policy evaluation, and
+incidents have not started.

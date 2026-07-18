@@ -82,6 +82,7 @@ plus direction — this mirrors `ip access-group <name> in|out`.
 ```
 Interface
 ├── name: string                      # e.g. "GigabitEthernet0/1"
+├── description: string | null        # free-text interface description, if configured
 ├── ip_address: string | null
 ├── mtu: int | null
 ├── admin_state: AdminState           # "up" | "down"
@@ -154,6 +155,15 @@ apart or a year apart produces a structurally identical
 `NormalizedConfiguration` — there is no field on this type that could ever
 differ between those two runs. Ingestion time is `ConfigurationSnapshot.
 submitted_at` (Section 4) and only that.
+
+**`routing.static_routes` is deferred from the Day 3A implementation.**
+The struct above documents the final normalized model; the Day 3A
+`NormalizedRouting` type implements only `bgp_neighbors`. Static-route
+parsing is not implemented this phase, and an empty field with no
+populating logic and no dedicated type would be exactly the "shape
+completeness" abstraction Day 3A was told to avoid — no
+`NormalizedStaticRoute` type exists yet. `static_routes` returns once
+static-route parsing is implemented on a later day.
 
 ---
 

@@ -261,9 +261,13 @@ Tests architecture.md Section 5's contract:
   | `test_cisco_adapter__missing_hostname__returns_parse_error` | Missing `hostname` | `*` |
   | `test_cisco_adapter__malformed_hostname_declaration__returns_parse_error` | Malformed `hostname` | |
   | `test_cisco_adapter__malformed_interface_declaration__returns_parse_error` | Malformed `interface` (includes, but is not limited to, an unterminated block) | |
-  | `test_cisco_adapter__invalid_interface_ip_or_mask__returns_parse_error` | Invalid interface IP/mask | `*` |
+  | `test_cisco_adapter__invalid_interface_ip_address__returns_parse_error` | Invalid interface IP address | `*` |
+  | `test_cisco_adapter__invalid_interface_subnet_mask__returns_parse_error` | Invalid interface subnet mask | `*` |
   | `test_cisco_adapter__invalid_acl_direction__returns_parse_error` | Invalid `ip access-group` direction | |
   | `test_cisco_adapter__acl_assignment_references_undeclared_acl__returns_parse_error` | ACL assignment references an undeclared ACL | |
+  | `test_cisco_adapter__invalid_bgp_neighbor_ip__returns_parse_error` | BGP `neighbor` line with an invalid IPv4 neighbor address | |
+  | `test_cisco_adapter__non_integer_bgp_remote_as__returns_parse_error` | BGP `neighbor` line with a non-integer remote AS | |
+  | `test_cisco_adapter__non_positive_bgp_remote_as__returns_parse_error` | BGP `neighbor` line with a zero or negative remote AS | |
 
   Every case asserts `ParseError`, never an escaped exception or a
   partial `NormalizedConfiguration`.
