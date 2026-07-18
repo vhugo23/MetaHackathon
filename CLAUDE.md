@@ -45,20 +45,24 @@ For each task:
 
 ## Current Phase
 
-We are in the planning and architecture phase.
+**Day 2 — Repository Scaffolding.**
 
-On 2026-07-18, product-spec.md, architecture.md, domain-model.md, and
-test-strategy.md went through two Day 1 correction passes: the first
-resolved cross-document conflicts (positioning, technology stack,
-configuration baseline semantics, incident deduplication, error taxonomy,
-FR/AC numbering); the second was an implementation-readiness pass
-(deterministic normalization, the vendor-validation boundary, atomic
-incident deduplication via a database constraint, the exact Slice 1
-endpoint list and API response shapes, identifier-format rules, the
-Cisco parser-failure contract, log-emission-after-commit semantics). See
-README.md's "Current Project Status" for the full list.
+Day 1 planning (product-spec.md, architecture.md, domain-model.md,
+test-strategy.md, both ADRs) is approved. See README.md's "Current
+Project Status" for the full history of the Day 1 correction passes.
 
-Do not write application code, and do not create dependency manifests
-(`requirements.txt`, `package.json`, etc.), until the corrected product
-specification, architecture, domain model, and test strategy are
-reviewed and approved.
+Application code is allowed **only** for:
+
+- project/package scaffolding (`backend/` src-layout)
+- FastAPI application creation
+- `GET /health`
+- Docker and PostgreSQL startup (Dockerfile, docker-compose.yml)
+- Alembic configuration (no migrations yet — no models exist to migrate)
+- automated tests for the health endpoint
+- formatting, linting, type checking, and CI
+
+**All Slice 1 business logic remains prohibited**: no configuration
+parsing, vendor adapters, policy evaluation, incidents, telemetry, or
+React. Those begin on a later day, against the domain model and
+architecture already documented, with tests written first per the
+Development Rules above.

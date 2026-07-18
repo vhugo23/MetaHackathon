@@ -85,6 +85,85 @@ and architecture.md's closing summary.
 Full rationale: [ADR-0001](./docs/adr/0001-modular-monolith.md) and
 [ADR-0002](./docs/adr/0002-technology-stack-and-persistence.md).
 
+## Getting Started
+
+### Prerequisites
+
+- Python 3.12
+- Docker + Docker Compose v2 (`docker compose`, not the standalone `docker-compose`)
+
+### Local Python setup
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate        # Bash/macOS/Linux
+```
+
+On Windows (PowerShell):
+
+```powershell
+cd backend
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+### Install dependencies
+
+Runtime + dev dependencies, pinned in `backend/pyproject.toml`:
+
+```bash
+pip install -e ".[dev]"
+```
+
+### Run tests
+
+```bash
+pytest
+```
+
+### Lint, format, and type-check
+
+```bash
+ruff format --check .   # formatting check only; drop --check to apply
+ruff check .             # linting
+mypy src                 # static type checking
+```
+
+### Start / stop the stack (Docker Compose)
+
+From the repository root:
+
+```bash
+docker compose up --build -d   # build the API image, start PostgreSQL + API
+docker compose ps               # both services should report "healthy"
+docker compose down -v          # stop and remove containers + the PostgreSQL volume
+```
+
+### Health endpoint
+
+Once the stack is up: [http://localhost:8080/health](http://localhost:8080/health)
+→ `{"status": "ok"}`. This is a **liveness check only** — it does not
+query PostgreSQL. Database connectivity is proven separately, by the
+container startup sequence itself: PostgreSQL must pass its own
+`pg_isready` healthcheck before the API container starts, and
+`alembic upgrade head` must complete successfully before Uvicorn starts
+accepting requests (architecture.md Section 11.2) — if either step fails,
+the API container never becomes healthy.
+
+### Current Day 2 scope
+
+Scaffolding only — see [CLAUDE.md](./CLAUDE.md) "Current Phase":
+project/package structure, the FastAPI app, `GET /health`, Docker +
+PostgreSQL startup, Alembic wiring (no migrations yet), and CI
+(format/lint/type-check/tests/compose smoke test).
+
+**Not implemented yet** (deliberately, per the approved Day 2 plan):
+configuration parsing, vendor adapters, policy evaluation, incidents,
+telemetry, drift detection, the React dashboard, `compose.e2e.yml`, and
+the Playwright E2E suite. These begin on a later day, against the
+architecture and domain model already documented, tests written first.
+
 ## Planning Documents
 
 - [docs/problem-statement.md](./docs/problem-statement.md) — original hackathon brief
@@ -97,17 +176,22 @@ Full rationale: [ADR-0001](./docs/adr/0001-modular-monolith.md) and
 
 ## Current Project Status
 
-**Planning phase.** The documents above went through two consistency
-correction passes on 2026-07-18: the first resolved cross-document
-conflicts (positioning, technology stack, baseline semantics, incident
-deduplication, error taxonomy, FR/AC numbering); the second was an
-implementation-readiness pass (deterministic normalization with no
-`normalized_at` field, the two-stage vendor-validation boundary, atomic
-incident deduplication enforced by a PostgreSQL partial unique index —
-not find-then-save, the exact Slice 1 endpoint list and `POST` response
-shape, concrete identifier-format rules, the full Cisco parser-failure
-contract, and log-emission-after-commit semantics). Per
-[CLAUDE.md](./CLAUDE.md), **no application code exists yet**, and none
-will be written until these corrected documents are reviewed and
-approved. No dependency manifests (`requirements.txt`, `package.json`,
-etc.) exist yet either.
+**Day 2 — Repository Scaffolding.** Planning (product-spec.md,
+architecture.md, domain-model.md, test-strategy.md, both ADRs) went
+through two consistency correction passes on 2026-07-18 — the first
+resolved cross-document conflicts (positioning, technology stack,
+baseline semantics, incident deduplication, error taxonomy, FR/AC
+numbering); the second was an implementation-readiness pass
+(deterministic normalization, the two-stage vendor-validation boundary,
+atomic incident deduplication via a PostgreSQL partial unique index, the
+exact Slice 1 endpoint list and `POST` response shape, identifier-format
+rules, the Cisco parser-failure contract, log-emission-after-commit
+semantics) — and was approved.
+
+Day 2 scaffolds the backend per [CLAUDE.md](./CLAUDE.md) "Current
+Phase": package structure, a FastAPI app with `GET /health`, Docker
+Compose with PostgreSQL, Alembic wiring, pinned dependencies, and CI. See
+"Getting Started" above for how to run it and "Current Day 2 scope" for
+exactly what is and is not implemented. Slice 1 business logic
+(configuration parsing, policy evaluation, incidents, deduplication) has
+not started.
