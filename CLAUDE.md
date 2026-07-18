@@ -45,14 +45,16 @@ For each task:
 
 ## Current Phase
 
-**Day 4A — Incident Domain, Deterministic Fingerprinting, and
-IncidentFactory.**
+**Day 4B1 — Persistence Foundations: Domain Shapes, Serialization, Private
+ORM Models, and the First Slice 1 Migration.**
 
-Day 1 planning, Day 2 scaffolding, Day 3A, and Day 3B are complete and
-approved. See README.md's "Current Project Status" for the full history.
+Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, and Day 4A are complete
+and approved. See README.md's "Current Project Status" for the full
+history. Day 4B is split into three reviewable gates (4B1/4B2/4B3); only
+4B1 is complete.
 
 Application code is currently allowed **only** for the completed Day 3A,
-Day 3B, and Day 4A capabilities:
+Day 3B, Day 4A, and Day 4B1 capabilities:
 
 - normalized configuration domain objects (Day 3A)
 - vendor adapter contracts, `AdapterRegistry`, Cisco IOS-XE parsing and
@@ -62,8 +64,20 @@ Day 3B, and Day 4A capabilities:
 - `IncidentSource`/`IncidentStatus`, `IncidentCandidate`/
   `PolicyViolationIncidentEvidence`, `IncidentFactory.build_candidate`,
   and `compute_fingerprint` (Day 4A)
-- unit tests and representative fixtures
-- documentation corrections explicitly approved for Day 3A/3B/4A (see
+- persisted `Device`, `ConfigurationSnapshot` (+ `compute_raw_text_hash`),
+  and persisted `Incident`/`IncidentUpsertOutcome`/`IncidentUpsertResult`
+  domain objects; `DeviceRepository`/`ConfigurationSnapshotRepository`/
+  `ConfigurationPolicyRepository`/`IncidentRepository`/`UnitOfWork`
+  Protocols (interfaces only — no concrete implementation yet); explicit
+  JSON serialization (`meta_rne.persistence.serialization`) for
+  `NormalizedConfiguration`, `RequiredAclRule` tuples, and
+  `PolicyViolationIncidentEvidence`; private SQLAlchemy declarative ORM
+  models (`meta_rne.persistence.sqlalchemy.models`); the first Alembic
+  migration (Slice 1 tables, the two-stage `devices`/
+  `configuration_snapshots` foreign keys, CHECK constraints, and the
+  partial unique OPEN-fingerprint index) (Day 4B1)
+- unit tests, persistence/migration tests, and representative fixtures
+- documentation corrections explicitly approved for Day 3A/3B/4A/4B1 (see
   below)
 
 **Documentation corrections applied for Day 3A:**
@@ -119,10 +133,34 @@ Day 3B, and Day 4A capabilities:
    `tests/unit/domain/test_incident.py`, a `domain` service per
    domain-model.md §17, not `detection`).
 
-**Still prohibited**: the persisted `Incident` dataclass, `IncidentRepository`/
-`upsert_open_incident`, deduplication itself (fingerprint is computed but
-nothing yet enforces uniqueness), persistence (SQLAlchemy repositories,
-tables, Alembic business migrations), API ingestion endpoints,
-`DriftDetector`, `RuleEngine`, telemetry, and React. Those begin on a
-later day, against the domain model and architecture already documented,
+**Documentation corrections applied for Day 4B1:**
+
+1. `docs/domain-model.md` §2/§14/§18 — `Device.first_seen_at`/`last_seen_at`
+   renamed to `created_at`/`updated_at` (same fields, no behavior change;
+   consistent with every other created/updated pair in this document).
+2. `docs/domain-model.md` §4/§18 — `ConfigurationSnapshot.raw_text`/
+   `raw_source_hash` renamed to `raw_config_text`/`raw_text_hash` (same
+   fields; the hash field's name now states both what it hashes and that
+   it's a hash).
+3. `docs/domain-model.md` §12, `docs/architecture.md` §11.1,
+   `docs/test-strategy.md` §9 — `IncidentRepository.find_open_by_fingerprint`
+   removed from the documented port surface; the atomic
+   `upsert_open_incident` is the only documented dedup mechanism, matching
+   the Day 4B1 binding decision that no separate read-only lookup method is
+   needed to prove it.
+4. `docs/architecture.md` §8/§11.2 — the two remaining `raw_source_hash`/
+   `raw_text` references updated to `raw_text_hash`/`raw_config_text` to
+   match.
+
+**Still prohibited**: concrete `DeviceRepository`/
+`ConfigurationSnapshotRepository`/`ConfigurationPolicyRepository`
+implementations (SQLAlchemy or in-memory), `seed_if_missing`,
+`SnapshotAlreadyExistsError`, the concrete `IncidentRepository`
+(SQLAlchemy or in-memory), the atomic `upsert_open_incident`
+implementation, concurrency tests, the concrete `UnitOfWork`
+(SQLAlchemy or in-memory), `ConfigIngestionService`, API ingestion
+endpoints, `DriftDetector`, `RuleEngine`, telemetry, and React. Repository
+implementations, seeding, and the concrete UnitOfWork are Day 4B2; the
+atomic incident upsert and concurrency tests are Day 4B3. Both begin
+against the domain model, architecture, and ports already documented,
 with tests written first per the Development Rules above.

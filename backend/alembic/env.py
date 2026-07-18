@@ -22,12 +22,13 @@ database_url = os.environ.get("DATABASE_URL")
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 
-# No domain/persistence models exist yet (Day 2 — see CLAUDE.md "Current
-# Phase"), so there is nothing to autogenerate against and no versions in
-# alembic/versions/. `alembic upgrade head` against zero revisions still
-# connects to the database and creates/updates the `alembic_version`
-# table, which is what this phase needs to prove.
-target_metadata = None
+# Day 4B1 adds the first persisted models (persistence/sqlalchemy/models.py).
+# ``target_metadata`` is wired to the private ORM models' MetaData for
+# schema consistency and future ``alembic revision --autogenerate`` support
+# — every migration in this project remains hand-written (architecture.md
+# Section 11.2: never `Base.metadata.create_all()`), this only lets Alembic
+# compare the migrated schema against the ORM models if asked to.
+from meta_rne.persistence.sqlalchemy.models import metadata as target_metadata  # noqa: E402
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:

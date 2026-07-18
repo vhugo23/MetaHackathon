@@ -35,9 +35,9 @@ jobs:
         working-directory: backend
         run: mypy src
 
-      - name: pytest
+      - name: pytest (excludes postgres-marked tests — see the postgres-tests job)
         working-directory: backend
-        run: pytest
+        run: pytest -m "not postgres"
 
       # --- 5: Docker Compose smoke test (proves reproducible startup) ---
 
@@ -93,3 +93,51 @@ jobs:
       - name: Compose smoke test — tear down
         if: always()
         run: docker compose down -v
+
+  postgres-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: meta_rne
+          POSTGRES_PASSWORD: meta_rne
+          POSTGRES_DB: meta_rne
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U meta_rne"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -e ".[dev]"
+
+      - name: Create meta_rne_test and meta_rne_migration_test
+        run: |
+          PGPASSWORD=meta_rne psql -h localhost -U meta_rne -d meta_rne -c "CREATE DATABASE meta_rne_test;"
+          PGPASSWORD=meta_rne psql -h localhost -U meta_rne -d meta_rne -c "CREATE DATABASE meta_rne_migration_test;"
+
+      - name: pytest -m postgres
+        working-directory: backend
+        env:
+          ADMIN_DATABASE_URL: postgresql+psycopg://meta_rne:meta_rne@localhost:5432/meta_rne
+          TEST_DATABASE_URL: postgresql+psycopg://meta_rne:meta_rne@localhost:5432/meta_rne_test
+          MIGRATION_TEST_DATABASE_URL: postgresql+psycopg://meta_rne:meta_rne@localhost:5432/meta_rne_migration_test
+        run: pytest -m postgres
+
+      # GitHub Actions service containers (and their volumes) are removed
+      # automatically when the job finishes — no explicit teardown step
+      # needed, and this job never touches docker-compose.yml's `db`
+      # service or its `pgdata` volume.

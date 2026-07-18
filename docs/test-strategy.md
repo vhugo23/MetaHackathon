@@ -192,8 +192,7 @@ only as fast test doubles for unit/integration tests.
   over both the in-memory and SQLAlchemy `UnitOfWork` implementations
   (domain-model.md Section 12), asserts both satisfy the identical
   contract: `save` then `get_by_id` returns what was saved; `list`
-  reflects all saved items; `find_open_by_fingerprint` finds an exact
-  match and nothing else; `upsert_open_incident` returns the right
+  reflects all saved items; `upsert_open_incident` returns the right
   `IncidentUpsertResult.outcome` for both branches and never leaves two
   `OPEN` rows for one fingerprint, including under concurrency (below);
   `TelemetryRepository.get_recent` returns only samples within the

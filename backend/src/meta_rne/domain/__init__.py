@@ -18,11 +18,15 @@ from meta_rne.domain.config import (
     NormalizedRouting,
     VendorType,
 )
+from meta_rne.domain.device import Device
 from meta_rne.domain.errors import ParseError, ParseErrorCode, UnsupportedVendorError
 from meta_rne.domain.incident import (
+    Incident,
     IncidentCandidate,
     IncidentSource,
     IncidentStatus,
+    IncidentUpsertOutcome,
+    IncidentUpsertResult,
     PolicyViolationIncidentEvidence,
     compute_fingerprint,
 )
@@ -35,6 +39,7 @@ from meta_rne.domain.policy import (
     ViolationType,
 )
 from meta_rne.domain.ports import VendorConfigAdapter
+from meta_rne.domain.snapshot import ConfigurationSnapshot, compute_raw_text_hash
 
 __all__ = [
     "AclAction",
@@ -42,10 +47,15 @@ __all__ = [
     "AclDirection",
     "AdminState",
     "ConfigurationPolicy",
+    "ConfigurationSnapshot",
     "ConfigurationViolation",
+    "Device",
+    "Incident",
     "IncidentCandidate",
     "IncidentSource",
     "IncidentStatus",
+    "IncidentUpsertOutcome",
+    "IncidentUpsertResult",
     "NormalizedAcl",
     "NormalizedAclEntry",
     "NormalizedBgpNeighbor",
@@ -62,4 +72,5 @@ __all__ = [
     "VendorType",
     "ViolationType",
     "compute_fingerprint",
+    "compute_raw_text_hash",
 ]

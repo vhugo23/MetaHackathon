@@ -53,11 +53,19 @@ device.
 Device
 ├── device_id: string                      # identity
 ├── vendor: VendorType                     # from the most recent snapshot
-├── first_seen_at: timestamp
-├── last_seen_at: timestamp
 ├── current_snapshot_id: string | null     # latest ConfigurationSnapshot
 ├── baseline_snapshot_id: string | null    # FIRST successful snapshot; fixed at creation
+├── created_at: timestamp                  # set once, at first successful submission
+├── updated_at: timestamp                  # advances on every later submission
 ```
+
+**Day 4B1 field-name correction:** `created_at`/`updated_at` replace an
+earlier draft's `first_seen_at`/`last_seen_at` — the same "first write /
+most recent write" timestamps, renamed for consistency with the rest of
+this model's persisted entities (`ConfigurationSnapshot.submitted_at`
+aside, every other created/updated pair in this document uses
+`created_at`). No behavior changes: `created_at` is still set exactly once
+and `updated_at` still advances on every later submission.
 
 **`current_snapshot_id` vs. `baseline_snapshot_id`.** Both are set to the
 same value on a device's first successful config submission.
@@ -106,18 +114,24 @@ ConfigurationSnapshot
 ├── snapshot_id: string (uuid)
 ├── device_id: string                       # FK → Device
 ├── vendor: VendorType                      # as declared at submission time
-├── raw_text: string                        # exact CLI text submitted
-├── raw_source_hash: string                 # hash of raw_text
+├── raw_config_text: string                 # exact CLI text submitted
+├── raw_text_hash: string                   # SHA-256 hex digest of raw_config_text
 ├── normalized_config: NormalizedConfiguration   # stored inline, at ingestion time
 ├── submitted_at: timestamp
 ```
+
+**Day 4B1 field-name correction:** `raw_config_text`/`raw_text_hash`
+replace an earlier draft's `raw_text`/`raw_source_hash` — same fields, no
+behavior change, renamed so the hash field's name states both what it
+hashes and that it's a hash (`compute_raw_text_hash(raw_config_text) ==
+raw_text_hash`, a SHA-256 hex digest, never recomputed by a repository).
 
 Immutable after creation (append-only). The raw text is retained
 alongside its normalized result so a future re-parse (e.g., after an
 adapter fix) can replay history without re-collecting data from the
 caller — the MVP does not implement that replay, but the split costs
-nothing and keeps `raw_text → NormalizedConfiguration` a pure, replayable
-function (NFR-02).
+nothing and keeps `raw_config_text → NormalizedConfiguration` a pure,
+replayable function (NFR-02).
 
 **`submitted_at` is the only ingestion timestamp in this entire model**,
 and it is supplied by `application`'s `Clock` port
@@ -592,8 +606,10 @@ ConfigurationPolicyRepository              # read-mostly, seeded
 IncidentRepository
   get_by_id(incident_id) -> Incident | None
   list(filter: { device_id, severity }) -> list[Incident]
-  find_open_by_fingerprint(fingerprint: str) -> Incident | None
-      # read-only lookup, for tests/queries — NOT part of the write path
+  # Day 4B1 binding decision: no find_open_by_fingerprint on this port —
+  # dropped from the public surface. The atomic upsert below is the
+  # deduplication mechanism; a separate read-only lookup method is not
+  # needed to prove it.
   upsert_open_incident(candidate: IncidentCandidate, fingerprint: str, observed_at: timestamp)
       -> IncidentUpsertResult
       # THE only write path for an Incident: atomic create-or-update,
@@ -655,7 +671,7 @@ been corrected to match the verbatim-copy contract actually built.
 
 | Entity | Lifecycle |
 |---|---|
-| `Device` | `first_seen_at` set once. `last_seen_at`/`current_snapshot_id` update on every config submission. `baseline_snapshot_id` set once, on the first submission, and never again. No status field; never removed. |
+| `Device` | `created_at` set once. `updated_at`/`current_snapshot_id` update on every config submission. `baseline_snapshot_id` set once, on the first submission, and never again. No status field; never removed. |
 | `ConfigurationSnapshot` | Created once, immutable, includes its normalized config from creation. Never updated or deleted. |
 | `ConfigurationPolicy` | No status field — a policy has no lifecycle states to be in. It is seeded at startup (idempotently, by `policy_id`, Section 12) and never created, edited, or deleted at runtime in the MVP; its existence in the repository is its only observable state. |
 | `ConfigurationViolation` | Transient: detected → immediately converted into an `Incident` finding within the same request. |
@@ -787,8 +803,8 @@ that could each drift by a few milliseconds.
 {
   "device_id": "spine-01",
   "vendor": "cisco-ios-xe",
-  "first_seen_at": "2026-07-18T10:00:00Z",
-  "last_seen_at": "2026-07-18T10:00:00Z",
+  "created_at": "2026-07-18T10:00:00Z",
+  "updated_at": "2026-07-18T10:00:00Z",
   "current_snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "baseline_snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 }
@@ -818,8 +834,8 @@ that could each drift by a few milliseconds.
   "snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "device_id": "spine-01",
   "vendor": "cisco-ios-xe",
-  "raw_text": "hostname spine-01\ninterface GigabitEthernet0/1\n ip address 10.0.0.1 255.255.255.252\n! (no ip access-group applied)\n",
-  "raw_source_hash": "sha256:...",
+  "raw_config_text": "hostname spine-01\ninterface GigabitEthernet0/1\n ip address 10.0.0.1 255.255.255.252\n! (no ip access-group applied)\n",
+  "raw_text_hash": "9f...64-char-sha256-hex...",
   "normalized_config": {
     "hostname": "spine-01",
     "interfaces": [

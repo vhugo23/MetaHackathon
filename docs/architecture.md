@@ -402,7 +402,7 @@ DriftDetector.compare(baseline: NormalizedConfiguration, current: NormalizedConf
   either input for `DriftDetector` to compare *except* configuration
   content. Two snapshots submitted seconds apart or months apart, with
   identical content, always diff to empty. `ConfigurationSnapshot`
-  metadata (`snapshot_id`, `submitted_at`, `raw_source_hash`) is never
+  metadata (`snapshot_id`, `submitted_at`, `raw_text_hash`) is never
   passed into `compare` at all.
 - Comparison walks each top-level collection (`interfaces`,
   `static_routes`, `bgp_neighbors`, `acls`) keyed by natural identity
@@ -621,7 +621,9 @@ domain defines (interfaces/ports), Python-style snake_case throughout:
     seed_if_missing(policies)            # idempotent by policy_id, see 11.2
   IncidentRepository
     get_by_id(incident_id); list(filter)
-    find_open_by_fingerprint(fingerprint)   # read-only lookup (tests, queries)
+    # Day 4B1 binding decision: no find_open_by_fingerprint on this port —
+    # dropped from the public surface; the atomic upsert below is the
+    # deduplication mechanism.
     upsert_open_incident(candidate, fingerprint, observed_at) -> IncidentUpsertResult
         # THE write path — atomic create-or-update. No plain save(): every
         # write goes through this one operation, so nothing can bypass the
@@ -695,7 +697,7 @@ against both implementations.
 - Repositories are the only components with mutable state; `domain` and
   `detection` are stateless.
 - `ConfigurationSnapshotRepository` is append-only: a snapshot's
-  `raw_text` and `normalized_config` never change after creation.
+  `raw_config_text` and `normalized_config` never change after creation.
 - Test isolation: unit/integration tests use a fresh in-memory `UnitOfWork`
   per test; contract tests use an in-process app with in-memory or a
   per-test Postgres transaction rollback; E2E tests use a real, disposable

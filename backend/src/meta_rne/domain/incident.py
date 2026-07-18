@@ -1,19 +1,26 @@
-"""Incident-candidate domain objects and deterministic fingerprinting.
+"""Incident-candidate and persisted Incident domain objects, plus
+deterministic fingerprinting.
 
 Pure data: no FastAPI, Pydantic, SQLAlchemy, or file I/O. See
 docs/domain-model.md Sections 10-11 and 16-17 for the approved shapes.
-Persisted ``Incident`` is not implemented yet (Day 4A scope, see
-CLAUDE.md "Current Phase").
+The atomic ``upsert_open_incident`` write path and its concrete
+repositories are not implemented yet (Day 4B1 scope — see CLAUDE.md
+"Current Phase"); this module only defines the persisted ``Incident``
+dataclass and the ``IncidentUpsertOutcome``/``IncidentUpsertResult`` values
+that repository will return.
 """
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
 from meta_rne.domain.config import AclDirection
 from meta_rne.domain.policy import Severity, ViolationType
+
+_FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class IncidentSource(StrEnum):
@@ -90,3 +97,50 @@ def compute_fingerprint(
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class Incident:
+    incident_id: str
+    fingerprint: str
+    device_id: str
+    source: IncidentSource
+    rule_ref: str
+    affected_resource: str
+    severity: Severity
+    status: IncidentStatus
+    evidence: PolicyViolationIncidentEvidence
+    recommendation: str
+    created_at: datetime
+    last_seen_at: datetime
+    occurrence_count: int
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.incident_id, "Incident.incident_id")
+        _require_non_empty(self.device_id, "Incident.device_id")
+        _require_non_empty(self.rule_ref, "Incident.rule_ref")
+        _require_non_empty(self.affected_resource, "Incident.affected_resource")
+        _require_non_empty(self.recommendation, "Incident.recommendation")
+        _require_utc(self.created_at, "Incident.created_at")
+        _require_utc(self.last_seen_at, "Incident.last_seen_at")
+
+        if not _FINGERPRINT_PATTERN.fullmatch(self.fingerprint):
+            raise ValueError(
+                "Incident.fingerprint must be a lowercase 64-character hexadecimal "
+                "SHA-256 digest"
+            )
+        if self.occurrence_count < 1:
+            raise ValueError("Incident.occurrence_count must be >= 1")
+        if self.last_seen_at < self.created_at:
+            raise ValueError("Incident.last_seen_at must not precede Incident.created_at")
+
+
+class IncidentUpsertOutcome(StrEnum):
+    CREATED = "CREATED"
+    UPDATED = "UPDATED"
+
+
+@dataclass(frozen=True, slots=True)
+class IncidentUpsertResult:
+    incident: Incident
+    outcome: IncidentUpsertOutcome

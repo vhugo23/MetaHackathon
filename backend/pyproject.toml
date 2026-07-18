@@ -32,6 +32,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=meta_rne --cov-report=term-missing"
+markers = [
+    "postgres: requires a running PostgreSQL instance (see tests/conftest.py); run with `pytest -m postgres` separately from `pytest -m \"not postgres\"`",
+]
 
 [tool.ruff]
 line-length = 100

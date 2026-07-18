@@ -6,9 +6,12 @@ import pytest
 
 from meta_rne.domain.config import AclDirection
 from meta_rne.domain.incident import (
+    Incident,
     IncidentCandidate,
     IncidentSource,
     IncidentStatus,
+    IncidentUpsertOutcome,
+    IncidentUpsertResult,
     PolicyViolationIncidentEvidence,
     compute_fingerprint,
 )
@@ -186,3 +189,84 @@ def test_compute_fingerprint__whitespace_only_rule_ref__raises_value_error() -> 
 def test_compute_fingerprint__empty_affected_resource__raises_value_error() -> None:
     with pytest.raises(ValueError):
         compute_fingerprint(DEVICE_ID, SOURCE, RULE_REF, "")
+
+
+# --- Persisted Incident (Day 4B1) -------------------------------------------
+
+_FINGERPRINT = compute_fingerprint(DEVICE_ID, SOURCE, RULE_REF, AFFECTED_RESOURCE)
+
+
+def _incident(**overrides: object) -> Incident:
+    defaults: dict[str, object] = {
+        "incident_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        "fingerprint": _FINGERPRINT,
+        "device_id": DEVICE_ID,
+        "source": SOURCE,
+        "rule_ref": RULE_REF,
+        "affected_resource": AFFECTED_RESOURCE,
+        "severity": Severity.MEDIUM,
+        "status": IncidentStatus.OPEN,
+        "evidence": _evidence(),
+        "recommendation": "Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1",
+        "created_at": OBSERVED_AT,
+        "last_seen_at": OBSERVED_AT,
+        "occurrence_count": 1,
+    }
+    defaults.update(overrides)
+    return Incident(**defaults)  # type: ignore[arg-type]
+
+
+def test_incident__valid_fields__constructs_successfully() -> None:
+    incident = _incident()
+
+    assert incident.fingerprint == _FINGERPRINT
+    assert incident.occurrence_count == 1
+    assert incident.status is IncidentStatus.OPEN
+
+
+def test_incident__empty_incident_id__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="incident_id"):
+        _incident(incident_id="")
+
+
+def test_incident__fingerprint_wrong_length__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="fingerprint"):
+        _incident(fingerprint="ab" * 10)
+
+
+def test_incident__uppercase_fingerprint__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="fingerprint"):
+        _incident(fingerprint=_FINGERPRINT.upper())
+
+
+def test_incident__non_hex_fingerprint__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="fingerprint"):
+        _incident(fingerprint="g" * 64)
+
+
+def test_incident__occurrence_count_below_one__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="occurrence_count"):
+        _incident(occurrence_count=0)
+
+
+def test_incident__last_seen_at_before_created_at__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="last_seen_at"):
+        _incident(created_at=OBSERVED_AT, last_seen_at=OBSERVED_AT - timedelta(seconds=1))
+
+
+def test_incident__naive_created_at__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="created_at"):
+        _incident(created_at=datetime(2026, 7, 18, 10, 0, 0))
+
+
+def test_incident_upsert_outcome__has_approved_members_only() -> None:
+    assert {member.value for member in IncidentUpsertOutcome} == {"CREATED", "UPDATED"}
+
+
+def test_incident_upsert_result__wraps_incident_and_outcome() -> None:
+    incident = _incident()
+
+    result = IncidentUpsertResult(incident=incident, outcome=IncidentUpsertOutcome.CREATED)
+
+    assert result.incident is incident
+    assert result.outcome is IncidentUpsertOutcome.CREATED
