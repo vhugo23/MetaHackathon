@@ -177,23 +177,37 @@ required ACL" fire on a device's very first submission, unlike drift
 ```
 ConfigurationPolicy
 ├── policy_id: string      # stable, non-empty, caller/fixture-assigned — NOT a
-│                           # generated UUID; e.g. "policy-acl-external-in"
+│                           # generated UUID; e.g. "policy-acl-external-in";
+│                           # this is the value copied into
+│                           # ConfigurationViolation.rule_ref (Section 7)
 │                           # (see Section 16's identifier-format rules)
 ├── applies_to: string                # a specific device_id, or "*" for all devices
 ├── required_acls: [RequiredAclRule]
-│     └── RequiredAclRule: { acl_name: string, interface_name: string, direction: AclDirection }
+│     └── RequiredAclRule: { acl_name: string, interface_name: string,
+│                             direction: AclDirection, severity: Severity,
+│                             recommendation: string }
 ├── created_at: timestamp
 ```
 
-A `RequiredAclRule` is satisfied only by an exact match: the named ACL
-exists in `acls` **and** is assigned to the named interface in the named
-direction. "ACL exists but isn't assigned where required" and "ACL
-doesn't exist at all" are the same gap from an operator's perspective and
-produce the same violation type.
+A `ConfigurationPolicy` represents a required-inbound-ACL rule set: each
+`RequiredAclRule` names one ACL that must be assigned, inbound or
+outbound, to one interface. A rule is satisfied only by an exact match:
+the named ACL exists in `acls` **and** is assigned to the named interface
+in the named direction. `severity`/`recommendation` are fixed at
+authoring time (fixture data) and copied verbatim into any
+`ConfigurationViolation` the rule produces (Section 7) — `PolicyEvaluator`
+does not compute or look them up.
 
 Policies are seeded fixture data (A-08); there is no authoring endpoint.
 When both a device-specific and a `"*"` policy apply to the same device,
-the union of both policies' rules is evaluated.
+the union of both policies' rules is evaluated. **Day 3B's
+`PolicyEvaluator` implements only exact `applies_to == device_id`
+matching** — the Slice 1 policy applies only to `spine-01`, and `"*"`
+wildcard resolution is not implemented this phase (a policy whose
+`applies_to` is `"*"` simply matches no device yet). This mirrors Day
+3A's precedent of implementing a documented shape's minimum slice first
+(e.g. `NormalizedRouting.static_routes`, Section 5) rather than building
+unused matching logic ahead of a test that needs it.
 
 ---
 
@@ -207,13 +221,51 @@ drift diff entry.
 ConfigurationViolation
 ├── device_id: string
 ├── source_snapshot_id: string         # the ConfigurationSnapshot that was evaluated
-├── policy_id: string                 # FK → ConfigurationPolicy
-├── violation_type: ViolationType      # "MISSING_REQUIRED_ACL" (MVP's only value)
-├── acl_name: string
-├── interface_name: string
-├── direction: AclDirection
+├── rule_ref: string                  # copied from the matched RequiredAclRule's
+│                                       # owning ConfigurationPolicy.policy_id — the
+│                                       # same canonical name Incident.rule_ref uses
+│                                       # (Section 10); NOT named policy_id here, to
+│                                       # avoid two names for one concept
+├── violation_type: ViolationType      # "MISSING_REQUIRED_ACL" | "TARGET_INTERFACE_MISSING"
+├── affected_resource: string          # interface-centered, deterministic:
+│                                       # "interface:{interface_name}:acl_in" (inbound) or
+│                                       # "interface:{interface_name}:acl_out" (outbound) —
+│                                       # e.g. "interface:GigabitEthernet0/1:acl_in";
+│                                       # the expected ACL name is in `evidence`, not
+│                                       # repeated here. This is a distinct format from
+│                                       # Incident.affected_resource's existing
+│                                       # "acl:{name}:{interface}:{direction}" convention
+│                                       # (Section 11) — how (or whether) IncidentFactory
+│                                       # maps one to the other is undecided, deferred to
+│                                       # whichever day implements IncidentFactory
+├── severity: Severity                 # copied from the matched RequiredAclRule
+├── evidence: AclAssignmentEvidence     # Section 16 — structured, not an untyped dict
+├── recommendation: string             # copied from the matched RequiredAclRule
 ├── detected_at: timestamp
 ```
+
+```
+AclAssignmentEvidence
+├── expected_acl_name: string
+├── actual_acl_name: string | null     # null when no ACL is assigned in that
+│                                       # direction at all (or the interface
+│                                       # itself does not exist)
+├── interface_name: string
+├── direction: AclDirection
+```
+
+**`violation_type` distinguishes two cases, both still MVP-scoped to "a
+required inbound/outbound ACL assignment isn't as declared":**
+
+- `TARGET_INTERFACE_MISSING` — the rule's `interface_name` does not exist
+  in `config.interfaces` at all. `evidence.actual_acl_name = null`.
+- `MISSING_REQUIRED_ACL` — the interface exists but the assignment is
+  wrong: the ACL is entirely absent (`evidence.actual_acl_name = null`),
+  present but unassigned in that direction (`evidence.actual_acl_name =
+  null`), or a *different* ACL is assigned in that direction
+  (`evidence.actual_acl_name` = that ACL's name). A missing interface is
+  never silently treated as satisfying the rule — it always produces
+  `TARGET_INTERFACE_MISSING`, never a false "no violation."
 
 Produced by:
 
@@ -233,13 +285,23 @@ plain arguments — the evaluator never fetches or reads any of them
 itself, which is what keeps it framework-independent and deterministic
 (NFR-02/NFR-03: same five inputs in, same violations out, no hidden
 repository or clock access). Every violation carries the given
-`source_snapshot_id` (so `IncidentFactory.build_candidate`, Section 10/11,
-can populate `evidence.source_snapshot_id` directly) and
-`detected_at = observed_at` — never a value the evaluator generated.
+`source_snapshot_id` and `detected_at = observed_at` — never a value the
+evaluator generated. No violation carries a generated ID of its own
+(Section 16): it is a transient value, not a persisted entity.
 
 **Not persisted independently** — it is a transient value passed straight
 to `IncidentFactory` within the same request. Zero violations → zero
-incidents from this path.
+incidents from this path. `IncidentFactory.build_candidate` for a
+`POLICY_VIOLATION` finding copies `rule_ref`, `severity`, `evidence`, and
+`recommendation` directly from the violation — it does not recompute them
+(Section 17's "single place that maps finding type to severity +
+recommendation" narrows to *anomaly and drift* findings for those three
+fields; a policy violation already carries them). `affected_resource` is
+the one field `IncidentFactory` still derives itself, since
+`ConfigurationViolation.affected_resource` uses a different, evaluator-
+level format (interface-centered, above) than `Incident.affected_resource`
+(Section 11's `"acl:{name}:{interface}:{direction}"` convention) — that
+derivation is unspecified until `IncidentFactory` is implemented.
 
 ---
 
@@ -587,7 +649,7 @@ VendorType         := "cisco-ios-xe" | "arista-eos"
 AdminState          := "up" | "down"
 AclAction           := "permit" | "deny"
 AclDirection        := "in" | "out"
-ViolationType       := "MISSING_REQUIRED_ACL"                  # MVP's only value
+ViolationType       := "MISSING_REQUIRED_ACL" | "TARGET_INTERFACE_MISSING"  # Section 7
 IncidentSource      := "POLICY_VIOLATION" | "DRIFT" | "ANOMALY"
 Severity            := "Critical" | "High" | "Medium" | "Low"
 IncidentStatus      := "OPEN" | "ACKNOWLEDGED" | "RESOLVED"    # only "OPEN" is reachable in the MVP
@@ -630,7 +692,8 @@ deliberately **not** a UUID: it is a stable, human-readable name chosen
 by whoever writes the seed fixture (Section 6), so that seeding is
 idempotent by identity (`seed_if_missing`, Section 12) — a UUID
 regenerated on every app restart would defeat that idempotency entirely.
-`Recommendation` (Section 13) is the model's one true value object.
+`Recommendation` (Section 13) and `AclAssignmentEvidence` (Section 7) are
+this model's value objects: no identity, no repository, always embedded.
 
 ---
 
@@ -690,7 +753,13 @@ that could each drift by a few milliseconds.
   "policy_id": "policy-acl-external-in",
   "applies_to": "spine-01",
   "required_acls": [
-    { "acl_name": "ACL-EXTERNAL-IN", "interface_name": "GigabitEthernet0/1", "direction": "in" }
+    {
+      "acl_name": "ACL-EXTERNAL-IN",
+      "interface_name": "GigabitEthernet0/1",
+      "direction": "in",
+      "severity": "Medium",
+      "recommendation": "Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1"
+    }
   ],
   "created_at": "2026-07-18T09:00:00Z"
 }
@@ -725,11 +794,17 @@ config.
 {
   "device_id": "spine-01",
   "source_snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "policy_id": "policy-acl-external-in",
+  "rule_ref": "policy-acl-external-in",
   "violation_type": "MISSING_REQUIRED_ACL",
-  "acl_name": "ACL-EXTERNAL-IN",
-  "interface_name": "GigabitEthernet0/1",
-  "direction": "in",
+  "affected_resource": "acl:ACL-EXTERNAL-IN:GigabitEthernet0/1:in",
+  "severity": "Medium",
+  "evidence": {
+    "expected_acl_name": "ACL-EXTERNAL-IN",
+    "actual_acl_name": null,
+    "interface_name": "GigabitEthernet0/1",
+    "direction": "in"
+  },
+  "recommendation": "Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1",
   "detected_at": "2026-07-18T10:00:00Z"
 }
 ```

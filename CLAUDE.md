@@ -45,19 +45,21 @@ For each task:
 
 ## Current Phase
 
-**Day 3A — Domain Foundations and Cisco IOS-XE Normalization.**
+**Day 3B — Configuration Policy Domain and Deterministic Evaluation.**
 
-Day 1 planning and Day 2 scaffolding are complete and approved. See
-README.md's "Current Project Status" for the full history.
+Day 1 planning, Day 2 scaffolding, and Day 3A are complete and approved.
+See README.md's "Current Project Status" for the full history.
 
-Application code is currently allowed **only** for:
+Application code is currently allowed **only** for the completed Day 3A
+and Day 3B capabilities:
 
-- normalized configuration domain objects
-- vendor adapter contracts
-- `AdapterRegistry`
-- Cisco IOS-XE parsing and normalization
+- normalized configuration domain objects (Day 3A)
+- vendor adapter contracts, `AdapterRegistry`, Cisco IOS-XE parsing and
+  normalization (Day 3A)
+- `ConfigurationPolicy`/`RequiredAclRule`, `ConfigurationViolation`/
+  `AclAssignmentEvidence`, and the deterministic `PolicyEvaluator` (Day 3B)
 - unit tests and representative fixtures
-- documentation corrections explicitly approved for Day 3A (see below)
+- documentation corrections explicitly approved for Day 3A/3B (see below)
 
 **Documentation corrections applied for Day 3A:**
 
@@ -67,8 +69,25 @@ Application code is currently allowed **only** for:
    interface IP address or subnet mask" into two separate parser
    failures (address vs. mask).
 
-**Still prohibited**: persistence (SQLAlchemy repositories, tables,
-Alembic business migrations), API ingestion endpoints, policy
-evaluation, incidents, telemetry, and React. Those begin on a later
-day, against the domain model and architecture already documented,
-with tests written first per the Development Rules above.
+**Documentation corrections applied for Day 3B:**
+
+1. `docs/domain-model.md` §6/§7/§16/§18 — `RequiredAclRule` gained
+   `severity`/`recommendation`; `ConfigurationViolation` restructured to
+   `rule_ref`/`affected_resource`/`severity`/`evidence`/`recommendation`
+   with a new `AclAssignmentEvidence` value object; `ViolationType` split
+   into `MISSING_REQUIRED_ACL` and `TARGET_INTERFACE_MISSING`; `"*"`
+   wildcard `applies_to` matching scoped out of Day 3B (exact
+   `applies_to == device_id` only).
+2. `docs/architecture.md` §7/§9 — evaluator narrative updated to match
+   (no `FixedClock`, deterministic violation ordering, computed vs.
+   copied violation fields); one stale `policy_id` reference corrected
+   to `rule_ref`.
+3. `docs/test-strategy.md` §12/§19 — policy-evaluator sub-case list and
+   one test name updated to match.
+
+**Still prohibited**: `IncidentFactory`/`Incident`, fingerprinting and
+deduplication, persistence (SQLAlchemy repositories, tables, Alembic
+business migrations), API ingestion endpoints, `DriftDetector`,
+`RuleEngine`, telemetry, and React. Those begin on a later day, against
+the domain model and architecture already documented, with tests written
+first per the Development Rules above.

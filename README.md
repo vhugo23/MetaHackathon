@@ -151,20 +151,43 @@ container startup sequence itself: PostgreSQL must pass its own
 accepting requests (architecture.md Section 11.2) — if either step fails,
 the API container never becomes healthy.
 
-### Current Day 3A scope
+### Current Day 3B scope
 
 See [CLAUDE.md](./CLAUDE.md) "Current Phase". Day 2 scaffolding
 (package structure, `GET /health`, Docker + PostgreSQL startup, Alembic
-wiring, CI) is done. Day 3A adds, as pure domain code with no framework
+wiring, CI) is done. Day 3A added, as pure domain code with no framework
 dependency: the `Normalized*` configuration value objects, the
 `VendorConfigAdapter` port, `AdapterRegistry`, and a representative Cisco
-IOS-XE parser (`meta_rne.adapters.cisco.CiscoAdapter`), covered by 29
-unit tests and two fixtures under `backend/tests/fixtures/configs/cisco/`.
+IOS-XE parser (`meta_rne.adapters.cisco.CiscoAdapter`).
 
-**Not implemented yet** (deliberately, per the approved Day 3A plan):
-FastAPI configuration-ingestion endpoints, SQLAlchemy repositories or
-tables, Alembic business migrations, `Device`/`ConfigurationSnapshot`
-persistence, policy evaluation, incidents, telemetry, the React
+Day 3B adds, also framework-independent (FR-03, NFR-02/NFR-03):
+
+- `ConfigurationPolicy` and `RequiredAclRule` — a seeded, fixture-data
+  representation of a required inbound/outbound ACL assignment, each
+  rule carrying its own `severity` and `recommendation`.
+- `ConfigurationViolation` and structured ACL evidence
+  (`AclAssignmentEvidence`) — the evaluator's output shape, distinguishing
+  a missing target interface (`TARGET_INTERFACE_MISSING`) from a
+  missing/unassigned/different required ACL (`MISSING_REQUIRED_ACL`),
+  never silently treating a missing interface as a satisfied policy.
+- A deterministic `PolicyEvaluator.evaluate(device_id, source_snapshot_id,
+  observed_at, config, policies) -> tuple[ConfigurationViolation, ...]` —
+  pure function, no clock/repository/logger access, returns violations in
+  `policies`-then-`required_acls` tuple order.
+- **Exact device applicability**: `policy.applies_to == device_id` only —
+  `"*"` wildcard matching is not implemented this phase.
+- **UTC timestamp validation**: `ConfigurationPolicy.created_at` and
+  `PolicyEvaluator`'s `observed_at` must be timezone-aware UTC; naive or
+  non-UTC-offset values raise `ValueError`.
+
+Backend test count: **60** (`pytest`, 100% line coverage on
+`domain/policy.py` and `detection/policy_evaluator.py`).
+
+**Not implemented yet** (deliberately, per the approved Day 3B plan):
+`IncidentFactory`/`Incident`, fingerprinting/deduplication, FastAPI
+configuration-ingestion endpoints, SQLAlchemy repositories or tables,
+Alembic business migrations, `Device`/`ConfigurationSnapshot`
+persistence, `DriftDetector`, `RuleEngine`, telemetry, the React
 dashboard, `compose.e2e.yml`, and the Playwright E2E suite. These begin
 on a later day, against the architecture and domain model already
 documented, tests written first.

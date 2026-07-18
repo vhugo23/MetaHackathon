@@ -333,23 +333,51 @@ PolicyEvaluator.evaluate(
 `device_id`, `source_snapshot_id`, and `observed_at` (Section 4.1) are
 passed in as plain arguments by the caller (`ConfigIngestionService`,
 Section 4), which already has all three — `PolicyEvaluator` never looks
-any of them up, and never reads a clock itself. This is what keeps it
+any of them up, and never reads a clock itself, and no `Clock`/
+`FixedClock` port is needed inside `detection` at all — `observed_at` is
+already a plain value by the time it arrives. This is what keeps it
 framework-independent and deterministic (NFR-02/NFR-03): all context is
 explicit input. Every `ConfigurationViolation` produced carries
-`source_snapshot_id` (so `IncidentFactory.build_candidate`, Section 9,
-can populate `evidence.source_snapshot_id` with no repository access of
-its own) and `detected_at = observed_at` (never a value the evaluator
-generated itself).
+`source_snapshot_id` and `detected_at = observed_at` (never a value the
+evaluator generated itself), and no violation carries a generated ID
+(domain-model.md Section 7).
 
-A `RequiredAclRule` (`acl_name`, `interface_name`, `direction`) is
-satisfied only if that exact ACL name is present in `config.acls` **and**
-assigned to that interface's `acl_in`/`acl_out` in that direction. Any
-other state — the ACL entirely absent, present but unassigned, or
-assigned to the wrong interface/direction — produces one
-`ConfigurationViolation` with `violation_type = "MISSING_REQUIRED_ACL"`.
+A `RequiredAclRule` (`acl_name`, `interface_name`, `direction`, `severity`,
+`recommendation` — domain-model.md Section 6) is satisfied only if that
+exact ACL name is present in `config.acls` **and** assigned to that
+interface's `acl_in`/`acl_out` in that direction. Two distinct outcomes,
+both still required-ACL findings, are kept observable rather than
+collapsed into one silent case (domain-model.md Section 7):
 
-No matching policy → zero violations. `PolicyEvaluator` is pure
-domain/detection logic: plain inputs in, a list out, no I/O.
+- the target interface itself does not exist →
+  `violation_type = "TARGET_INTERFACE_MISSING"` (never treated as
+  satisfying the rule);
+- the interface exists but the assignment is wrong — ACL entirely absent,
+  present but unassigned, or a *different* ACL assigned in that direction
+  → `violation_type = "MISSING_REQUIRED_ACL"`, with
+  `evidence.actual_acl_name` set to that other ACL's name, or `null` if
+  nothing is assigned.
+
+`rule_ref`, `severity`, `evidence` (`AclAssignmentEvidence`), and
+`recommendation` are copied directly from the matched `RequiredAclRule`
+and its owning policy — `PolicyEvaluator` computes none of these values
+itself beyond selecting which rule matched. `affected_resource` is
+computed, not copied: `"interface:{interface_name}:acl_in"` or
+`"interface:{interface_name}:acl_out"` depending on `rule.direction`
+(domain-model.md Section 7) — a distinct, evaluator-level format from
+`Incident.affected_resource`'s `"acl:{name}:{interface}:{direction}"`
+(Section 11), since the violation identifies *which assignment slot* is
+wrong while the eventual incident additionally names which ACL was
+expected.
+
+No matching policy → zero violations. **Day 3B matches `applies_to`
+against `device_id` by exact string equality only** — `"*"` wildcard
+resolution (this section's opening diagram) is not implemented this
+phase; the Slice 1 policy applies only to `spine-01`. Violations are
+returned in a deterministic order: `policies` tuple order, then each
+policy's `required_acls` tuple order — never re-sorted or
+set-deduplicated. `PolicyEvaluator` is pure domain/detection logic: plain
+inputs in, a tuple out, no I/O.
 
 ---
 
@@ -399,7 +427,7 @@ IncidentFactory.build_candidate(finding) -> IncidentCandidate:
     { device_id, source, rule_ref, affected_resource, severity, evidence, recommendation }
     # evidence.source_snapshot_id copied straight from finding.source_snapshot_id
 
-    rule_ref:            POLICY_VIOLATION → policy_id
+    rule_ref:            POLICY_VIOLATION → copied from ConfigurationViolation.rule_ref
                           ANOMALY         → rule_id (e.g. "RULE-CPU-HIGH")
                           DRIFT           → field path (e.g. "acls.removed")
     affected_resource:   POLICY_VIOLATION → "acl:{acl_name}:{interface_name}:{direction}"

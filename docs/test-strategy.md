@@ -300,19 +300,30 @@ Tests architecture.md Section 5's contract:
 - **`PolicyEvaluator` — satisfied rule → no violation.** A config with the
   required ACL correctly assigned produces an empty violation list
   (AC-03; Section 19).
-- **`PolicyEvaluator` — unsatisfied rule → exactly one violation.** Three
-  sub-cases, each asserting one `MISSING_REQUIRED_ACL` violation with the
-  correct `acl_name`/`interface_name`/`direction`: ACL entirely absent;
-  ACL present but unassigned; ACL assigned to the wrong interface/direction.
-  The first is AC-04 / Section 19's core test.
+- **`PolicyEvaluator` — unsatisfied rule → exactly one violation.** Four
+  sub-cases, each asserting one violation with the correct `rule_ref`,
+  `affected_resource`, `severity`, `evidence`
+  (`AclAssignmentEvidence.expected_acl_name`/`actual_acl_name`/
+  `interface_name`/`direction`), and `recommendation`
+  (domain-model.md Section 7): ACL entirely absent
+  (`MISSING_REQUIRED_ACL`, `actual_acl_name = null`); ACL present but
+  unassigned in that direction (`MISSING_REQUIRED_ACL`,
+  `actual_acl_name = null`); a different ACL assigned in that direction
+  (`MISSING_REQUIRED_ACL`, `actual_acl_name` = that ACL's name); the
+  target interface absent entirely (`TARGET_INTERFACE_MISSING`,
+  `actual_acl_name = null`) — a missing interface must never be silently
+  treated as satisfying the rule. The first is AC-04 / Section 19's core
+  test.
 - **`PolicyEvaluator` — no matching policy → no violation** regardless of
   config content.
 - **Explicit time, not the system clock** —
-  `test_policy_evaluator__fixed_observed_at__populates_violation_detected_at`:
-  calling `evaluate` with a `FixedClock`-supplied `observed_at` asserts
-  every returned `ConfigurationViolation.detected_at` equals that exact
-  value — proving the evaluator never reads a clock itself
-  (architecture.md Section 4.1).
+  `test_policy_evaluator__given_observed_at__populates_violation_detected_at`:
+  calling `evaluate` with an explicit `observed_at` argument asserts every
+  returned `ConfigurationViolation.detected_at` equals that exact value —
+  proving the evaluator never reads a clock itself (architecture.md
+  Section 4.1). No `FixedClock` is involved: `PolicyEvaluator` takes
+  `observed_at` as a plain argument, so the test supplies a literal
+  `datetime` directly.
 - **`DriftDetector` — baseline == current → empty report** (AC-06, later
   slice) — first submission's `Device.baseline_snapshot_id ==
   current_snapshot_id`, so `compare` is called with identical values.
@@ -539,7 +550,7 @@ alongside them (Section 14).
 | 17 | Structured invalid-input response — missing `vendor` or empty body returns 422 / `SCHEMA_VALIDATION_ERROR` | Contract | none | `tests/contract/api/test_devices_api.py` |
 | 18 | Unexpected exception returns 500 / `INTERNAL_ERROR`, never a raw stack trace | Contract | exception-raising test double | `tests/contract/api/test_devices_api.py` |
 | 19 | `test_compute_fingerprint__delimiter_and_unicode_values__remain_unambiguous` (AC-11) | Unit | none | `tests/unit/detection/test_incident_factory.py` |
-| 20 | `test_policy_evaluator__fixed_observed_at__populates_violation_detected_at` | Unit | none | `tests/unit/detection/test_policy_evaluator.py` |
+| 20 | `test_policy_evaluator__given_observed_at__populates_violation_detected_at` | Unit | none | `tests/unit/detection/test_policy_evaluator.py` |
 
 **E2E** (one Playwright test, Section 7): start `api` + `db` from
 `compose.e2e.yml`, wait for both to report healthy, run migrations and

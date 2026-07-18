@@ -19,12 +19,23 @@ from meta_rne.domain.config import (
     VendorType,
 )
 from meta_rne.domain.errors import ParseError, ParseErrorCode, UnsupportedVendorError
+from meta_rne.domain.policy import (
+    AclAssignmentEvidence,
+    ConfigurationPolicy,
+    ConfigurationViolation,
+    RequiredAclRule,
+    Severity,
+    ViolationType,
+)
 from meta_rne.domain.ports import VendorConfigAdapter
 
 __all__ = [
     "AclAction",
+    "AclAssignmentEvidence",
     "AclDirection",
     "AdminState",
+    "ConfigurationPolicy",
+    "ConfigurationViolation",
     "NormalizedAcl",
     "NormalizedAclEntry",
     "NormalizedBgpNeighbor",
@@ -33,7 +44,10 @@ __all__ = [
     "NormalizedRouting",
     "ParseError",
     "ParseErrorCode",
+    "RequiredAclRule",
+    "Severity",
     "UnsupportedVendorError",
     "VendorConfigAdapter",
     "VendorType",
+    "ViolationType",
 ]
