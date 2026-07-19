@@ -584,24 +584,31 @@ with the rest of this stack (ADR-0002):
 
 ```
 DeviceRepository
-  save(device) -> None
   get_by_id(device_id) -> Device | None
-  list() -> list[Device]
+  save(device) -> None
+      # upsert by device_id; every rejected lifecycle transition (vendor
+      # change, created_at change, updated_at regression, replacing a set
+      # baseline_snapshot_id, clearing a set current_snapshot_id, or a
+      # non-null snapshot reference that doesn't exist) raises
+      # DeviceConflictError and leaves the stored Device unchanged
+      # (Day 4B2 binding decision — no list(), no silent preservation)
 
 ConfigurationSnapshotRepository            # append-only
-  save(snapshot) -> None                   # includes normalized_config inline
   get_by_id(snapshot_id) -> ConfigurationSnapshot | None
-  get_current_for_device(device_id) -> ConfigurationSnapshot | None
-  get_baseline_for_device(device_id) -> ConfigurationSnapshot | None
+  add(snapshot) -> None                    # includes normalized_config inline
+      # duplicate snapshot_id -> SnapshotAlreadyExistsError;
+      # unknown device_id -> ReferencedDeviceNotFoundError (Day 4B2 —
+      # no get_current_for_device/get_baseline_for_device on this port)
 
 ConfigurationPolicyRepository              # read-mostly, seeded
-  get_for_device(device_id) -> list[ConfigurationPolicy]   # matches device_id and "*"
-  list() -> list[ConfigurationPolicy]
-  seed_if_missing(policies: list[ConfigurationPolicy]) -> None
-      # idempotent upsert by policy_id, run only after migrations
-      # complete (architecture.md Section 11.2) — restarting the app, or
-      # starting a fresh E2E database (Section 15.1), never creates
-      # duplicate policy rows
+  get_applicable_to_device(device_id) -> tuple[ConfigurationPolicy, ...]
+      # exact applies_to == device_id matching only — no "*" wildcard
+      # behavior (Day 3B/Day 4B2; no list())
+  seed_if_missing(policies: tuple[ConfigurationPolicy, ...]) -> None
+      # one call is one all-or-nothing operation; semantic equivalence
+      # (applies_to + required_acls only, not created_at) is a no-op,
+      # differing semantic content raises PolicySeedConflictError
+      # (Day 4B2 binding decision)
 
 IncidentRepository
   get_by_id(incident_id) -> Incident | None

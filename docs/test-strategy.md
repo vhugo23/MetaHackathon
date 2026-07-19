@@ -189,10 +189,18 @@ layer; in-memory implementations of the same repository interfaces exist
 only as fast test doubles for unit/integration tests.
 
 - **Repository conformance tests.** One shared test suite, parameterized
-  over both the in-memory and SQLAlchemy `UnitOfWork` implementations
-  (domain-model.md Section 12), asserts both satisfy the identical
-  contract: `save` then `get_by_id` returns what was saved; `list`
-  reflects all saved items; `upsert_open_incident` returns the right
+  over both the in-memory and SQLAlchemy implementations (domain-model.md
+  Section 12), asserts both satisfy the identical contract: `DeviceRepository.
+  save` then `get_by_id` returns what was saved, and every rejected
+  lifecycle transition raises `DeviceConflictError`, unchanged
+  (Day 4B2); `ConfigurationSnapshotRepository.add` then `get_by_id` returns
+  what was added, a duplicate `snapshot_id` raises
+  `SnapshotAlreadyExistsError`, and an unknown `device_id` raises
+  `ReferencedDeviceNotFoundError`; `ConfigurationPolicyRepository.
+  get_applicable_to_device` reflects all seeded, applicable policies, and
+  `seed_if_missing` is a no-op for semantically identical content
+  (ignoring `created_at`) and raises `PolicySeedConflictError` otherwise,
+  all-or-nothing per call; `upsert_open_incident` returns the right
   `IncidentUpsertResult.outcome` for both branches and never leaves two
   `OPEN` rows for one fingerprint, including under concurrency (below);
   `TelemetryRepository.get_recent` returns only samples within the

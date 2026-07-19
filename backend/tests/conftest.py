@@ -1,10 +1,18 @@
 import os
+from collections.abc import Generator
+from pathlib import Path
 
 import psycopg
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from meta_rne.api.app import app
+
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture()
@@ -92,3 +100,41 @@ def reset_migration_database(
             cur.execute("DROP SCHEMA public CASCADE")
             cur.execute("CREATE SCHEMA public")
     return postgres_migration_database_url
+
+
+# --- Repository test fixtures (Day 4B2) ---------------------------------
+#
+# meta_rne_test is migrated once per test session (never per test — that
+# would be wasteful and is not what "migrate once" means here), then every
+# repository test gets its own connection + outer transaction + Session,
+# unconditionally rolled back and closed in teardown. Repository-internal
+# SAVEPOINTs (persistence/sqlalchemy/*_repository.py) nest inside this
+# outer transaction without disturbing it. This never touches
+# meta_rne_migration_test, which is reserved for test_migrations.py.
+
+
+@pytest.fixture(scope="session")
+def _meta_rne_test_migrated(
+    _postgres_test_databases_created: None, postgres_test_database_url: str
+) -> None:
+    config = Config(str(_BACKEND_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(_BACKEND_ROOT / "alembic"))
+    config.set_main_option("sqlalchemy.url", postgres_test_database_url)
+    command.upgrade(config, "head")
+
+
+@pytest.fixture()
+def sqlalchemy_session(
+    _meta_rne_test_migrated: None, postgres_test_database_url: str
+) -> Generator[Session, None, None]:
+    engine = create_engine(postgres_test_database_url)
+    connection = engine.connect()
+    outer_transaction = connection.begin()
+    session = Session(bind=connection)
+    try:
+        yield session
+    finally:
+        session.close()
+        outer_transaction.rollback()
+        connection.close()
+        engine.dispose()

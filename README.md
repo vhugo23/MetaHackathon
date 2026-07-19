@@ -260,16 +260,77 @@ instance). 100% line coverage on `domain/incident.py`,
 `domain/device.py`/`domain/snapshot.py` (the one uncovered line in each is
 the module-level docstring/import, not logic).
 
-**Not implemented yet** (deliberately — Day 4B2/4B3, per the approved,
-gated Day 4B plan): any concrete repository (SQLAlchemy or in-memory) for
-`Device`/`ConfigurationSnapshot`/`ConfigurationPolicy`/`Incident`,
-`seed_if_missing`, `SnapshotAlreadyExistsError`, the atomic
-`upsert_open_incident` implementation (the `INSERT ... ON CONFLICT ...
-DO UPDATE` strategy is designed and approved, not yet built), concurrency
-tests, the concrete `UnitOfWork`, `ConfigIngestionService`, FastAPI
-ingestion endpoints, structured logging, `DriftDetector`, `RuleEngine`,
-telemetry, and the React dashboard. These begin on Day 4B2 (repositories,
-seeding, UnitOfWork) and Day 4B3 (atomic upsert, concurrency).
+### Current Day 4B2 scope
+
+The second of Day 4B's three reviewable gates: concrete `Device`/
+`ConfigurationSnapshot`/`ConfigurationPolicy` repositories, both
+SQLAlchemy/PostgreSQL and in-memory. No `IncidentRepository`, atomic
+upsert, or `UnitOfWork` yet.
+
+Day 4B2 adds:
+
+- **Persistence error hierarchy** (`meta_rne.persistence.errors`):
+  `PersistenceError` → `PersistenceConflictError` →
+  `DeviceConflictError`/`SnapshotAlreadyExistsError`/
+  `PolicySeedConflictError`/`ReferencedDeviceNotFoundError`. Repositories
+  never leak a SQLAlchemy `IntegrityError`, psycopg exception, or
+  constraint name; an unrecognized infrastructure failure is raised as the
+  base `PersistenceError` (not a conflict subtype), so callers can tell a
+  business-rule rejection apart from an unexpected failure.
+- **`DeviceRepository`** (`get_by_id`/`save`) — `save` is upsert-by-
+  `device_id`, but validates every transition *before* mutating anything:
+  vendor change, `created_at` change, `updated_at` regression, replacing a
+  set `baseline_snapshot_id`, clearing a set `current_snapshot_id`, or a
+  non-null snapshot reference that doesn't exist all raise
+  `DeviceConflictError` and leave the stored `Device` completely
+  unchanged — no silent preservation.
+- **`ConfigurationSnapshotRepository`** (`get_by_id`/`add`) — append-only;
+  a duplicate `snapshot_id` raises `SnapshotAlreadyExistsError`, an
+  unknown `device_id` raises `ReferencedDeviceNotFoundError`. The
+  SQLAlchemy side distinguishes the two by inspecting the PostgreSQL
+  SQLSTATE of a translated `IntegrityError` recovered via a SAVEPOINT
+  (`session.begin_nested()`) — the caller's outer transaction, and the
+  Session itself, remain fully usable afterward.
+- **`ConfigurationPolicyRepository`** (`get_applicable_to_device`/
+  `seed_if_missing`) — exact `applies_to == device_id` matching only.
+  `seed_if_missing` treats one call as one all-or-nothing operation:
+  semantic equivalence compares only `applies_to`/`required_acls`
+  (`created_at` is insertion metadata, never compared or overwritten);
+  identical semantic content is a no-op, differing content raises
+  `PolicySeedConflictError`, and a conflict anywhere in a multi-policy
+  batch leaves no partial subset inserted from that call.
+- **In-memory conformance-test doubles** (`meta_rne.persistence.memory`)
+  sharing one `InMemoryStore` (`meta_rne.persistence.memory.store`) across
+  all three repositories, so cross-repository reference integrity
+  (a snapshot's `device_id` must exist; a device's snapshot references
+  must exist) is enforced the same way PostgreSQL's foreign keys enforce
+  it — never merely storing arbitrary strings.
+- **Pure Slice 1 seed builder** (`meta_rne.persistence.seeds.
+  build_slice1_policies`) — no clock read, no Session, no persistence;
+  returns the one approved `policy-acl-external-in` policy for a given
+  `created_at`.
+- **Timestamp normalization at the conversion boundary** — every
+  SQLAlchemy repository converts `TIMESTAMPTZ` values via
+  `.astimezone(UTC)` before constructing a domain object, so returned
+  timestamps are correct regardless of the database session's timezone.
+- **Repository conformance tests** (`tests/contract/persistence/`) run
+  every behavior against both implementations via one parameterized
+  `repositories` fixture; PostgreSQL-only tests (CHECK-constraint
+  bypass-the-repository proofs, Session-reusability-after-conflict, and
+  non-UTC-timezone conversion) live in `tests/integration/persistence/`.
+
+Backend test count: **227** (`pytest`; 175 run via `pytest -m "not
+postgres"`, 52 via `pytest -m postgres` against a real PostgreSQL
+instance).
+
+**Not implemented yet** (deliberately — Day 4B3, per the approved, gated
+Day 4B plan): the concrete `IncidentRepository` (SQLAlchemy or in-memory),
+the atomic `upsert_open_incident` implementation (the `INSERT ... ON
+CONFLICT ... DO UPDATE` strategy is designed and approved, not yet
+built), incident concurrency tests, the concrete `UnitOfWork`,
+`ConfigIngestionService`, FastAPI ingestion endpoints, seed execution
+during application startup, structured logging, `DriftDetector`,
+`RuleEngine`, telemetry, and the React dashboard.
 
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 
@@ -386,3 +447,23 @@ find_open_by_fingerprint` was also dropped from the documented port
 surface. See "Current Day 4B1 scope" above for exactly what is and is not
 implemented — no repository implementation, seeding, atomic upsert, or
 concrete UnitOfWork exists yet; those are Day 4B2 and Day 4B3.
+
+**Day 4B2 — Device, ConfigurationSnapshot, and ConfigurationPolicy
+Repositories.** The second of Day 4B's three reviewable gates: concrete
+`DeviceRepository`/`ConfigurationSnapshotRepository`/
+`ConfigurationPolicyRepository` implementations (SQLAlchemy/PostgreSQL and
+in-memory, sharing one `InMemoryStore`), the persistence error hierarchy
+(`PersistenceError`/`PersistenceConflictError`/`DeviceConflictError`/
+`SnapshotAlreadyExistsError`/`PolicySeedConflictError`/
+`ReferencedDeviceNotFoundError`), and the pure Slice 1 seed builder
+(`build_slice1_policies`), test-first, bringing the suite to 227 tests
+(175 fast + 52 against real PostgreSQL). Stale documentation discovered
+during implementation was corrected (see CLAUDE.md "Documentation
+corrections applied for Day 4B2"): domain-model.md §12 and
+architecture.md §11.1 still described a fuller repository surface
+(`DeviceRepository.list()`, `ConfigurationSnapshotRepository.
+get_current_for_device`/`get_baseline_for_device`, `"*"` wildcard policy
+matching) than what Day 4B1's `domain/ports.py` actually approved — now
+corrected to match. See "Current Day 4B2 scope" above for exactly what is
+and is not implemented — no `IncidentRepository`, atomic upsert, or
+concrete `UnitOfWork` exists yet; those are Day 4B3.

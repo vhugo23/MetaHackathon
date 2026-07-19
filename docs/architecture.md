@@ -612,13 +612,21 @@ built.
 ```
 domain defines (interfaces/ports), Python-style snake_case throughout:
   DeviceRepository
-    save(device); get_by_id(device_id); list()
+    get_by_id(device_id); save(device)
+        # save is upsert-by-device_id; every rejected lifecycle transition
+        # raises DeviceConflictError and leaves the stored Device
+        # unchanged (Day 4B2) — no list()
   ConfigurationSnapshotRepository        # append-only
-    save(snapshot)                       # includes normalized_config inline
-    get_by_id(snapshot_id); get_current_for_device(device_id); get_baseline_for_device(device_id)
+    get_by_id(snapshot_id); add(snapshot)  # includes normalized_config inline
+        # duplicate snapshot_id -> SnapshotAlreadyExistsError; unknown
+        # device_id -> ReferencedDeviceNotFoundError (Day 4B2) — no
+        # get_current_for_device/get_baseline_for_device on this port
   ConfigurationPolicyRepository          # read-mostly, seeded
-    get_for_device(device_id); list()
-    seed_if_missing(policies)            # idempotent by policy_id, see 11.2
+    get_applicable_to_device(device_id)  # exact match only, no "*" wildcard
+    seed_if_missing(policies)            # one call is all-or-nothing;
+        # semantic equivalence (applies_to + required_acls, not
+        # created_at) is a no-op, differing content raises
+        # PolicySeedConflictError (Day 4B2) — no list()
   IncidentRepository
     get_by_id(incident_id); list(filter)
     # Day 4B1 binding decision: no find_open_by_fingerprint on this port —

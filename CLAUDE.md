@@ -45,16 +45,16 @@ For each task:
 
 ## Current Phase
 
-**Day 4B1 — Persistence Foundations: Domain Shapes, Serialization, Private
-ORM Models, and the First Slice 1 Migration.**
+**Day 4B2 — Device, ConfigurationSnapshot, and ConfigurationPolicy
+Repositories, Idempotent Slice 1 Policy Seeding.**
 
-Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, and Day 4A are complete
-and approved. See README.md's "Current Project Status" for the full
-history. Day 4B is split into three reviewable gates (4B1/4B2/4B3); only
-4B1 is complete.
+Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, Day 4A, and Day 4B1 are
+complete and approved. See README.md's "Current Project Status" for the
+full history. Day 4B is split into three reviewable gates (4B1/4B2/4B3);
+4B1 and 4B2 are complete.
 
 Application code is currently allowed **only** for the completed Day 3A,
-Day 3B, Day 4A, and Day 4B1 capabilities:
+Day 3B, Day 4A, Day 4B1, and Day 4B2 capabilities:
 
 - normalized configuration domain objects (Day 3A)
 - vendor adapter contracts, `AdapterRegistry`, Cisco IOS-XE parsing and
@@ -76,9 +76,21 @@ Day 3B, Day 4A, and Day 4B1 capabilities:
   migration (Slice 1 tables, the two-stage `devices`/
   `configuration_snapshots` foreign keys, CHECK constraints, and the
   partial unique OPEN-fingerprint index) (Day 4B1)
-- unit tests, persistence/migration tests, and representative fixtures
-- documentation corrections explicitly approved for Day 3A/3B/4A/4B1 (see
-  below)
+- Concrete `DeviceRepository`/`ConfigurationSnapshotRepository`/
+  `ConfigurationPolicyRepository` implementations, both SQLAlchemy/
+  PostgreSQL (`meta_rne.persistence.sqlalchemy.*_repository`) and
+  in-memory conformance-test doubles (`meta_rne.persistence.memory.*`,
+  sharing one `InMemoryStore` so cross-repository reference integrity is
+  enforced without a database); the persistence error hierarchy
+  (`meta_rne.persistence.errors`: `PersistenceError` →
+  `PersistenceConflictError` → `DeviceConflictError`/
+  `SnapshotAlreadyExistsError`/`PolicySeedConflictError`/
+  `ReferencedDeviceNotFoundError`); the pure Slice 1 seed builder
+  (`meta_rne.persistence.seeds.build_slice1_policies`) (Day 4B2)
+- unit tests, persistence/migration tests, repository contract tests, and
+  representative fixtures
+- documentation corrections explicitly approved for Day 3A/3B/4A/4B1/4B2
+  (see below)
 
 **Documentation corrections applied for Day 3A:**
 
@@ -152,15 +164,29 @@ Day 3B, Day 4A, and Day 4B1 capabilities:
    `raw_text` references updated to `raw_text_hash`/`raw_config_text` to
    match.
 
-**Still prohibited**: concrete `DeviceRepository`/
-`ConfigurationSnapshotRepository`/`ConfigurationPolicyRepository`
-implementations (SQLAlchemy or in-memory), `seed_if_missing`,
-`SnapshotAlreadyExistsError`, the concrete `IncidentRepository`
-(SQLAlchemy or in-memory), the atomic `upsert_open_incident`
-implementation, concurrency tests, the concrete `UnitOfWork`
-(SQLAlchemy or in-memory), `ConfigIngestionService`, API ingestion
-endpoints, `DriftDetector`, `RuleEngine`, telemetry, and React. Repository
-implementations, seeding, and the concrete UnitOfWork are Day 4B2; the
-atomic incident upsert and concurrency tests are Day 4B3. Both begin
-against the domain model, architecture, and ports already documented,
-with tests written first per the Development Rules above.
+**Documentation corrections applied for Day 4B2:**
+
+1. `docs/domain-model.md` §12 and `docs/architecture.md` §11.1 — the
+   documented `DeviceRepository`/`ConfigurationSnapshotRepository`/
+   `ConfigurationPolicyRepository` method lists were stale relative to
+   `domain/ports.py` since Day 4B1 (they still listed `DeviceRepository.
+   list()`, `ConfigurationSnapshotRepository.save()`/
+   `get_current_for_device`/`get_baseline_for_device`, and
+   `ConfigurationPolicyRepository.get_for_device()` with `"*"` wildcard
+   matching). Corrected to the actual approved surface: `get_by_id`/`save`
+   (Device), `get_by_id`/`add` (Snapshot), `get_applicable_to_device`/
+   `seed_if_missing` (Policy, exact-match only, no wildcard) — and
+   documented the Day 4B2 conflict-error behavior each method now has.
+2. `docs/test-strategy.md` §9 — the repository-conformance bullet's
+   generic `save`/`get_by_id`/`list` phrasing updated to name the actual
+   per-repository contract (including the new conflict errors) instead of
+   implying a uniform `save`/`list` surface across all three repositories.
+
+**Still prohibited**: the concrete `IncidentRepository` (SQLAlchemy or
+in-memory), the atomic `upsert_open_incident` implementation, incident
+concurrency tests, the concrete `UnitOfWork` (SQLAlchemy or in-memory),
+`ConfigIngestionService`, API ingestion endpoints, seed execution during
+application startup, structured logging, `DriftDetector`, `RuleEngine`,
+telemetry, and React. All of these are Day 4B3 or later, against the
+domain model, architecture, and ports already documented, with tests
+written first per the Development Rules above.
