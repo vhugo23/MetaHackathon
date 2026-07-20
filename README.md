@@ -151,6 +151,36 @@ container startup sequence itself: PostgreSQL must pass its own
 accepting requests (architecture.md Section 11.2) — if either step fails,
 the API container never becomes healthy.
 
+### Compose smoke validation (Day 6A)
+
+A repeatable, isolated smoke run that proves the stack above actually
+works end to end in its real deployed shape — real build, real migration-
+before-Uvicorn ordering, real policy seeding, real HTTP traffic, and real
+state persistence across an API restart:
+
+```bash
+python scripts/compose_smoke.py \
+  --project-name meta-rne-smoke \
+  --api-port 58080 \
+  --db-port 55432
+```
+
+Uses its own Compose project name and non-default host ports, so it never
+collides with a native PostgreSQL service on port 5432 or a developer's
+own `docker compose up` session, and always cleans up after itself
+(`--keep` to skip cleanup for post-mortem inspection). Python standard
+library only; the same invocation runs in CI's `compose-smoke` job. See
+`docs/architecture.md` Section 15 for the full flow.
+
+### CORS (Day 6A)
+
+Disabled by default. To enable for a local frontend dev server, set
+`META_RNE_CORS_ALLOWED_ORIGINS` (comma-separated origins) before starting
+the API — `docker-compose.yml` already defaults it to
+`http://localhost:5173` (the Vite dev server origin) for local Compose
+development. See [docs/frontend-api-contract.md](./docs/frontend-api-contract.md)
+for the full frontend-facing contract.
+
 ### Current Day 4A scope
 
 See [CLAUDE.md](./CLAUDE.md) "Current Phase". Day 2 scaffolding
@@ -603,6 +633,56 @@ acknowledgment/resolution commands, authentication/authorization,
 filtering/pagination/sorting query parameters, `DriftDetector`,
 `RuleEngine`, telemetry, structured logging beyond FastAPI's own request
 logging, the React dashboard, Playwright, and browser end-to-end tests.
+
+### Current Day 6A scope
+
+Proves the completed Slice 1 vertical works in its actual deployed Docker
+Compose shape, and stabilizes the frontend-facing HTTP/OpenAPI contract
+before a React app is built. No Slice 1 business behavior changed.
+
+Day 6A adds:
+
+- **Stable OpenAPI operation IDs and documented error responses**
+  (`meta_rne.api.routes`) — `health_check`, `submit_device_configuration`,
+  `list_incidents`; `POST /devices/{device_id}/config` and
+  `GET /incidents` now document their real `409`/`422`/`500` bodies
+  (`ApiErrorResponse`, plus FastAPI's own `HTTPValidationError` for
+  request-schema `422`s via an explicit `oneOf`) in `GET /openapi.json`,
+  not only the previous default `201`/`200` + validation-only `422`.
+- **Configurable CORS** (`meta_rne.api.cors`,
+  `create_app(cors_allowed_origins=...)`) — disabled by default (empty
+  tuple); the production entrypoint reads `META_RNE_CORS_ALLOWED_ORIGINS`
+  (comma-separated, trimmed, empty entries ignored). No wildcard origin,
+  ever; `allow_credentials=False`; `allow_methods` limited to `GET`,
+  `POST`, `OPTIONS`.
+- **`docker-compose.yml` host-port overrides**
+  (`META_RNE_DB_HOST_PORT`/`META_RNE_API_HOST_PORT`, defaults unchanged:
+  `5432`/`8080`) and a local-development CORS default
+  (`META_RNE_CORS_ALLOWED_ORIGINS` defaulting to `http://localhost:5173`,
+  the future Vite dev server's origin).
+- **`scripts/compose_smoke.py`** — a repeatable, isolated, project-scoped
+  Compose smoke runner (Python standard library only): real build, real
+  migration-before-Uvicorn ordering, real policy seeding, three real HTTP
+  config submissions against `spine-01` proving incident
+  creation/dedup/evidence, a real API restart proving PostgreSQL-backed
+  persistence with no database reset, and unconditional project-scoped
+  cleanup. Run identically by a developer and by CI's new `compose-smoke`
+  job.
+- **OpenAPI and CORS contract tests**
+  (`tests/contract/api/test_openapi_contract.py`,
+  `tests/contract/api/test_cors_api.py`).
+- **`docs/frontend-api-contract.md`** — the frontend-facing contract
+  document: request/response shapes, the full error-code catalog, CORS
+  configuration, and examples, derived from the current
+  `api/schemas.py`/`api/errors.py`, not a planning aspiration.
+
+**Not implemented yet** (deliberately — Day 6B and later): React, Vite,
+any Node/npm tooling, frontend source code, the Playwright HTTP-mode E2E
+suite (test-strategy.md Section 7, still separate from and not replaced
+by the Day 6A Compose smoke script), browser end-to-end tests,
+authentication/authorization, filtering/pagination, incident
+acknowledgment/resolution, drift detection, telemetry, and any new API
+endpoint.
 
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 

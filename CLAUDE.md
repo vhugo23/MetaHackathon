@@ -45,18 +45,38 @@ For each task:
 
 ## Current Phase
 
-**Day 5B — REST API (POST /devices/{device_id}/config, GET /incidents).**
+**Day 6A — Docker Compose smoke validation and frontend-facing contract
+stabilization.**
 
 Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, Day 4A, Day 4B1, Day 4B2,
-Day 4B3, Day 5A, and Day 5B are complete and approved. See README.md's
+Day 4B3, Day 5A, Day 5B, and Day 6A are complete and approved. See README.md's
 "Current Project Status" for the full history. Day 4B ("Slice 1
 persistence foundations") is complete across all three reviewable gates
 (4B1/4B2/4B3). The first vertical slice (product-spec.md Section 11) is
-now runnable end to end over real HTTP against a real PostgreSQL database
-— see README.md's "Current Day 5B scope" for how to exercise it locally.
+runnable end to end over real HTTP against a real PostgreSQL database
+(Day 5B), and Day 6A proves that same slice in its actual deployed Docker
+Compose shape (`scripts/compose_smoke.py`) and stabilizes the OpenAPI/CORS
+contract a future React app will consume — see README.md's "Current Day
+6A scope" and `docs/frontend-api-contract.md`. Day 6A implements no
+frontend (no React, Vite, Node/npm) and changed no Slice 1 business
+behavior — only route metadata (`operation_id`/documented responses), CORS
+middleware wiring, Compose port configuration, and a new standalone smoke
+script.
 
 Application code is currently allowed **only** for the completed Day 3A,
-Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, and Day 5B capabilities:
+Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, Day 5B, and Day 6A
+capabilities:
+
+- explicit OpenAPI `operation_id`s (`health_check`,
+  `submit_device_configuration`, `list_incidents`) and documented `409`/
+  `422`/`500` responses (`api/routes.py`); configurable CORS
+  (`meta_rne.api.cors`, `create_app(cors_allowed_origins=...)`, env var
+  `META_RNE_CORS_ALLOWED_ORIGINS`, disabled by default, no wildcard); a
+  standalone `scripts/compose_smoke.py` runner and a third CI job
+  (`compose-smoke`); OpenAPI/CORS contract tests
+  (`tests/contract/api/test_openapi_contract.py`,
+  `tests/contract/api/test_cors_api.py`); `docs/frontend-api-contract.md`
+  (Day 6A)
 
 - normalized configuration domain objects (Day 3A)
 - vendor adapter contracts, `AdapterRegistry`, Cisco IOS-XE parsing and
@@ -424,7 +444,7 @@ Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, and Day 5B capabilities:
 authentication/authorization, filtering/pagination/sorting query
 parameters, drift detection, anomaly/telemetry ingestion, structured
 logging beyond FastAPI's own request logging, the React dashboard,
-Playwright, browser end-to-end tests, and new Alembic migrations. All of
-these are Day 6 or later, against the domain model, architecture, and
-ports already documented, with tests written first per the Development
-Rules above.
+Vite, Node/npm tooling, Playwright, browser end-to-end tests, and new
+Alembic migrations. All of these are Day 6B or later, against the domain
+model, architecture, and ports already documented, with tests written
+first per the Development Rules above.

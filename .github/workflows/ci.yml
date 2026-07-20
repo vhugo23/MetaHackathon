@@ -21,7 +21,10 @@ jobs:
         working-directory: backend
         run: pip install -e ".[dev]"
 
-      # --- 1-4: format, lint, type-check, tests (no Docker needed) ---
+      # --- format, lint, type-check, tests (no Docker needed) ---
+      # Docker Compose smoke validation moved to the dedicated
+      # compose-smoke job below (Day 6A) — this job stays Docker-free and
+      # fast; it no longer builds or starts the stack itself.
 
       - name: ruff format --check
         working-directory: backend
@@ -38,61 +41,6 @@ jobs:
       - name: pytest (excludes postgres-marked tests — see the postgres-tests job)
         working-directory: backend
         run: pytest -m "not postgres"
-
-      # --- 5: Docker Compose smoke test (proves reproducible startup) ---
-
-      - name: docker compose config
-        run: docker compose config
-
-      - name: Compose smoke test — build and start
-        run: docker compose up --build -d
-
-      - name: Compose smoke test — wait for both services to become healthy
-        run: |
-          for i in $(seq 1 30); do
-            api_id="$(docker compose ps -q api)"
-            db_id="$(docker compose ps -q db)"
-            if [ -z "$api_id" ] || [ -z "$db_id" ]; then
-              echo "containers not created yet, waiting..."
-              sleep 2
-              continue
-            fi
-            api_status=$(docker inspect --format='{{.State.Health.Status}}' "$api_id" 2>/dev/null || echo "starting")
-            db_status=$(docker inspect --format='{{.State.Health.Status}}' "$db_id" 2>/dev/null || echo "starting")
-            echo "api=$api_status db=$db_status"
-            if [ "$api_status" = "healthy" ] && [ "$db_status" = "healthy" ]; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::services did not become healthy in time"
-          docker compose ps
-          docker compose logs
-          exit 1
-
-      - name: Compose smoke test — GET /health
-        run: |
-          python3 - <<'PY'
-          import json
-          import urllib.request
-
-          with urllib.request.urlopen("http://localhost:8080/health", timeout=5) as response:
-              status = response.status
-              body = json.loads(response.read())
-
-          assert status == 200, f"expected HTTP 200, got {status}"
-          assert body == {"status": "ok"}, f"unexpected body: {body}"
-          print("health check passed:", body)
-          PY
-
-      - name: Compose smoke test — confirm Alembic completed before Uvicorn started
-        run: |
-          docker compose logs api | grep -q "Context impl PostgresqlImpl"
-          docker compose exec -T db psql -U meta_rne -d meta_rne -c '\dt alembic_version' | grep -q alembic_version
-
-      - name: Compose smoke test — tear down
-        if: always()
-        run: docker compose down -v
 
   postgres-tests:
     runs-on: ubuntu-latest
@@ -141,3 +89,34 @@ jobs:
       # automatically when the job finishes — no explicit teardown step
       # needed, and this job never touches docker-compose.yml's `db`
       # service or its `pgdata` volume.
+
+  compose-smoke:
+    # Real Docker Compose smoke validation (Day 6A) — builds the actual
+    # image, starts real db + api services, and drives real HTTP traffic
+    # against them. Independent of postgres-tests: no shared service
+    # container, since docker compose brings up its own disposable `db`.
+    # scripts/compose_smoke.py is the single authoritative implementation
+    # of the smoke flow — this job only invokes it, no smoke logic is
+    # duplicated in YAML.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: docker compose config --quiet
+        run: docker compose config --quiet
+
+      - name: Run Compose smoke validation
+        run: |
+          python scripts/compose_smoke.py \
+            --project-name meta-rne-smoke \
+            --api-port 58080 \
+            --db-port 55432
+
+      - name: Defense-in-depth cleanup (project-scoped, always)
+        if: always()
+        run: docker compose --project-name meta-rne-smoke down --volumes --remove-orphans

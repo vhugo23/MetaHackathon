@@ -550,6 +550,30 @@ in `{"data": ..., "error": null}`. A failed response is a bare
 named `detail`, not `message` — see Section 12 for the full, corrected
 category-to-status-to-code mapping.
 
+**Stable OpenAPI contract (Day 6A).** Each route declares an explicit
+`operation_id` — `health_check`, `submit_device_configuration`,
+`list_incidents` — so a generated frontend client's method names survive a
+future path or handler rename. `POST /devices/{device_id}/config` and
+`GET /incidents` also declare their real error responses (`409`/`422`/`500`
+with `ApiErrorResponse`, plus FastAPI's own `HTTPValidationError` for
+request-schema `422`s) in the generated OpenAPI document (`GET
+/openapi.json`), not only FastAPI's default `201`/`200` + validation-only
+`422`. See `docs/frontend-api-contract.md` for the full, current
+frontend-facing contract (request/response shapes, error catalog,
+examples) — this section states the boundary's design, that document
+states its current concrete shape.
+
+**CORS (Day 6A).** Disabled by default — `create_app`'s
+`cors_allowed_origins: tuple[str, ...] = ()` and the production
+entrypoint's `META_RNE_CORS_ALLOWED_ORIGINS` environment variable
+(`meta_rne.api.cors`) both default to non-permissive. When configured,
+`CORSMiddleware` is registered with the exact given origin list (never a
+wildcard), `allow_credentials=False`, `allow_methods=["GET", "POST",
+"OPTIONS"]`, `allow_headers=["Content-Type"]`. `docker-compose.yml`'s
+local-development default sets it to `http://localhost:5173` — the future
+Vite dev server's origin (FR-10 dashboard, not yet built) — so CORS stays
+disabled everywhere else composition doesn't explicitly opt in.
+
 **Endpoints, first vertical slice + full MVP:**
 
 | Method | Path | Purpose | FR | Slice |
@@ -985,6 +1009,39 @@ volumes:
   it later is additive, not a restructuring.
 - `docker compose up` (backend + db only, for the first slice) is
   sufficient to run the vertical slice end-to-end.
+- **Overridable host ports (Day 6A).** `db`'s and `api`'s host-side ports
+  are `${META_RNE_DB_HOST_PORT:-5432}`/`${META_RNE_API_HOST_PORT:-8080}` —
+  defaults unchanged for ordinary use; a repeatable, isolated smoke run
+  (below) overrides both so it never collides with a developer's own
+  Postgres or a prior `docker compose up` session.
+
+**Compose smoke validation (Day 6A, distinct from the E2E suite in
+Section 15.1 below).** `scripts/compose_smoke.py` (repo root,
+Python-standard-library only) proves the deployed shape works: real image
+build, real `db`/`api` startup and healthchecks, real Alembic migration
+before Uvicorn (confirmed via container logs and `alembic_version`),
+real idempotent Slice 1 policy seeding, three real HTTP config
+submissions against `spine-01` (the device the seeded policy applies
+to) proving `violations_detected`/`incidents_created`/`incidents_updated`
+counts and incident-evidence fields, a real `docker compose restart api`
+proving PostgreSQL-backed state survives an API process restart with no
+database reset, and project-scoped cleanup (`--project-name`, never
+`COMPOSE_PROJECT_NAME`) so it can never affect a differently-named
+Compose project or an unrelated container. This is **not** a substitute
+for the still-unbuilt Playwright E2E suite (Section 15.1) — it proves the
+deployed shape boots and serves real traffic correctly, not the full
+acceptance-test matrix. Invocation:
+
+```
+python scripts/compose_smoke.py \
+  --project-name meta-rne-smoke \
+  --api-port 58080 \
+  --db-port 55432
+```
+
+Run identically by a developer and by CI's `compose-smoke` job
+(`.github/workflows/ci.yml`) — the script is the single authoritative
+implementation; the CI job only invokes it.
 
 ### 15.1 E2E Database Isolation (binding)
 

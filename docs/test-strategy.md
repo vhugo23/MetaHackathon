@@ -109,6 +109,27 @@ collaborators.
 
 ---
 
+## 6.1 Compose Smoke Test Responsibilities (Day 6A)
+
+| | |
+|---|---|
+| **Tested** | The real deployed Docker Compose shape: image build, real `db` + `api` startup/healthchecks, real Alembic migration completing before Uvicorn starts, real idempotent Slice 1 policy seeding, real HTTP ingestion/query traffic, and real PostgreSQL-backed state surviving an `api` process restart with no database reset. |
+| **Mocked** | Nothing — real image, real containers, real HTTP, real restart. |
+| **Real components** | The actual `docker-compose.yml` shape (Section 15), run under its own isolated Compose project name and host ports so it never collides with a developer's own stack or other local Postgres instances. |
+| **Speed** | Single-digit minutes/run, dominated by image build; not run on every save — CI's dedicated `compose-smoke` job, and on demand locally. |
+| **Location** | `scripts/compose_smoke.py` (repo root, Python-standard-library only — the single authoritative implementation, invoked identically by a developer and by CI, never duplicated in CI YAML). |
+
+**Distinct from Section 7's E2E suite below**: this proves the deployed
+*shape* boots and serves correct traffic for the exact scenarios it
+drives (three sequential config submissions against `spine-01`, a
+restart, incident/evidence assertions) — it is not the full
+acceptance-test matrix, does not use Playwright, and is not a replacement
+for the still-unbuilt E2E suite once it exists. See
+`docs/architecture.md` Section 15 for the full flow description and
+invocation.
+
+---
+
 ## 7. End-to-End Test Responsibilities
 
 | | |

@@ -1,5 +1,9 @@
-# Day 2 scope: FastAPI health endpoint + Alembic wiring only.
-# See CLAUDE.md "Current Phase" and README.md "Day 2 Scope".
+# Runs the first vertical slice's real API: GET /health,
+# POST /devices/{device_id}/config, GET /incidents. `alembic upgrade head`
+# runs to completion before Uvicorn starts (see the CMD below), and the
+# FastAPI lifespan performs idempotent Slice 1 policy seeding once
+# migrations have completed (architecture.md Section 11.2). Frontend and
+# browser E2E (Playwright) remain deferred — see CLAUDE.md "Current Phase".
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -15,8 +19,10 @@ COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 
-# Alembic configuration and migration scripts (alembic/versions/ is empty
-# on Day 2 — no domain/persistence models exist yet to migrate).
+# Alembic configuration and migration scripts — alembic/versions/ holds
+# the real Slice 1 schema migration (devices, configuration_snapshots,
+# configuration_policies, incidents, and the partial unique OPEN-fingerprint
+# index; see docs/architecture.md Section 11).
 COPY alembic.ini ./
 COPY alembic ./alembic
 

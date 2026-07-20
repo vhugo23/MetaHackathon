@@ -2,8 +2,9 @@
 
 ``create_app`` is a controlled composition factory — importing this module
 never creates a SQLAlchemy engine or ``Session`` and never requires
-``DATABASE_URL`` to be set: the module-level ``app = create_app()`` below
-only registers routes and a lifespan callback, it does not invoke either.
+``DATABASE_URL`` to be set: the module-level ``app`` below only registers
+routes, CORS middleware (if any origins are configured), and a lifespan
+callback — it does not invoke the lifespan or open a connection.
 Production engine construction is lazy (``api/dependencies.py``'s
 ``_LazySqlAlchemyUnitOfWorkFactory``), happening on first actual request or
 lifespan startup, whichever comes first — never at import time. Every
@@ -21,9 +22,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from meta_rne.adapters.registry import AdapterRegistry
 from meta_rne.api.clock import utc_now
+from meta_rne.api.cors import cors_allowed_origins_from_environment
 from meta_rne.api.dependencies import (
     build_lazy_sqlalchemy_unit_of_work_factory,
     build_production_adapter_registry,
@@ -45,6 +48,7 @@ def create_app(
     unit_of_work_factory: Callable[[], UnitOfWork] | None = None,
     adapter_registry: AdapterRegistry | None = None,
     seed_on_startup: bool = True,
+    cors_allowed_origins: tuple[str, ...] = (),
 ) -> FastAPI:
     registry = adapter_registry or build_production_adapter_registry()
 
@@ -72,7 +76,16 @@ def create_app(
 
     app = FastAPI(title="Meta RNE Platform", lifespan=lifespan)
 
-    @app.get("/health")
+    if cors_allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(cors_allowed_origins),
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Content-Type"],
+        )
+
+    @app.get("/health", operation_id="health_check")
     def get_health() -> dict[str, str]:
         return {"status": "ok"}
 
@@ -89,4 +102,8 @@ def create_app(
     return app
 
 
-app = create_app()
+# Production wiring: cors_allowed_origins's own Python-level default is an
+# empty tuple (non-permissive) — reading META_RNE_CORS_ALLOWED_ORIGINS is an
+# explicit choice made here, at the one real Uvicorn entrypoint, not a
+# hidden env-var fallback inside create_app itself.
+app = create_app(cors_allowed_origins=cors_allowed_origins_from_environment())

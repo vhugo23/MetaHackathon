@@ -15,6 +15,7 @@ from fastapi import APIRouter, status
 
 from meta_rne.api.clock import require_utc
 from meta_rne.api.schemas import (
+    ApiErrorResponse,
     IncidentResponse,
     SubmitConfigurationRequest,
     SubmitConfigurationResponse,
@@ -22,6 +23,30 @@ from meta_rne.api.schemas import (
 from meta_rne.application.config_ingestion import ConfigIngestionService
 from meta_rne.application.incident_queries import ListIncidentsService
 from meta_rne.application.models import IngestConfigurationCommand
+
+# Documents the real runtime 422 contract (api/errors.py): FastAPI's own
+# RequestValidationError (HTTPValidationError, malformed request schema) and
+# an application-originated 422 (ApiErrorResponse — unsupported_vendor /
+# configuration_parse_error / invalid_request) are both genuine response
+# bodies for this status code, never only one of them — see
+# docs/frontend-api-contract.md for which case produces which body.
+_SUBMIT_CONFIGURATION_422_RESPONSE = {
+    "description": (
+        "Request-schema validation failure (HTTPValidationError) or an "
+        "application-originated error (ApiErrorResponse: unsupported_vendor, "
+        "configuration_parse_error, or invalid_request)."
+    ),
+    "content": {
+        "application/json": {
+            "schema": {
+                "oneOf": [
+                    {"$ref": "#/components/schemas/HTTPValidationError"},
+                    {"$ref": "#/components/schemas/ApiErrorResponse"},
+                ]
+            }
+        }
+    },
+}
 
 
 def build_router(
@@ -36,6 +61,21 @@ def build_router(
         "/devices/{device_id}/config",
         status_code=status.HTTP_201_CREATED,
         response_model=SubmitConfigurationResponse,
+        operation_id="submit_device_configuration",
+        responses={
+            409: {
+                "model": ApiErrorResponse,
+                "description": (
+                    "Persistence conflict: device_conflict, snapshot_already_exists, "
+                    "or referenced_device_not_found."
+                ),
+            },
+            422: _SUBMIT_CONFIGURATION_422_RESPONSE,
+            500: {
+                "model": ApiErrorResponse,
+                "description": "persistence_error or serialization_error (generic public detail).",
+            },
+        },
     )
     def submit_configuration(
         device_id: str, request: SubmitConfigurationRequest
@@ -50,7 +90,17 @@ def build_router(
         result = config_ingestion_service.ingest(command)
         return SubmitConfigurationResponse.from_domain(result)
 
-    @router.get("/incidents", response_model=list[IncidentResponse])
+    @router.get(
+        "/incidents",
+        response_model=list[IncidentResponse],
+        operation_id="list_incidents",
+        responses={
+            500: {
+                "model": ApiErrorResponse,
+                "description": "persistence_error (generic public detail).",
+            },
+        },
+    )
     def list_incidents() -> list[IncidentResponse]:
         incidents = list_incidents_service.list_all()
         return [IncidentResponse.from_domain(incident) for incident in incidents]
