@@ -499,6 +499,111 @@ in `api/app.py`, seed execution during application startup, incident
 acknowledgment/resolution commands, structured logging, `DriftDetector`,
 `RuleEngine`, telemetry, and the React dashboard.
 
+### Current Day 5B scope
+
+The first vertical slice is runnable end to end over real HTTP:
+`POST /devices/{device_id}/config` and `GET /incidents`, backed by real
+PostgreSQL in production (`docker compose up`, then `curl` — see below) or
+real in-memory repositories in tests.
+
+Day 5B adds:
+
+- **`POST /devices/{device_id}/config`** — path `device_id` is
+  authoritative (never read from the body); `SubmitConfigurationRequest{vendor,
+  raw_config_text}` (`ConfigDict(extra="forbid")`, so a `device_id` or
+  `observed_at` in the body is a 422, not silently ignored) is exactly the
+  request; `SubmitConfigurationResponse` (`device_id`, `snapshot_id`,
+  `normalized_config`, `violations_detected`, `incidents_created`,
+  `incidents_updated`) is exactly the `201` response — **no success
+  envelope**, the body is the resource itself.
+- **`GET /incidents`** — returns `list[IncidentResponse]` directly, no
+  envelope, no filter/pagination/sort query parameters. `IncidentResponse`
+  includes `fingerprint` (not treated as internal-only at the API layer)
+  and a narrowly-typed `PolicyViolationIncidentEvidenceResponse` (the only
+  evidence shape any current `IncidentSource` produces). Backed by
+  `ListIncidentsService` (`meta_rne.application.incident_queries`) — one
+  `UnitOfWork` per call, `list_all()` exactly once, never `commit()`s,
+  same exception-preserving rollback/close lifecycle as
+  `ConfigIngestionService`.
+- **Explicit `api/schemas.py`** — every normalized-configuration and
+  incident field is serialized via an explicit `from_domain` classmethod,
+  never `ConfigDict(from_attributes=True)` auto-copying a domain
+  dataclass; no field is invented that the current domain type doesn't
+  actually have (`NormalizedRouting` has no `static_routes` yet, so the
+  response has none either — matches domain-model.md exactly, not an
+  older planning-doc example).
+- **Corrected HTTP error mapping** (`api/errors.py`) — `code` is lowercase
+  snake_case, the message field is `detail` (not `message`), and there is
+  no success/error envelope. `UnsupportedVendorError`/
+  `ConfigurationParseError` → 422 (`unsupported_vendor`/
+  `configuration_parse_error`, the latter carrying the real
+  `ParseError.message`/`.line_number`, never a stack trace or the full
+  submitted config); `DeviceConflictError`/`SnapshotAlreadyExistsError`/
+  `ReferencedDeviceNotFoundError` → 409; any other caller/application
+  `ValueError` → 422 (`invalid_request`); `PersistenceError`/
+  `SerializationError` → 500 with a generic public detail (registered
+  after the specific 409 conflict subclasses); request-schema validation
+  keeps FastAPI's own default 422 body untouched; an invalid injected
+  clock (`InvalidClockError`) and any other unmapped exception get **no**
+  custom handler — both fall through to FastAPI's normal production 500
+  behavior rather than a broad catch-all that would echo exception
+  internals.
+- **One server-generated `observed_at` per `POST` request**
+  (`meta_rne.api.clock.utc_now`, injected) — called exactly once, validated
+  UTC-aware before `IngestConfigurationCommand` is constructed;
+  `GET /incidents` never calls the clock.
+- **`create_app(...)`** (`meta_rne.api.app`) — a controlled composition
+  factory, not an import-time side effect: importing `api.app` creates no
+  SQLAlchemy engine/`Session` and needs no `DATABASE_URL` set. Production
+  engine construction is lazy (first actual request or lifespan startup,
+  whichever comes first) and the engine is disposed on shutdown. Every
+  request gets its own `UnitOfWork`/`Session`. The module-level
+  `app = create_app()` (unchanged import path, for Uvicorn) is the only
+  thing tests never touch — every test builds its own isolated
+  `create_app(...)` instance directly, never `app.dependency_overrides`.
+- **Idempotent Slice 1 policy seeding at startup** — a FastAPI `lifespan`
+  hook (`seed_on_startup=True` in production) calls
+  `build_slice1_policies` + `seed_if_missing` inside one `UnitOfWork`,
+  after Alembic migrations have already completed (Docker `CMD` still
+  runs `alembic upgrade head` before Uvicorn starts — unchanged;
+  architecture.md Section 11.2). A semantic seed conflict
+  (`PolicySeedConflictError`) fails application startup rather than being
+  silently absorbed.
+- **Production `AdapterRegistry`** — exactly one registry containing
+  `CiscoAdapter`; no vendor resolution or parsing happens inside a route.
+
+**Run the vertical slice locally:**
+
+```
+docker compose up --build
+curl -X POST http://localhost:8080/devices/spine-01/config \
+  -H 'Content-Type: application/json' \
+  -d '{"vendor": "cisco-ios-xe", "raw_config_text": "hostname spine-01\n!\ninterface GigabitEthernet0/1\n!\n"}'
+curl http://localhost:8080/incidents
+```
+
+Backend test count: **438** (`pytest`; 328 run via `pytest -m "not
+postgres"`, 110 via `pytest -m postgres` against a real PostgreSQL
+instance, including ten focused API-level PostgreSQL tests proving
+startup-seed idempotency/conflict, `POST`/`GET` atomicity, independent
+`POST`/`GET` Sessions, and the real lazy-`DATABASE_URL` production
+composition path).
+
+**Deferred identity hardening.** `device_id` (caller-supplied path
+segment) and `snapshot_id`/`incident_id`/`policy_id` (opaque strings) have
+no format/length constraint beyond non-empty — no UUID-shape validation,
+no reserved-character stripping, no path-traversal-style hardening beyond
+what FastAPI's path-parameter parsing already provides. Acceptable for a
+single-tenant prototype with no authentication (product-spec.md Section 7);
+would need revisiting before any multi-tenant or externally-facing
+deployment.
+
+**Not implemented yet** (deliberately — Day 6 and later): incident
+acknowledgment/resolution commands, authentication/authorization,
+filtering/pagination/sorting query parameters, `DriftDetector`,
+`RuleEngine`, telemetry, structured logging beyond FastAPI's own request
+logging, the React dashboard, Playwright, and browser end-to-end tests.
+
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 
 - `ConfigurationPolicy` and `RequiredAclRule` — a seeded, fixture-data
@@ -671,3 +776,26 @@ service is called directly by tests. See "Current Day 5A scope" above for
 exactly what is and is not implemented; `POST /devices/{device_id}/config`,
 `GET /incidents`, FastAPI schemas, and startup policy seeding remain
 Day 5B.
+
+**Day 5B — REST API.** `POST /devices/{device_id}/config` and
+`GET /incidents`, the first vertical slice's exact two endpoints, are now
+runnable end to end over real HTTP against real PostgreSQL — no success
+envelope (the response body is the resource itself), corrected HTTP error
+mapping (422 for unsupported-vendor/parse failures, 409 for persistence
+conflicts, 500 with a generic detail for persistence/serialization/
+unmapped failures), a controlled `create_app(...)` composition factory
+(no import-time engine/`Session`, lazy production engine construction,
+disposed on shutdown), one server-generated `observed_at` per `POST`
+request, and idempotent Slice 1 policy seeding via a FastAPI `lifespan`
+hook that runs after Alembic migrations complete — test-first (the first
+contract test was run against a codebase with no `create_app`/routes/
+schemas at all, producing a real `ImportError`, before any of it was
+written), bringing the suite to 438 tests (328 fast + 110 against real
+PostgreSQL). Two stale documentation examples predating this phase were
+corrected (see CLAUDE.md "Documentation corrections applied for Day 5B"):
+architecture.md's success-envelope/400-status examples, and
+domain-model.md's `GET /incidents` worked example, which had omitted
+`fingerprint`. See "Current Day 5B scope" above for exactly what is and is
+not implemented; incident acknowledgment/resolution, authentication,
+query filtering, drift/telemetry, and the React dashboard remain Day 6 and
+later.

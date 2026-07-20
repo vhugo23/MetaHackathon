@@ -15,6 +15,13 @@ from meta_rne.api.app import app
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
 
+# Bound to the module-level production `app` (`create_app()` with all
+# defaults) — used only by tests/contract/api/test_health_api.py, which
+# needs no persistence. Day 5B's POST/GET tests each build their own
+# isolated `create_app(...)` instance directly (in-memory or PostgreSQL
+# repositories, deterministic clock/snapshot IDs) rather than sharing or
+# overriding this one — see tests/contract/api/test_config_ingestion_api.py
+# and test_incidents_api.py.
 @pytest.fixture()
 def client() -> TestClient:
     return TestClient(app)

@@ -232,10 +232,10 @@ only as fast test doubles for unit/integration tests.
   contract test (Day 4B3) — a `Session.commit` swapped for a function that
   raises, proving `commit()` rolls back and re-raises the original
   exception unchanged, with no partial state left behind. Both convert to
-  the controlled `PERSISTENCE_ERROR` / 500 response (architecture.md
-  Section 12) once `ConfigIngestionService` exists, never a leaked stack
-  trace. Deliberately fast and in-process — simulating a real Postgres
-  outage is out of proportion to what these tests need to prove.
+  the controlled `persistence_error` / 500 response (architecture.md
+  Section 12) — now implemented (Day 5B), never a leaked stack trace.
+  Deliberately fast and in-process — simulating a real Postgres outage is
+  out of proportion to what these tests need to prove.
 - **Concurrency test proving atomic deduplication.**
   `test_incident_repository_sqlalchemy__concurrent_upsert_same_fingerprint__yields_one_open`
   (`tests/integration/persistence/test_incident_repository_concurrency.py`):
@@ -453,26 +453,41 @@ test_config_ingestion_models.py` covers `IngestConfigurationCommand`/
 
 ## 14. Error and Failure-Path Testing
 
-| Error category | Produced at | Status | `error.code` | Named test |
-|---|---|---|---|---|
-| Malformed request schema | `api` (Pydantic) | 422 | `SCHEMA_VALIDATION_ERROR` | `test_config_api__invalid_body__returns_structured_validation_error` |
-| Unsupported vendor | `application` (`AdapterRegistry`) | 400 | `UNSUPPORTED_VENDOR` | `test_config_api__unsupported_vendor__returns_unsupported_vendor_error` |
-| Configuration parse failure | adapter | 400 | `CONFIG_PARSE_ERROR` | Unit: Section 10's parser-contract table. Contract: `test_config_api__malformed_config_text__returns_config_parse_error` |
-| Resource not found | `application` | 404 | `NOT_FOUND` | **Not in Slice 1** — Slice 1 has no single-resource `GET` endpoint (architecture.md Section 10); this test is added once `GET /devices/{id}` or `GET /incidents/{id}` ships (later slice). Do not claim this test belongs to Slice 1. |
-| Persistence failure | `persistence` (`FailingRepository`, Section 9) | 500 | `PERSISTENCE_ERROR` | `test_config_api__persistence_failure__returns_controlled_500` |
-| Unexpected/unmapped exception | anywhere | 500 | `INTERNAL_ERROR` | `test_config_api__unexpected_exception__returns_internal_error` |
+**Corrected for Day 5B (binding over the table this superseded):** no
+success/error envelope; `code` is lowercase snake_case; the message field
+is `detail`, not `message`; `UnsupportedVendorError`/
+`ConfigurationParseError` map to 422, not 400; persistence conflicts get
+their own 409 category, not folded into a generic 500. Actual test names
+also differ from the `test_config_api__...` names sketched in earlier
+planning — see `tests/contract/api/test_config_ingestion_api.py` and
+`tests/contract/api/test_incidents_api.py` for the real ones.
 
-- Every failure-path contract test asserts the **full envelope**
-  (`{"data": null, "error": {"code", "message"}}`), not just the status
-  code — this is Section 19's "structured invalid-input response" test
-  and AC-12 generally.
+| Error category | Produced at | Status | `code` | Test (actual) |
+|---|---|---|---|---|
+| Malformed request schema | `api` (Pydantic `RequestValidationError`) | 422 | FastAPI's own default body | `test_submit_configuration__blank_vendor__returns_422`, `..._unknown_body_field__rejected`, etc. |
+| Unsupported vendor | `domain` (`AdapterRegistry.resolve`) | 422 | `unsupported_vendor` | `test_submit_configuration__unsupported_vendor__returns_422_unsupported_vendor` |
+| Configuration parse failure | adapter, wrapped by `application` (`ConfigurationParseError`) | 422 | `configuration_parse_error` | Unit: Section 10's parser-contract table. Contract: `test_submit_configuration__parse_failure__returns_422_configuration_parse_error` |
+| Device vendor/timestamp conflict | `persistence` (`DeviceConflictError`) | 409 | `device_conflict` | `test_submit_configuration__device_conflict__returns_409_device_conflict` |
+| Duplicate snapshot | `persistence` (`SnapshotAlreadyExistsError`) | 409 | `snapshot_already_exists` | `test_submit_configuration__duplicate_snapshot__returns_409_snapshot_already_exists` |
+| Referenced device missing | `persistence` (`ReferencedDeviceNotFoundError`) | 409 | `referenced_device_not_found` | `test_submit_configuration__referenced_device_not_found__returns_409` |
+| Other caller/application `ValueError` | `application` | 422 | `invalid_request` | `test_submit_configuration__invalid_generated_snapshot_id__returns_422_invalid_request` |
+| Resource not found | `application` | 404 | `NOT_FOUND` | **Not in Slice 1** — Slice 1 has no single-resource `GET` endpoint (architecture.md Section 10); this test is added once `GET /devices/{id}` or `GET /incidents/{id}` ships (later slice). |
+| Persistence failure (base) | `persistence` (`PersistenceError`, registered after the conflict subclasses above) | 500 | `persistence_error` | `test_submit_configuration__persistence_failure__returns_generic_500` |
+| Serialization failure | `persistence` (`SerializationError`) | 500 | `serialization_error` | `test_submit_configuration__serialization_failure__returns_generic_500` |
+| Invalid injected clock (server-composition failure, not caller input) | `api` (`InvalidClockError`, deliberately unmapped) | 500 | none — falls through to unmapped-exception handling | `test_submit_configuration__invalid_clock__returns_generic_500_and_persists_nothing` |
+| Unexpected/unmapped exception | anywhere | 500 | none — FastAPI's normal production 500 behavior | `test_submit_configuration__unexpected_exception__returns_generic_production_500` |
+
+- Every failure-path contract test asserts the **direct `ApiErrorResponse`
+  body** (`{"code", "detail"}`), not an envelope — this is Section 19's
+  "structured invalid-input response" test and AC-12 generally.
 - Failure paths get the same test rigor as success paths (Testing Goal 5).
-- `test_config_api__unexpected_exception__returns_internal_error` uses a
-  test double (e.g., an `application` service replaced with one that
-  raises a plain, unmapped `Exception`) to prove the `api` layer's
-  catch-all still returns the standard envelope and 500 — never an
-  unhandled framework error page or a leaked stack trace — rather than
-  assuming FastAPI's default exception handling is already correct.
+- `test_submit_configuration__unexpected_exception__returns_generic_production_500`
+  and the invalid-clock test above use `TestClient(app,
+  raise_server_exceptions=False)` and a hand-written failing `UnitOfWork`
+  double to prove the framework's own unmapped-exception 500 behavior is
+  reached — Day 5B deliberately installs **no** broad catch-all handler
+  that would echo exception internals, unlike the generic-envelope
+  catch-all this table originally sketched.
 
 ---
 
@@ -583,8 +598,8 @@ alongside them (Section 14).
 | 1 | Valid Cisco configuration parsing — `CiscoAdapter.parse(fixture)` returns a fully-populated `NormalizedConfiguration` | Unit | none | `tests/unit/adapters/test_cisco_adapter.py` |
 | 2 | `test_cisco_adapter__same_input_parsed_twice__returns_equal_normalized_config` — deterministic normalization (AC-01) | Unit | none | `tests/unit/adapters/test_cisco_adapter.py` |
 | 3 | Malformed Cisco configuration rejection — one case per parser-contract category (Section 10) returns `ParseError` | Unit | none | `tests/unit/adapters/test_cisco_adapter.py` |
-| 4 | Unsupported vendor rejection — `POST` with `vendor: "juniper-junos"` returns 400 / `UNSUPPORTED_VENDOR` | Contract | none | `tests/contract/api/test_devices_api.py` |
-| 5 | Normalized interface and ACL assignment — the **`201` response's `data.normalized_config`** (architecture.md Section 10.1), not a follow-up `GET /devices/{id}` | Contract | none | `tests/contract/api/test_devices_api.py` |
+| 4 | Unsupported vendor rejection — `POST` with `vendor: "juniper-junos"` returns 422 / `unsupported_vendor` (Day 5B: not 400) | Contract | none | `tests/contract/api/test_config_ingestion_api.py` |
+| 5 | Normalized interface and ACL assignment — the **`201` response's `normalized_config`** (architecture.md Section 10.1; Day 5B: the response body directly, no `data` wrapper), not a follow-up `GET /devices/{id}` | Contract | none | `tests/contract/api/test_config_ingestion_api.py` |
 | 6 | Satisfied required-ACL policy creates no violation | Unit | none | `tests/unit/detection/test_policy_evaluator.py` |
 | 7 | Missing required ACL creates exactly one violation | Unit | none | `tests/unit/detection/test_policy_evaluator.py` |
 | 8 | `test_config_ingestion_service__satisfied_policy__returns_zero_counts_and_creates_no_incident` (AC-03, integration-level) | Integration | none | `tests/integration/application/test_config_ingestion_service.py` |
@@ -595,9 +610,9 @@ alongside them (Section 14).
 | 13 | `test_config_ingestion_service__created_incident__emits_created_log_after_commit` (AC-10) | Integration | in-memory log recorder | `tests/integration/application/test_config_ingestion_service.py` |
 | 14 | `test_config_ingestion_service__updated_incident__emits_updated_log_after_commit` (AC-10) | Integration | in-memory log recorder | `tests/integration/application/test_config_ingestion_service.py` |
 | 15 | `test_config_ingestion_service__commit_failure__rolls_back_and_emits_no_incident_log` | Integration | `FailingUnitOfWork` | `tests/integration/application/test_config_ingestion_service.py` |
-| 16 | Controlled persistence failure — `POST` with an injected `FailingRepository` returns 500 / `PERSISTENCE_ERROR`, no stack trace leaked | Contract | `FailingRepository` (fails via `upsert_open_incident`) | `tests/contract/api/test_devices_api.py` |
-| 17 | Structured invalid-input response — missing `vendor` or empty body returns 422 / `SCHEMA_VALIDATION_ERROR` | Contract | none | `tests/contract/api/test_devices_api.py` |
-| 18 | Unexpected exception returns 500 / `INTERNAL_ERROR`, never a raw stack trace | Contract | exception-raising test double | `tests/contract/api/test_devices_api.py` |
+| 16 | Controlled persistence failure — `POST` with a hand-written failing `UnitOfWork` returns 500 / `persistence_error`, no database detail leaked (Day 5B: not `PERSISTENCE_ERROR`) | Contract | hand-written failing `UnitOfWork` (fails on `commit()`) | `tests/contract/api/test_config_ingestion_api.py` |
+| 17 | Structured invalid-input response — missing `vendor` or empty body returns 422 via FastAPI's own `RequestValidationError` body (Day 5B: no custom envelope/code) | Contract | none | `tests/contract/api/test_config_ingestion_api.py` |
+| 18 | Unexpected exception returns a generic production 500, never a raw stack trace (Day 5B: no custom `INTERNAL_ERROR` handler — FastAPI's own unmapped-exception behavior, asserted via `TestClient(..., raise_server_exceptions=False)`) | Contract | hand-written failing `UnitOfWork` | `tests/contract/api/test_config_ingestion_api.py` |
 | 19 | `test_compute_fingerprint__delimiter_quote_escape_and_unicode_values__remain_unambiguous` (AC-11) | Unit | none | `tests/unit/domain/test_incident.py` — `compute_fingerprint` is a `domain` service (domain-model.md Section 17), not a `detection` one; `IncidentFactory`'s own tests live in `tests/unit/detection/test_incident_factory.py` |
 | 20 | `test_policy_evaluator__given_observed_at__populates_violation_detected_at` | Unit | none | `tests/unit/detection/test_policy_evaluator.py` |
 

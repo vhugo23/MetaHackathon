@@ -97,25 +97,46 @@ The final MVP includes a read-only React + TypeScript single-page application th
 
 **NFR-04 — Testability.** Every FR has at least one automated named test (see [test-strategy.md](./test-strategy.md)). The project builds cleanly and all tests pass before a task is complete.
 
-**NFR-05 — REST API Consistency.** All external operations are HTTP/JSON with one response envelope: `{"data": ..., "error": null}` on success, `{"data": null, "error": {"code": "...", "message": "..."}}` on failure. At minimum, these categories are distinguished by status code and `error.code`:
+**NFR-05 — REST API Consistency.** All external operations are HTTP/JSON.
+**A successful response body is the resource itself — no `{"data": ...,
+"error": null}` envelope** (Day 5B binding correction, `api/schemas.py`):
+`POST /devices/{device_id}/config` returns `SubmitConfigurationResponse`
+directly; `GET /incidents` returns `list[IncidentResponse]` directly, a
+bare JSON array. `GET /health` is unaffected and remains exactly
+`{"status": "ok"}`. A failed response is a bare
+`ApiErrorResponse`, also unwrapped:
 
-| Category | HTTP Status | `error.code` |
+```json
+{"code": "<stable_code>", "detail": "<public_detail>"}
+```
+
+`code` is a lowercase, stable, snake_case string; the message field is
+named `detail`, not `message`. At minimum, these categories are
+distinguished by status code and `code`:
+
+| Category | HTTP Status | `code` |
 |---|---|---|
-| Malformed request schema | 422 | `SCHEMA_VALIDATION_ERROR` |
-| Unsupported vendor | 400 | `UNSUPPORTED_VENDOR` |
-| Configuration parse failure | 400 | `CONFIG_PARSE_ERROR` |
-| Resource not found | 404 | `NOT_FOUND` |
-| Persistence failure | 500 | `PERSISTENCE_ERROR` |
-| Unexpected internal failure | 500 | `INTERNAL_ERROR` |
+| Malformed request schema (FastAPI/Pydantic `RequestValidationError`) | 422 | FastAPI's own default body — no custom `ApiErrorResponse` |
+| Unsupported vendor (`UnsupportedVendorError`) | 422 | `unsupported_vendor` |
+| Configuration parse failure (`ConfigurationParseError`) | 422 | `configuration_parse_error` |
+| Device vendor/timestamp conflict (`DeviceConflictError`) | 409 | `device_conflict` |
+| Duplicate snapshot (`SnapshotAlreadyExistsError`) | 409 | `snapshot_already_exists` |
+| Referenced device missing (`ReferencedDeviceNotFoundError`) | 409 | `referenced_device_not_found` |
+| Other caller/application `ValueError` | 422 | `invalid_request` |
+| Resource not found | 404 | `NOT_FOUND` — **not in Slice 1**, no single-resource `GET` endpoint exists yet |
+| Persistence failure (`PersistenceError`) | 500 | `persistence_error` (generic public detail — no SQL, constraint name, or stack trace) |
+| Serialization failure (`SerializationError`) | 500 | `serialization_error` (generic public detail) |
+| Unexpected/unmapped exception | 500 | normal production 500 behavior — no custom envelope, no leaked exception representation |
 
 `POST` endpoints that create a resource return `201`; `GET` endpoints return `200`.
 
-**The `SCHEMA_VALIDATION_ERROR`/`UNSUPPORTED_VENDOR` split is deliberate, not
+**The request-validation/`unsupported_vendor` split is deliberate, not
 redundant** (FR-01): `vendor` is a plain non-empty string at the Pydantic
-schema layer, never a `Literal`/enum of known vendors — a missing field or
-wrong JSON type is `SCHEMA_VALIDATION_ERROR` (422), decided before any
-domain code runs; a well-formed string that names no registered adapter
-(e.g., `"juniper-junos"`) is `UNSUPPORTED_VENDOR` (400), decided by
+schema layer, never a `Literal`/enum of known vendors — a missing field,
+wrong JSON type, or blank/whitespace-only value fails FastAPI's own
+request-validation path (422), decided before any domain code runs; a
+well-formed string that names no registered adapter (e.g.,
+`"juniper-junos"`) is `unsupported_vendor` (422, not 400), decided by
 `AdapterRegistry.resolve`. An internal `VendorType` enum exists, but only
 for vendors that have already resolved successfully — it is never the type
 of the raw request field.
@@ -202,13 +223,13 @@ Cisco only, single configuration submission, policy evaluation only — **exclud
 
 ## 10. Measurable Acceptance Criteria
 
-**AC-01** — Given a valid Cisco IOS-XE configuration, `POST /devices/{id}/config` returns `201` with a response body whose `data.normalized_config` includes hostname, at least one interface, and at least one BGP neighbor (if present in input) — see Section 11 for the full response shape. Because normalization is deterministic (domain-model.md invariant 10), submitting the same configuration text at two different times produces byte-for-byte identical `normalized_config` values.
+**AC-01** — Given a valid Cisco IOS-XE configuration, `POST /devices/{id}/config` returns `201` with a response body whose `normalized_config` includes hostname, at least one interface, and at least one BGP neighbor (if present in input) — see Section 11 for the full response shape. Because normalization is deterministic (domain-model.md invariant 10), submitting the same configuration text at two different times produces byte-for-byte identical `normalized_config` values.
 
-**AC-02** — Given a valid Arista EOS configuration, `POST /devices/{id}/config` returns `201` and produces a `data.normalized_config` with the same fields as AC-01. *(Later slice.)*
+**AC-02** — Given a valid Arista EOS configuration, `POST /devices/{id}/config` returns `201` and produces a `normalized_config` with the same fields as AC-01. *(Later slice.)*
 
 **AC-03** — Given a `NormalizedConfiguration` that satisfies every `RequiredAclRule` of its applicable `ConfigurationPolicy`, `PolicyEvaluator` produces zero `ConfigurationViolation`s and no incident is created; the POST response reports `violations_detected: 0, incidents_created: 0, incidents_updated: 0`.
 
-**AC-04** — Given a `ConfigurationPolicy` requiring `ACL-EXTERNAL-IN` inbound on `GigabitEthernet0/1` for `spine-01`, and a Cisco configuration for `spine-01` that does not assign that ACL, `POST /devices/spine-01/config` returns `201` with `data.violations_detected: 1, data.incidents_created: 1, data.incidents_updated: 0`, and `GET /incidents` subsequently returns exactly one `Incident` with `severity = Medium`, `source = POLICY_VIOLATION`, and `rule_ref` equal to the policy's ID.
+**AC-04** — Given a `ConfigurationPolicy` requiring `ACL-EXTERNAL-IN` inbound on `GigabitEthernet0/1` for `spine-01`, and a Cisco configuration for `spine-01` that does not assign that ACL, `POST /devices/spine-01/config` returns `201` with `violations_detected: 1, incidents_created: 1, incidents_updated: 0`, and `GET /incidents` subsequently returns exactly one `Incident` with `severity = Medium`, `source = POLICY_VIOLATION`, and `rule_ref` equal to the policy's ID.
 
 **AC-05** — Given a device whose baseline configuration contains an ACL and a later submission that removes it, `GET /devices/{id}/drift` returns a diff with at least one `removed` entry referencing that ACL. *(Later slice.)*
 
@@ -224,7 +245,7 @@ Cisco only, single configuration submission, policy evaluation only — **exclud
 
 **AC-11** — Given a finding whose fingerprint (a SHA-256 digest, domain-model.md Section 11 — not a delimiter-joined string) matches an existing `OPEN` incident, repeated detection updates that incident's `last_seen_at` and `occurrence_count` rather than creating a second `OPEN` incident with the same fingerprint. This holds even under concurrent `upsert_open_incident` calls (enforced by a PostgreSQL partial unique index, not application logic alone) — that guarantee is at the repository level; it is not itself a claim that Slice 1 has an integration test of two full concurrent HTTP requests. The second `POST /devices/spine-01/config` submission of the identical config reports `data.violations_detected: 1, data.incidents_created: 0, data.incidents_updated: 1`, and `GET /incidents` still returns exactly one incident, now with `occurrence_count: 2`.
 
-**AC-12** — Each of the six error categories in NFR-05 returns its documented HTTP status and the structured error envelope; no unhandled exception reaches the caller as a raw stack trace.
+**AC-12** — Each of the mapped error categories in NFR-05 returns its documented HTTP status and the direct `{"code", "detail"}` error body; no unhandled exception reaches the caller as a raw stack trace.
 
 **AC-13** — `make test` (or equivalent) runs all unit, integration, and contract tests and exits `0`. End-to-end tests run separately against a real API + PostgreSQL container pair.
 
@@ -276,29 +297,30 @@ uow.incidents.upsert_open_incident(candidate, fingerprint, observed_at)  FR-07
     ▼
 uow.commit() → stdout JSON log (includes outcome)       FR-07, FR-09
     ▼
-201 response: { data: { device_id, snapshot_id, normalized_config,
-                          violations_detected: 1, incidents_created: 1,
-                          incidents_updated: 0 }, error: null }        FR-08
+201 response (the resource itself, no envelope): { device_id, snapshot_id,
+    normalized_config, violations_detected: 1, incidents_created: 1,
+    incidents_updated: 0 }                                             FR-08
     │  counts computed from IncidentUpsertResult.outcome, never inferred
     ▼
 GET /incidents  →  [the incident, with full evidence + recommendation] FR-08
 ```
 
-**`POST /devices/{id}/config` success response (binding, `201`):**
+**`POST /devices/{id}/config` success response (binding, `201`, the
+resource itself — no envelope):**
 
 ```json
 {
-  "data": {
-    "device_id": "spine-01",
-    "snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-    "normalized_config": { "hostname": "spine-01", "interfaces": [ /* ... */ ], "routing": { /* ... */ }, "acls": [] },
-    "violations_detected": 1,
-    "incidents_created": 1,
-    "incidents_updated": 0
-  },
-  "error": null
+  "device_id": "spine-01",
+  "snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "normalized_config": { "hostname": "spine-01", "interfaces": [ /* ... */ ], "routing": { "bgp_neighbors": [] }, "acls": [] },
+  "violations_detected": 1,
+  "incidents_created": 1,
+  "incidents_updated": 0
 }
 ```
+
+`routing` has no `static_routes` key — the current normalized domain
+model (`NormalizedRouting`) carries no such field yet.
 
 `violations_detected` is the count of `ConfigurationViolation`s produced by this submission; `incidents_created` and `incidents_updated` split that count by whether each violation's fingerprint matched an existing `OPEN` incident (Section 10's dedup rule) — `incidents_created + incidents_updated == violations_detected` always holds for the policy path.
 

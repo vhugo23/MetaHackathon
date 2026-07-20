@@ -256,17 +256,22 @@ interface VendorConfigAdapter:
 - Unrecognized lines are ignored, not rejected, so realistic configs with
   unsupported features still ingest (A-07's representative-subset scope).
 - `resolve(vendor_id)` for a string that names no registered adapter
-  raises `UnsupportedVendorError` (400), not `ParseError` — resolving the
-  vendor and parsing its content are two separate failure modes (see the
-  vendor validation boundary note in product-spec.md FR-01/NFR-05).
+  raises `UnsupportedVendorError` — a `domain`-level exception, not
+  `ParseError` (resolving the vendor and parsing its content are two
+  separate failure modes); the `api` layer translates it to HTTP 422 with
+  `code: "unsupported_vendor"` (Section 12, Day 5B) — never 400.
 - First vertical slice: Cisco only. Arista is a later slice.
 
 ### 5.1 Cisco IOS-XE Parser Contract (representative, binding)
 
-`CiscoAdapter.parse(raw_text)` returns `ParseError` (`CONFIG_PARSE_ERROR`,
-400) for each of these — this is the full contract; Slice 1 may implement
-only the starred (`*`) subset, with the rest completed before FR-02 is
-considered done:
+`CiscoAdapter.parse(raw_text)` returns a `ParseError` **value** (never a
+thrown exception) for each of these — this is the full contract; Slice 1
+may implement only the starred (`*`) subset, with the rest completed
+before FR-02 is considered done. At the `api` layer, `application` wraps
+any such `ParseError` in `ConfigurationParseError`, which `api/errors.py`
+translates to HTTP **422** with `code: "configuration_parse_error"`
+(Section 12, Day 5B) — the parser itself has no HTTP status, only the
+translation at the API boundary does:
 
 | # | Failure | Slice 1 minimum? |
 |---|---|---|
@@ -310,7 +315,9 @@ NormalizedConfiguration
 │     ├── acl_in: string | null        # name reference into acls[]
 │     └── acl_out: string | null       # name reference into acls[]
 ├── routing
-│     ├── static_routes: [{ prefix, next_hop }]
+│     ├── static_routes: [{ prefix, next_hop }]  # deferred (Day 3A) — not yet
+│     │                                          # a field on NormalizedRouting;
+│     │                                          # see domain-model.md Section 5
 │     └── bgp_neighbors: [{ neighbor_ip, remote_as }]
 └── acls: [{ name, entries: [{ sequence, action, protocol, source, destination }] }]
 ```
@@ -340,7 +347,7 @@ vertical slice** — unlike drift (Section 8), it needs no history, so it
 fires on a device's very first submission.
 
 ```
-ConfigurationPolicyRepository.get_for_device(device_id)
+ConfigurationPolicyRepository.get_applicable_to_device(device_id)
     -> list[ConfigurationPolicy]   (matches this device_id, or a "*" wildcard)
    │
    ▼
@@ -524,12 +531,24 @@ no reopen workflow in the MVP.
 
 ## 10. REST API Boundary
 
-Satisfies FR-08 and NFR-05. Envelope:
+Satisfies FR-08. **No success envelope (Day 5B binding correction,
+superseding this section's original NFR-05-derived design;
+`docs/product-spec.md`'s NFR-05 table was corrected to match in a
+follow-up documentation patch):** a successful response body *is* the
+resource itself — `POST /devices/{id}/config` returns
+`SubmitConfigurationResponse` directly, `GET /incidents` returns
+`list[IncidentResponse]` directly, never wrapped
+in `{"data": ..., "error": null}`. A failed response is a bare
+`ApiErrorResponse`:
 
 ```json
-{"data": <resource or array>, "error": null}
-{"data": null, "error": {"code": "string", "message": "string"}}
+{"code": "string", "detail": "string"}
 ```
+
+`code` is lowercase snake_case (e.g. `unsupported_vendor`,
+`configuration_parse_error`, `device_conflict`), and the message field is
+named `detail`, not `message` — see Section 12 for the full, corrected
+category-to-status-to-code mapping.
 
 **Endpoints, first vertical slice + full MVP:**
 
@@ -560,30 +579,44 @@ authentication in the MVP (Section 14). The React dashboard (FR-10) is a
 separate deployable that calls these same endpoints — it does not get its
 own API surface.
 
-### 10.1 `POST /devices/{id}/config` — Success Response (binding)
+### 10.1 `POST /devices/{id}/config` — Success Response (binding, Day 5B)
 
 ```json
-// 201 Created
+// 201 Created — the response body IS this object, no envelope
 {
-  "data": {
-    "device_id": "spine-01",
-    "snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-    "normalized_config": {
-      "hostname": "spine-01",
-      "interfaces": [ { "name": "GigabitEthernet0/1", "ip_address": "10.0.0.1/30", "mtu": null, "admin_state": "up", "acl_in": null, "acl_out": null } ],
-      "routing": { "static_routes": [], "bgp_neighbors": [] },
-      "acls": []
-    },
-    "violations_detected": 1,
-    "incidents_created": 1,
-    "incidents_updated": 0
+  "device_id": "spine-01",
+  "snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "normalized_config": {
+    "hostname": "spine-01",
+    "interfaces": [
+      {
+        "name": "GigabitEthernet0/1",
+        "description": null,
+        "ip_address": "10.0.0.1/30",
+        "mtu": null,
+        "admin_state": "up",
+        "acl_in": null,
+        "acl_out": null
+      }
+    ],
+    "routing": { "bgp_neighbors": [] },
+    "acls": []
   },
-  "error": null
+  "violations_detected": 1,
+  "incidents_created": 1,
+  "incidents_updated": 0
 }
 ```
 
-This is the JSON body of `ConfigIngestionResult` (Section 4) — an
-`application`/`api`-layer DTO, not a domain entity.
+Note `routing` has no `static_routes` key — `NormalizedRouting` (Section
+6) carries no such field yet (Day 3A's documented gap), and the response
+schema (`SubmitConfigurationResponse`/`NormalizedConfigurationResponse`,
+`api/schemas.py`) invents no field the domain type doesn't actually have.
+
+This is the JSON body of `SubmitConfigurationResponse` (`api/schemas.py`,
+built via `.from_domain(ConfigIngestionResult)`) — an `api`-layer schema
+explicitly converted from the `application`-layer `ConfigIngestionResult`
+(Section 4), never a domain entity serialized directly.
 `violations_detected`/`incidents_created`/`incidents_updated` are counts
 computed by `ConfigIngestionService` for this one request, by tallying
 each `upsert_open_incident` call's `IncidentUpsertResult.outcome`
@@ -804,25 +837,42 @@ Layered, matching Section 2's dependency structure:
 - **Domain/detection layer** — pure functions return a valid result or an
   empty result (e.g., zero violations); no throwing for expected
   conditions.
-- **Application layer** — translates domain outcomes into a fixed set of
-  categories: `SchemaValidationError`, `UnsupportedVendorError`,
-  `ParseError`, `NotFoundError`, `PersistenceError`. No HTTP knowledge.
-- **API layer** — maps categories to status + `error.code`
-  (product-spec.md NFR-05):
+- **Application layer** — raises specific, typed exceptions (never a bare
+  `Exception`): `UnsupportedVendorError` (domain), `ConfigurationParseError`
+  (application, wrapping a `ParseError` verbatim), `DeviceConflictError`/
+  `SnapshotAlreadyExistsError`/`ReferencedDeviceNotFoundError`
+  (persistence), plain `ValueError` for other caller/application
+  invariants, `PersistenceError` (persistence, base), and
+  `SerializationError` (persistence). No HTTP knowledge.
+- **API layer** — maps categories to status + `code` (`api/errors.py`,
+  Day 5B binding correction — supersedes this table's original
+  `product-spec.md` NFR-05 values, which `product-spec.md` itself was not
+  updated to match this phase):
 
-| Category | Status | `error.code` |
+| Category | Status | `code` |
 |---|---|---|
-| `SchemaValidationError` (Pydantic model validation) | 422 | `SCHEMA_VALIDATION_ERROR` |
-| `UnsupportedVendorError` | 400 | `UNSUPPORTED_VENDOR` |
-| `ParseError` | 400 | `CONFIG_PARSE_ERROR` |
-| `NotFoundError` | 404 | `NOT_FOUND` |
-| `PersistenceError` | 500 | `PERSISTENCE_ERROR` |
-| anything unmapped | 500 | `INTERNAL_ERROR` |
+| Request schema validation (FastAPI/Pydantic `RequestValidationError`) | 422 | FastAPI's own default body — no custom `ApiErrorResponse` |
+| `UnsupportedVendorError` | 422 | `unsupported_vendor` |
+| `ConfigurationParseError` | 422 | `configuration_parse_error` |
+| `DeviceConflictError` | 409 | `device_conflict` |
+| `SnapshotAlreadyExistsError` | 409 | `snapshot_already_exists` |
+| `ReferencedDeviceNotFoundError` | 409 | `referenced_device_not_found` |
+| other caller/application `ValueError` | 422 | `invalid_request` |
+| `PersistenceError` (registered after the three conflict subclasses above) | 500 | `persistence_error` (generic public detail) |
+| `SerializationError` | 500 | `serialization_error` (generic public detail) |
+| `InvalidClockError` (injected clock returned non-UTC/naive — a server-composition failure, not caller input) | 500 | no custom handler — falls through to FastAPI's normal unmapped-exception behavior |
+| anything else unmapped | 500 | no custom handler — FastAPI's normal production 500 behavior, never a broad catch-all echoing exception internals |
 
-- **No silent failures.** Every error reaching the API boundary appears in
-  `error`. If `uow.commit()` fails after a violation was found, the whole
-  ingestion request fails with `PERSISTENCE_ERROR` and `uow.rollback()`
-  runs — a config is never "saved but its incident silently lost."
+`Resource not found` (404, `NOT_FOUND`) remains **not in Slice 1** — no
+single-resource `GET` endpoint exists yet (Section 10).
+
+- **No silent failures.** Every error reaching the API boundary produces a
+  structured `ApiErrorResponse{code, detail}` body (or, for request-schema
+  validation, FastAPI's own structured 422 body) — never an unhandled
+  stack trace. If `uow.commit()` fails after a violation was found, the
+  whole ingestion request fails with `persistence_error`/500 and
+  `uow.rollback()` runs — a config is never "saved but its incident
+  silently lost."
 - Config ingestion + violation detection + incident upsert happen inside
   one `UnitOfWork` transaction (Section 11), so a mid-flow failure rolls
   back cleanly rather than leaving partial state.

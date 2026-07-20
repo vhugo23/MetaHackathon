@@ -713,7 +713,7 @@ been corrected to match the verbatim-copy contract actually built.
 
 1. **Device identity is immutable.** A new `device_id` always means a new `Device`.
 2. **A ConfigurationSnapshot is immutable after creation**, including its embedded `normalized_config`.
-3. **`NormalizedConfiguration.acls` names are unique within one config.** An `Interface.acl_in`/`acl_out` reference must resolve to a name present in that same config's `acls`, or be `null`; a reference to a nonexistent ACL name is a `CONFIG_PARSE_ERROR`, not a valid normalized state.
+3. **`NormalizedConfiguration.acls` names are unique within one config.** An `Interface.acl_in`/`acl_out` reference must resolve to a name present in that same config's `acls`, or be `null`; a reference to a nonexistent ACL name is a parser-level `ParseError` (surfaced at the API boundary as HTTP 422, `code: "configuration_parse_error"` — architecture.md Section 5.1/12), not a valid normalized state.
 4. **A `RequiredAclRule` is satisfied only by exact match** on `acl_name` + `interface_name` + `direction`.
 5. **Every `Incident` has exactly one triggering finding type per fingerprint match.** There is no manual incident-creation path.
 6. **Severity, status, and source are drawn from fixed enums only** (Section 16) — no free-text values.
@@ -754,8 +754,12 @@ the type of the raw `vendor` field on an incoming `POST
 /devices/{id}/config` request: that field is validated at the HTTP schema
 layer only as a non-empty string (product-spec FR-01/NFR-05) — a
 Pydantic `Literal`/enum there would reject an unsupported-but-well-formed
-vendor with a 422 schema error, when the correct outcome is a 400
-`UNSUPPORTED_VENDOR` decided by `AdapterRegistry`, not by the schema.
+vendor with FastAPI's own generic request-validation error, decided
+*before* any domain code runs, when the correct outcome is HTTP 422 with
+`code: "unsupported_vendor"`, decided by `AdapterRegistry.resolve`, not by
+the schema (architecture.md Section 12, Day 5B — both paths happen to
+share the same HTTP status now, but only one carries the distinguishing
+`unsupported_vendor` code).
 
 **Identity formats are not uniform** — each identity type has a specific,
 binding rule:
@@ -872,7 +876,7 @@ that could each drift by a few milliseconds.
     "interfaces": [
       { "name": "GigabitEthernet0/1", "ip_address": "10.0.0.1/30", "mtu": null, "admin_state": "up", "acl_in": null, "acl_out": null }
     ],
-    "routing": { "static_routes": [], "bgp_neighbors": [] },
+    "routing": { "bgp_neighbors": [] },
     "acls": []
   },
   "submitted_at": "2026-07-18T10:00:00Z"
@@ -930,26 +934,27 @@ config.
 ```
 
 ```json
-// GET /incidents response envelope
-{
-  "data": [
-    {
-      "incident_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-      "device_id": "spine-01",
-      "source": "POLICY_VIOLATION",
-      "rule_ref": "policy-acl-external-in",
-      "affected_resource": "interface:GigabitEthernet0/1:acl_in",
-      "severity": "Medium",
-      "status": "OPEN",
-      "created_at": "2026-07-18T10:00:00Z",
-      "last_seen_at": "2026-07-18T10:00:00Z",
-      "occurrence_count": 1,
-      "evidence": { "source_snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "violation_type": "MISSING_REQUIRED_ACL", "expected_acl_name": "ACL-EXTERNAL-IN", "actual_acl_name": null, "interface_name": "GigabitEthernet0/1", "direction": "in" },
-      "recommendation": "Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1"
-    }
-  ],
-  "error": null
-}
+// GET /incidents response body — a bare JSON array, no envelope
+// (Day 5B binding correction; also restores "fingerprint", omitted by
+// an earlier draft of this example — IncidentResponse, api/schemas.py,
+// includes it)
+[
+  {
+    "incident_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "fingerprint": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    "device_id": "spine-01",
+    "source": "POLICY_VIOLATION",
+    "rule_ref": "policy-acl-external-in",
+    "affected_resource": "interface:GigabitEthernet0/1:acl_in",
+    "severity": "Medium",
+    "status": "OPEN",
+    "evidence": { "source_snapshot_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "violation_type": "MISSING_REQUIRED_ACL", "expected_acl_name": "ACL-EXTERNAL-IN", "actual_acl_name": null, "interface_name": "GigabitEthernet0/1", "direction": "in" },
+    "recommendation": "Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1",
+    "created_at": "2026-07-18T10:00:00Z",
+    "last_seen_at": "2026-07-18T10:00:00Z",
+    "occurrence_count": 1
+  }
+]
 ```
 
 stdout log line (FR-09, AC-10) — `outcome` distinguishes creation from update:

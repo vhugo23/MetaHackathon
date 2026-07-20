@@ -45,15 +45,18 @@ For each task:
 
 ## Current Phase
 
-**Day 5A — ConfigIngestionService.**
+**Day 5B — REST API (POST /devices/{device_id}/config, GET /incidents).**
 
 Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, Day 4A, Day 4B1, Day 4B2,
-Day 4B3, and Day 5A are complete and approved. See README.md's "Current
-Project Status" for the full history. Day 4B ("Slice 1 persistence
-foundations") is complete across all three reviewable gates (4B1/4B2/4B3).
+Day 4B3, Day 5A, and Day 5B are complete and approved. See README.md's
+"Current Project Status" for the full history. Day 4B ("Slice 1
+persistence foundations") is complete across all three reviewable gates
+(4B1/4B2/4B3). The first vertical slice (product-spec.md Section 11) is
+now runnable end to end over real HTTP against a real PostgreSQL database
+— see README.md's "Current Day 5B scope" for how to exercise it locally.
 
 Application code is currently allowed **only** for the completed Day 3A,
-Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, and Day 5A capabilities:
+Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, and Day 5B capabilities:
 
 - normalized configuration domain objects (Day 3A)
 - vendor adapter contracts, `AdapterRegistry`, Cisco IOS-XE parsing and
@@ -284,11 +287,144 @@ Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, and Day 5A capabilities:
    is now explicitly noted as deferred past Day 5A rather than described
    as already wired in.
 
-**Still prohibited**: API ingestion endpoints (`POST
-/devices/{device_id}/config`, `GET /incidents`), request/response schemas,
-dependency-injection wiring in `api/app.py`, seed execution during
-application startup, incident acknowledgment/resolution commands,
-structured logging, telemetry, `DriftDetector`, `RuleEngine`, React, and
-Playwright. All of these are Day 5B or later, against the domain model,
-architecture, and ports already documented, with tests written first per
-the Development Rules above.
+- `POST /devices/{device_id}/config` and `GET /incidents` (`meta_rne.
+  api.routes.build_router`), backed by explicit Pydantic schemas
+  (`meta_rne.api.schemas`) that are the resource itself on success — no
+  `{"data": ..., "error": null}` envelope — and a direct `list[IncidentResponse]`
+  for `GET /incidents`, never wrapped; `SubmitConfigurationRequest` rejects
+  unknown fields (`ConfigDict(extra="forbid")`) and blank
+  `vendor`/empty `raw_config_text` via Pydantic field validators, so those
+  fail through FastAPI's own 422 `RequestValidationError` path with no
+  custom envelope; `ApiErrorResponse{code, detail}` (lowercase snake_case
+  codes, `detail` not `message`) is the direct (unwrapped) body for every
+  mapped error category (Day 5B)
+- HTTP error mapping (`meta_rne.api.errors.register_exception_handlers`):
+  `UnsupportedVendorError`/`ConfigurationParseError` → 422
+  (`unsupported_vendor`/`configuration_parse_error`, the latter using the
+  real `ParseError.message`/`.line_number`, never a stack trace or the
+  full submitted config); `DeviceConflictError`/
+  `SnapshotAlreadyExistsError`/`ReferencedDeviceNotFoundError` → 409
+  (`device_conflict`/`snapshot_already_exists`/`referenced_device_not_found`);
+  any other caller/application `ValueError` → 422 (`invalid_request`);
+  `PersistenceError` → 500 (`persistence_error`, generic public detail,
+  registered after its specific conflict subclasses); `SerializationError`
+  → 500 (`serialization_error`, generic public detail); `InvalidClockError`
+  (an injected clock returning a naive/non-UTC value — a server-composition
+  failure, not caller input) and any other unmapped exception get **no**
+  custom handler at all, falling through to FastAPI's normal unmapped-
+  exception 500 behavior rather than a broad catch-all (Day 5B)
+- `meta_rne.api.clock.utc_now`/`require_utc`/`InvalidClockError` — the
+  `POST` route calls its injected clock exactly once per request,
+  validates the result is UTC-aware before constructing
+  `IngestConfigurationCommand`, and `ConfigIngestionService.ingest` is
+  called exactly once; `GET /incidents` never calls the clock at all
+  (Day 5B)
+- `meta_rne.application.incident_queries.ListIncidentsService` — the
+  narrow read-only use case behind `GET /incidents`: one `UnitOfWork` per
+  call, `uow.incidents.list_all()` exactly once, never `commit()`s,
+  `close()` exactly once, with the same exception-preserving
+  rollback/close lifecycle as `ConfigIngestionService` (a SQLAlchemy read
+  can open a transaction that still needs an explicit rollback) (Day 5B)
+- `create_app(...)` (`meta_rne.api.app`) — a controlled composition
+  factory, never a bare module-level side effect: importing `api.app`
+  creates no SQLAlchemy engine/`Session` and requires no `DATABASE_URL`;
+  production engine construction
+  (`meta_rne.api.dependencies._LazySqlAlchemyUnitOfWorkFactory`) is lazy,
+  happening on first actual request or lifespan startup, and the engine is
+  disposed on shutdown; every request gets its own `UnitOfWork`/`Session`
+  because `ConfigIngestionService`/`ListIncidentsService` each invoke the
+  injected `unit_of_work_factory` fresh, once per operation; the
+  module-level `app = create_app()` (unchanged import path, for Uvicorn)
+  is otherwise untouched by tests — every test builds its own isolated
+  `create_app(...)` instance directly, never `app.dependency_overrides`
+  (Day 5B)
+- idempotent Slice 1 policy seeding
+  (`meta_rne.api.dependencies.seed_slice1_policies`), run from
+  `create_app`'s FastAPI `lifespan` only when `seed_on_startup=True`
+  (the production default; contract tests pass `seed_on_startup=False`
+  except the dedicated startup tests) — one validated UTC timestamp from
+  the injected clock, one `UnitOfWork`, `build_slice1_policies` +
+  `seed_if_missing`, commit once, close once, with the same
+  exception-preserving rollback/close lifecycle; a semantic seed conflict
+  (`PolicySeedConflictError`) fails application startup rather than being
+  suppressed. Alembic migrations remain an explicit deployment step run
+  *before* Uvicorn starts (Docker `CMD`, unchanged) — never a FastAPI
+  startup hook, per architecture.md Section 11.2 (Day 5B)
+- production `AdapterRegistry` composition
+  (`meta_rne.api.dependencies.build_production_adapter_registry`) — exactly
+  one registry containing `CiscoAdapter`, injected into
+  `ConfigIngestionService`; no vendor resolution or parsing happens in a
+  route (Day 5B)
+- API contract tests against in-memory repositories
+  (`tests/contract/api/test_config_ingestion_api.py`,
+  `tests/contract/api/test_incidents_api.py`,
+  `tests/contract/api/test_startup_seeding_api.py`) and focused PostgreSQL
+  API integration tests
+  (`tests/integration/api/test_api_postgres.py`) proving real HTTP →
+  real transaction atomicity, independent POST/GET Sessions, and the real
+  lazy-`DATABASE_URL` production composition path (Day 5B)
+
+**Documentation corrections applied for Day 5B:**
+
+1. `docs/architecture.md` Section 10/10.1/12 — still documented a
+   `{"data": ..., "error": null}` success envelope and an HTTP 400 for
+   `UnsupportedVendorError`/`ParseError`; the actual approved Day 5B
+   design returns the resource directly on success (no envelope) and maps
+   those two categories to 422 (schema-adjacent caller errors), with
+   persistence conflicts split out to 409 — a category the original table
+   never listed at all. Corrected; see docs/test-strategy.md Section 14's
+   updated table for the full mapping.
+2. `docs/domain-model.md` Section 18's `GET /incidents` worked example
+   omitted `fingerprint` from each list item and wrapped the array in the
+   same success envelope as the corrected item above; corrected to a bare
+   `list[IncidentResponse]` including `fingerprint`, matching
+   `IncidentResponse` (`api/schemas.py`) exactly.
+3. `docs/architecture.md` Section 11.1's `ConfigurationPolicyRepository`
+   diagram comment still said `get_for_device`, already superseded by Day
+   4B2's `get_applicable_to_device` (and already corrected everywhere else
+   in this file during Day 4B2/5A) — corrected here too.
+4. `docs/product-spec.md` NFR-05, AC-01/AC-02/AC-04/AC-12, and Section 11's
+   worked example still documented the same obsolete envelope/400 contract
+   as item 1 above (left uncorrected in the initial Day 5B pass, out of
+   that phase's approved file list). Corrected in a follow-up minimal
+   patch: NFR-05's status/`code` table now matches `api/errors.py` exactly
+   (422 for `UnsupportedVendorError`/`ConfigurationParseError`, 409 for the
+   three persistence-conflict subclasses, `detail` not `message`, no
+   envelope); the `data.`-prefixed field references in AC-01/AC-02/AC-04
+   and Section 11's worked JSON were corrected to direct fields; Section
+   11's `routing` example no longer shows `static_routes`, which
+   `NormalizedRouting` does not have.
+5. The three genuine conflicts flagged (but deliberately left uncorrected)
+   at the end of item 4 above are now also fixed, in a second follow-up
+   patch: `docs/architecture.md` Section 5.1's Cisco parser-contract table
+   no longer pairs `ParseError` with `CONFIG_PARSE_ERROR`/400 — reworded to
+   state the parser returns a value with no HTTP status of its own, and
+   that `application`/`api` translate it to HTTP 422 with
+   `code: "configuration_parse_error"`; Section 5's `resolve(vendor_id)`
+   bullet corrected from `UnsupportedVendorError (400)` to 422 with
+   `code: "unsupported_vendor"`; Section 10's own cross-reference to
+   `docs/product-spec.md`'s NFR-05 table (claiming it "still documents the
+   older contract") was itself stale after item 4's patch and is now
+   corrected, along with a leftover wrong class name
+   (`ConfigIngestionResponse` → `SubmitConfigurationResponse`) found
+   alongside it. `docs/domain-model.md`'s informal prose at two spots
+   (`CONFIG_PARSE_ERROR`/`UNSUPPORTED_VENDOR`, uppercase) is corrected to
+   the lowercase public codes, and its `ConfigurationSnapshot` worked
+   example no longer shows `static_routes`. `docs/test-strategy.md`
+   Section 9's `PERSISTENCE_ERROR` reference (written when
+   `ConfigIngestionService` didn't exist yet) is corrected to
+   `persistence_error`, now that it does. `docs/architecture.md` Section
+   6's canonical `NormalizedConfiguration` diagram and Section 8's
+   (explicitly not-yet-implemented) `DriftDetector` bullet still name
+   `static_routes` — left as-is, since Section 6 is now annotated inline
+   as deferred and Section 8 is already headed "not part of the first
+   vertical slice"; neither claims to be current Day 5B behavior.
+
+**Still prohibited**: incident acknowledgment/resolution commands,
+authentication/authorization, filtering/pagination/sorting query
+parameters, drift detection, anomaly/telemetry ingestion, structured
+logging beyond FastAPI's own request logging, the React dashboard,
+Playwright, browser end-to-end tests, and new Alembic migrations. All of
+these are Day 6 or later, against the domain model, architecture, and
+ports already documented, with tests written first per the Development
+Rules above.
