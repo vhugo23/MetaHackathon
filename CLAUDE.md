@@ -45,16 +45,15 @@ For each task:
 
 ## Current Phase
 
-**Day 4B3 — IncidentRepository (atomic `upsert_open_incident`) and
-UnitOfWork.**
+**Day 5A — ConfigIngestionService.**
 
 Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, Day 4A, Day 4B1, Day 4B2,
-and Day 4B3 are complete and approved. See README.md's "Current Project
-Status" for the full history. Day 4B ("Slice 1 persistence foundations")
-is now complete across all three reviewable gates (4B1/4B2/4B3).
+Day 4B3, and Day 5A are complete and approved. See README.md's "Current
+Project Status" for the full history. Day 4B ("Slice 1 persistence
+foundations") is complete across all three reviewable gates (4B1/4B2/4B3).
 
 Application code is currently allowed **only** for the completed Day 3A,
-Day 3B, Day 4A, Day 4B1, Day 4B2, and Day 4B3 capabilities:
+Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, and Day 5A capabilities:
 
 - normalized configuration domain objects (Day 3A)
 - vendor adapter contracts, `AdapterRegistry`, Cisco IOS-XE parsing and
@@ -247,10 +246,49 @@ Day 3B, Day 4A, Day 4B1, Day 4B2, and Day 4B3 capabilities:
    name the actual test (`..._yields_one_open`, four workers, not two,
    `occurrence_count == 4`) and its actual file location.
 
-**Still prohibited**: `ConfigIngestionService`, API ingestion endpoints,
-request/response schemas, seed execution during application startup,
-incident acknowledgment/resolution commands, structured logging,
-telemetry, `DriftDetector`, `RuleEngine`, React, and Playwright. All of
-these are Day 5 or later, against the domain model, architecture, and
-ports already documented, with tests written first per the Development
-Rules above.
+- `ConfigIngestionService` (`meta_rne.application.config_ingestion`),
+  orchestrating adapter resolution/normalization, the existing Device/
+  ConfigurationSnapshot two-stage save, `PolicyEvaluator.evaluate`,
+  `IncidentFactory.build_candidate`, `compute_fingerprint`, and
+  `IncidentRepository.upsert_open_incident` across exactly one injected
+  `UnitOfWork` per successful call; `IngestConfigurationCommand`/
+  `ConfigIngestionResult` (`meta_rne.application.models`);
+  `ConfigurationParseError` (`meta_rne.application.errors`), preserving the
+  adapter's `ParseError` value verbatim; an injectable
+  `default_snapshot_id_factory` (`meta_rne.application.snapshot_id`); a
+  pre-transaction boundary (command validation, adapter resolution, parse,
+  canonical-`VendorType` derivation, snapshot-ID generation/validation) that
+  creates zero UnitOfWorks for an unsupported vendor, a parse failure, or an
+  invalid generated ID; exception-preserving rollback/close handling that
+  never replaces the original exception with a secondary lifecycle failure
+  (Day 5A)
+- unit tests (application command/result validation, service orchestration
+  against a real `InMemoryUnitOfWork`, including pre-transaction-boundary,
+  success, and rollback/lifecycle cases) and focused PostgreSQL integration
+  tests proving atomic multi-table commit and atomic multi-table rollback
+  after a forced late failure (Day 5A)
+
+**Documentation corrections applied for Day 5A:**
+
+1. `docs/architecture.md` §4/§4.1 — the previously "binding" design (a
+   positional `ingest(device_id, vendor, config_text)` signature, an
+   injected `Clock` port supplying `observed_at`, and a stale
+   `get_for_device` reference already superseded by Day 4B2's
+   `get_applicable_to_device`) did not match the actual approved Day 5A
+   design: an explicit `IngestConfigurationCommand` (carrying
+   `observed_at` directly, no `Clock` dependency), a pre-transaction
+   boundary that opens zero `UnitOfWork`s for an unsupported vendor, a
+   parse failure, or an invalid generated snapshot ID, and
+   `ConfigurationParseError` (not a DTO variant) as the parse-failure
+   signal. Corrected to match; structured logging (the old steps 10/13)
+   is now explicitly noted as deferred past Day 5A rather than described
+   as already wired in.
+
+**Still prohibited**: API ingestion endpoints (`POST
+/devices/{device_id}/config`, `GET /incidents`), request/response schemas,
+dependency-injection wiring in `api/app.py`, seed execution during
+application startup, incident acknowledgment/resolution commands,
+structured logging, telemetry, `DriftDetector`, `RuleEngine`, React, and
+Playwright. All of these are Day 5B or later, against the domain model,
+architecture, and ports already documented, with tests written first per
+the Development Rules above.

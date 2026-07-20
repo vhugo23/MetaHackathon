@@ -419,6 +419,86 @@ during application startup, incident acknowledgment/resolution commands,
 structured logging, `DriftDetector`, `RuleEngine`, telemetry, and the React
 dashboard.
 
+### Current Day 5A scope
+
+The first application-layer use case: `ConfigIngestionService`, orchestrating
+every existing Day 3A–4B3 component (adapter registry, `PolicyEvaluator`,
+`IncidentFactory`, all four repositories) across exactly one `UnitOfWork`
+transaction per call. No HTTP layer yet — `ConfigIngestionService` is called
+directly by tests; Day 5B wires it behind `POST /devices/{device_id}/config`.
+
+Day 5A adds:
+
+- **`IngestConfigurationCommand`/`ConfigIngestionResult`**
+  (`meta_rne.application.models`) — the command carries `vendor: str`
+  exactly as an external caller would provide it (never `VendorType`), so an
+  unsupported vendor stays representable before registry resolution; the
+  result (`device_id`, `snapshot_id`, `normalized_config`,
+  `violations_detected`, `incidents_created`, `incidents_updated`) matches
+  the vertical-slice response shape above verbatim and validates
+  `incidents_created + incidents_updated == violations_detected` at
+  construction.
+- **`ConfigurationParseError`** (`meta_rne.application.errors`) — the one
+  narrow application error this phase; wraps and preserves the adapter's
+  `ParseError` value verbatim on `.parse_error` when `adapter.parse()`
+  returns one, since Day 5A has no normalized configuration to persist or
+  return in that case. No broader `ConfigIngestionError` superclass was
+  introduced without a second error needing it.
+- **Injectable snapshot-ID generation**
+  (`meta_rne.application.snapshot_id.default_snapshot_id_factory`,
+  `str(uuid4())`) — `ConfigurationSnapshotRepository.add` never generates
+  its own ID (unlike `IncidentRepository`'s `incident_id_factory`), so the
+  service generates and validates (non-empty, non-whitespace) exactly one ID
+  per successfully normalized command, before any `UnitOfWork` exists.
+- **A pre-transaction boundary** — command validation, adapter resolution,
+  `adapter.parse()` (exactly once), canonical `VendorType` derivation from
+  `adapter.vendor_id` (never trusting the caller's raw string as a domain
+  vendor), and snapshot-ID generation/validation all happen before any
+  `UnitOfWork` is constructed. An unsupported vendor, a parse failure, or an
+  invalid generated ID therefore creates zero UnitOfWorks — proven directly
+  by asserting the injected `unit_of_work_factory` was never called, not by
+  asserting `close()` was skipped.
+- **One `UnitOfWork` per successful call** — new-device staging follows the
+  existing two-stage save (null references → add snapshot → save with
+  `current_snapshot_id == baseline_snapshot_id == snapshot_id`); an existing
+  device is explicitly reconstructed with the *this call's* canonical
+  vendor (never silently preserving the stored vendor), the new
+  `current_snapshot_id`, and the existing `baseline_snapshot_id`/
+  `created_at` — so a vendor change surfaces as `DeviceConflictError` from
+  `DeviceRepository.save` itself, after the snapshot has already been
+  staged, relying on the whole-transaction rollback rather than a
+  duplicate service-level check.
+- **Policy evaluation and incident upsert inside the same transaction** —
+  `get_applicable_to_device` → `PolicyEvaluator.evaluate` → per violation,
+  `IncidentFactory.build_candidate` → `compute_fingerprint` →
+  `upsert_open_incident`, counting `CREATED`/`UPDATED` outcomes. Both
+  `PolicyEvaluator.evaluate` and `IncidentFactory.build_candidate` are
+  accepted as injected, narrow, pure collaborators with the real functions
+  as production defaults — used only to prove late-failure rollback
+  deterministically in tests, never to add a new abstraction layer. The
+  service never constructs an `Incident` domain object directly and never
+  seeds policies itself.
+- **Exception-preserving lifecycle handling** — on any exception after the
+  `UnitOfWork` is constructed, the service attempts `rollback()` then
+  `close()` exactly once each and re-raises the *original* exception
+  unchanged; a rollback or close failure during error handling is recorded
+  as an exception note (`add_note`) rather than replacing the original
+  exception. On success, `close()` runs once after `commit()` and any
+  failure there is allowed to propagate normally (no swallowed exception on
+  any path, `close()` never called twice).
+
+Backend test count: **370** (`pytest`; 270 run via `pytest -m "not
+postgres"`, 100 via `pytest -m postgres` against a real PostgreSQL
+instance, including three focused `ConfigIngestionService` tests proving
+atomic multi-table commit and atomic multi-table rollback after a forced
+late failure against a real transaction).
+
+**Not implemented yet** (deliberately — Day 5B and later): FastAPI
+ingestion endpoints, request/response schemas, dependency-injection wiring
+in `api/app.py`, seed execution during application startup, incident
+acknowledgment/resolution commands, structured logging, `DriftDetector`,
+`RuleEngine`, telemetry, and the React dashboard.
+
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 
 - `ConfigurationPolicy` and `RequiredAclRule` — a seeded, fixture-data
@@ -577,3 +657,17 @@ observation guard were also brought in line with what was actually built.
 See "Current Day 4B3 scope" above for exactly what is and is not
 implemented — no `ConfigIngestionService`, API endpoints, or startup
 seeding exists yet; those are Day 5.
+
+**Day 5A — ConfigIngestionService.** The first application-layer use case:
+`ConfigIngestionService` orchestrates adapter resolution/normalization,
+the Device/ConfigurationSnapshot two-stage save, `PolicyEvaluator`, and
+`IncidentRepository.upsert_open_incident` across exactly one `UnitOfWork`
+transaction per call, test-first (the first service test was run against a
+codebase with no `ConfigIngestionService` at all, producing a real
+`ModuleNotFoundError`, before the service was written), bringing the suite
+to 370 tests (270 fast + 100 against real PostgreSQL). No HTTP endpoint,
+request/response schema, or dependency-injection wiring exists yet — the
+service is called directly by tests. See "Current Day 5A scope" above for
+exactly what is and is not implemented; `POST /devices/{device_id}/config`,
+`GET /incidents`, FastAPI schemas, and startup policy seeding remain
+Day 5B.

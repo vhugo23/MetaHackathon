@@ -794,7 +794,7 @@ is the caller's (`application` layer's) job.
 | `RuleEngine` | `evaluate(observed_at, recent_samples: list[TelemetrySample]) -> list[Anomaly]` | FR-06, later slice |
 | `IncidentFactory` | `build_candidate(finding) -> IncidentCandidate` (Section 11's fields, pre-fingerprint) | FR-07 |
 | `compute_fingerprint` | `(device_id, source, rule_ref, affected_resource) -> str` (SHA-256 hex, Section 11) | Section 11 |
-| `Clock` | `now_utc() -> timestamp` — `SystemClock` (production) / `FixedClock` (tests) | architecture.md Section 4.1 |
+| `Clock` (deferred past Day 5A) | `now_utc() -> timestamp` — `SystemClock` (production) / `FixedClock` (tests) | architecture.md Section 4.1; `ConfigIngestionService` instead takes `observed_at` directly on `IngestConfigurationCommand` this phase |
 
 `IncidentFactory` is the single place that reshapes a finding into an
 `IncidentCandidate` — kept in one place rather than scattered across
@@ -808,19 +808,22 @@ severity or recommendation template itself; that becomes relevant once
 string of their own) are implemented. `PolicyEvaluator.evaluate` and
 `RuleEngine.evaluate` both
 take their timestamp (`observed_at`) as an explicit argument rather than
-calling `Clock` themselves — `Clock` is read exactly once per operation,
-by `application` (architecture.md Section 4.1), which is what lets both
-functions stay pure and framework-independent (NFR-02) while every
-finding they return still carries accurate, consistent context.
+calling `Clock` themselves — `application` supplies that value exactly
+once per operation, which is what lets both functions stay pure and
+framework-independent (NFR-02) while every finding they return still
+carries accurate, consistent context. As of Day 5A, `ConfigIngestionService`
+takes that value directly from `IngestConfigurationCommand.observed_at`
+(caller-supplied) rather than reading it from an injected `Clock` port —
+see architecture.md Section 4.1's Day 5A correction.
 
 ---
 
 ## 18. Example Objects — First Vertical Slice
 
 **Every timestamp below is the same value, `2026-07-18T10:00:00Z`, by
-design.** `ConfigIngestionService` obtains exactly one `observed_at`
-(architecture.md Section 4.1) for the whole operation and passes it
-everywhere a timestamp is needed —
+design.** `ConfigIngestionService` receives exactly one `observed_at` on
+`IngestConfigurationCommand` (architecture.md Section 4/4.1) for the whole
+operation and passes it everywhere a timestamp is needed —
 `ConfigurationSnapshot.submitted_at`, `ConfigurationViolation.detected_at`,
 `Incident.created_at`, `Incident.last_seen_at`, and the stdout log's
 `timestamp` all come from that one call, not from separate clock reads

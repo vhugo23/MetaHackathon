@@ -134,10 +134,16 @@ POST /devices/{id}/config
 
 ```
 ConfigIngestionService.ingest(
-    device_id: str,
-    vendor: str,
-    config_text: str
+    command: IngestConfigurationCommand
 ) -> ConfigIngestionResult
+
+IngestConfigurationCommand
+  device_id: string
+  vendor: string             # external, unresolved caller string — never
+                              # trusted as a domain VendorType directly
+                              # (Day 5A binding correction; see below)
+  raw_config_text: string    # preserved exactly, never stripped
+  observed_at: timestamp     # caller-supplied, timezone-aware UTC
 
 ConfigIngestionResult
   device_id
@@ -152,67 +158,84 @@ ConfigIngestionResult
 (Section 10.1) — it is not the same type as `IncidentUpsertResult`
 (Section 11), which stays internal to the repository call.
 `ConfigIngestionService` converts each `IncidentUpsertResult.outcome` it
-receives from step 8 below into the `incidents_created`/
+receives from step 10 below into the `incidents_created`/
 `incidents_updated` counts on the `ConfigIngestionResult` it returns; no
 caller of `ingest()` ever sees an `IncidentUpsertResult` directly.
 
-`ConfigIngestionService.ingest` performs exactly this sequence (binding):
+`ConfigIngestionService.ingest` performs exactly this sequence (binding,
+implemented Day 5A):
 
-1. Validate the vendor through `AdapterRegistry.resolve` — unknown vendor
-   → `UnsupportedVendorError` (400), no further processing, no `UnitOfWork`
-   opened yet.
-2. Parse and normalize (`adapter.parse(raw_text)`) — **before** any
-   persistent change. Parse failure → `ParseError` (400), nothing written.
-3. Obtain `observed_at = clock.now_utc()` (Section 4.1) and open one
-   `UnitOfWork` (Section 11).
-4. Create or update `Device` state (`uow.devices`).
-5. Save the immutable `ConfigurationSnapshot` (`uow.configuration_snapshots`)
-   — `normalized_config` embedded inline, `submitted_at = observed_at`
-   (Section 6: normalization itself carries no timing field).
-6. Read applicable policies (`uow.configuration_policies.get_for_device`).
-7. Evaluate: `PolicyEvaluator.evaluate(device_id, snapshot_id, observed_at,
-   config, policies) -> list[ConfigurationViolation]` (Section 7) — every
-   violation carries `source_snapshot_id = snapshot_id` and
+1. Validate the command (non-empty `device_id`/`vendor`, non-empty
+   `raw_config_text`, timezone-aware UTC `observed_at`).
+2. Resolve the vendor through `AdapterRegistry.resolve(command.vendor)` —
+   unknown vendor → `UnsupportedVendorError`, no further processing, no
+   `UnitOfWork` opened yet.
+3. Parse and normalize (`adapter.parse(command.raw_config_text)`, exactly
+   once) — **before** any persistent change. A `ParseError` result raises
+   `ConfigurationParseError` (the `ParseError` preserved verbatim on
+   `.parse_error`), nothing written, no `UnitOfWork` opened.
+4. Derive the canonical `VendorType` from `adapter.vendor_id` (never from
+   `command.vendor` directly), and generate exactly one snapshot ID via an
+   injected `snapshot_id_factory` — an empty/whitespace-only generated ID
+   raises `ValueError`, again before any `UnitOfWork` is opened.
+5. Only now, open one `UnitOfWork` (Section 11).
+6. Create or update `Device` state (`uow.devices`) — a new device is
+   staged with null references, then re-saved once the snapshot exists
+   (step 7); an existing device is saved with *this call's* canonical
+   vendor (never silently preserving the stored vendor), the new
+   `current_snapshot_id`, and its existing `baseline_snapshot_id`/
+   `created_at` unchanged — a vendor change therefore surfaces as
+   `DeviceConflictError` from `uow.devices.save` itself, after the
+   snapshot has already been staged, relying on whole-transaction
+   rollback rather than a duplicate service-level check.
+7. Save the immutable `ConfigurationSnapshot` (`uow.configuration_snapshots`)
+   — `normalized_config` embedded inline, `submitted_at = command.
+   observed_at` (Section 6: normalization itself carries no timing field).
+8. Read applicable policies
+   (`uow.configuration_policies.get_applicable_to_device(device_id)`).
+9. Evaluate: `PolicyEvaluator.evaluate(device_id, snapshot_id, observed_at,
+   config, policies) -> tuple[ConfigurationViolation, ...]` (Section 7) —
+   every violation carries `source_snapshot_id = snapshot_id` and
    `detected_at = observed_at`, both passed in, never read from a clock or
    repository inside the evaluator.
-8. For each violation: `IncidentFactory.build_candidate` → `uow.incidents.
-   upsert_open_incident(candidate, fingerprint, observed_at) ->
-   IncidentUpsertResult` (Section 9) — atomic, one call per finding.
-9. `uow.commit()` — once, for every write above.
-10. **Only if commit succeeds**, emit one structured log per
-    `IncidentUpsertResult` (Section 13). A commit failure calls
-    `uow.rollback()` instead and emits no incident log (Section 12).
-11. Return the response DTO (Section 10.1), tallying
+10. For each violation: `IncidentFactory.build_candidate` → `uow.incidents.
+    upsert_open_incident(candidate, fingerprint, observed_at) ->
+    IncidentUpsertResult` (Section 9) — atomic, one call per finding.
+11. `uow.commit()` — once, for every write above. Any exception raised
+    after step 5 triggers `uow.rollback()` then `uow.close()` (each
+    attempted exactly once; a secondary rollback/close failure is recorded
+    as an exception note rather than replacing the original exception),
+    and the original exception is re-raised unchanged.
+12. Return the response DTO (Section 10.1), tallying
     `incidents_created`/`incidents_updated` directly from each result's
     `.outcome` — never inferred from `occurrence_count`, never a second
     lookup.
 
-Drift detection (Section 8) is **not** one of the 11 steps above — for a
+Drift detection (Section 8) is **not** one of the steps above — for a
 device with a prior submission, it is wired into this same sequence
-(after step 7, before step 9) in the *next* slice (product-spec
-Section 11), reusing the same `uow` and the same post-commit logging rule
-already established here.
+(after step 9, before step 11) in the *next* slice (product-spec
+Section 11), reusing the same `uow`.
 
-**A failure while writing the observability log after a successful
-commit does not roll back durable data or turn the response into a
-`PersistenceError`.** The database commit is authoritative; logging is a
-best-effort side channel once that commit has already succeeded.
+**Structured logging (originally planned as step 10/13 here) is deferred
+past Day 5A**, along with the `POST /devices/{id}/config` HTTP layer
+itself (Day 5B) — `ConfigIngestionService` implements steps 1–12 above and
+nothing beyond them. When logging is added, the same rule already
+documented in Section 13 applies: a failure while writing the log after a
+successful commit must not roll back durable data or turn the response
+into a `PersistenceError` — the database commit is authoritative; logging
+is a best-effort side channel once that commit has already succeeded.
 
-### 4.1 Clock (explicit time)
+### 4.1 Clock (explicit time) — deferred past Day 5A
 
-`domain`/`detection` never read the system clock — `application` reads it
-once per operation and passes the value down, so both stay deterministic
-and testable without real time:
-
-```
-Clock
-  now_utc() -> timestamp
-```
-
-`SystemClock` (production, wraps the OS UTC clock) and `FixedClock`
-(tests, returns a fixed value) are its only two implementations, injected
-into `application` services the same way repositories are. Tests never
-`sleep` to exercise time-dependent behavior — they advance a `FixedClock`.
+Originally planned as an injected `Clock` port so `application` reads
+`now_utc()` once per operation. Day 5A's binding correction instead makes
+`observed_at` a direct, caller-supplied field on
+`IngestConfigurationCommand` — `ConfigIngestionService` takes no `Clock`
+dependency this phase; a future `POST /devices/{id}/config` handler
+(Day 5B) is expected to supply `observed_at` (e.g. via a `Clock` at the
+API boundary). `domain`/`detection` still never read the system clock
+either way (NFR-02/NFR-03) — `PolicyEvaluator` continues to receive
+`observed_at` as a plain passed-in argument (Section 7).
 
 ---
 

@@ -432,6 +432,23 @@ Tests architecture.md Section 5's contract:
   is what backs architecture.md Section 12's "no log without a successful
   commit" rule.
 
+**Day 5A implementation note.** The two `test_config_ingestion_service__
+..._log_after_commit`/`..._emits_no_incident_log` cases above describe the
+eventual full-slice suite once structured logging exists (architecture.md
+Section 4's step 12, deferred — see "Documentation corrections applied for
+Day 5A" in CLAUDE.md); Day 5A does not implement logging, so no such tests
+exist yet. Every other guarantee in this section — satisfied policy
+yielding zero counts, `ConfigIngestionResult` distinguishing created from
+updated, `occurrence_count` incrementing on a repeat, exactly one row
+persisting — is covered now, with different (more granular) test names
+than sketched above, in `tests/unit/application/
+test_config_ingestion_service.py` (against a real `InMemoryUnitOfWork`)
+and `tests/integration/application/test_config_ingestion_postgres.py`
+(three focused tests proving atomic commit and atomic rollback-after-
+late-failure against real PostgreSQL). `tests/unit/application/
+test_config_ingestion_models.py` covers `IngestConfigurationCommand`/
+`ConfigIngestionResult` validation directly.
+
 ---
 
 ## 14. Error and Failure-Path Testing
