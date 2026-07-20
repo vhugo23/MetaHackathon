@@ -595,15 +595,27 @@ UnitOfWork
   incidents: IncidentRepository
   commit() -> None
   rollback() -> None
+  close() -> None
 ```
 
-The **SQLAlchemy `UnitOfWork`** owns one DB session; every repository
-inside it shares that session, so all writes in one `ingest()` call
-(Section 4) land in one transaction. The **in-memory `UnitOfWork`**
-(tests) provides the same observable `commit`/`rollback` contract —
-`rollback()` discards everything written since the `UnitOfWork` was
-opened, so integration tests can assert "nothing persisted" after a
-simulated failure without a real database.
+The **SQLAlchemy `UnitOfWork`** (Day 4B3) is constructed from a `session_
+factory: Callable[[], Session]` — never an already-created `Session` — and
+creates exactly one `Session` internally, shared by all four repositories,
+so every write in one `ingest()` call (Section 4) lands in one transaction.
+`commit()` calls the real `Session.commit()`; on any exception it rolls
+back and re-raises the original exception unchanged (never swallowed or
+replaced). `rollback()`/`close()` delegate directly to the `Session`. No
+context-manager (`__enter__`/`__exit__`) syntax is added this phase. The
+**in-memory `UnitOfWork`** (tests) provides the same observable `commit`/
+`rollback`/`close` contract via an isolated *working* `InMemoryStore`,
+copied (with fresh locks, never the committed store's lock instances) from
+a shared *committed* `InMemoryStore` at construction time: `commit()`
+publishes all four collections into the committed store at once, under
+the committed store's own lock; `rollback()` discards the working store's
+changes by resetting it back to the committed store's current state and
+publishes nothing; `close()` performs no I/O. A second `UnitOfWork`
+constructed against the same committed store afterward sees exactly what
+was committed — no more, no less.
 
 `TelemetryRepository` (FR-05, later slice) is not part of this grouping —
 telemetry ingestion is its own operation with its own transaction once
@@ -628,14 +640,25 @@ domain defines (interfaces/ports), Python-style snake_case throughout:
         # created_at) is a no-op, differing content raises
         # PolicySeedConflictError (Day 4B2) — no list()
   IncidentRepository
-    get_by_id(incident_id); list(filter)
+    get_by_id(incident_id); list_all()
+        # list_all() returns every stored Incident ordered ascending by
+        # created_at then incident_id — no filter parameter; device_id/
+        # severity filtering is deferred to the application/API layer
+        # (Day 4B3 binding decision, corrects this section's earlier
+        # `list(filter)` — domain/ports.py has declared list_all() with no
+        # filter since Day 4B1)
     # Day 4B1 binding decision: no find_open_by_fingerprint on this port —
     # dropped from the public surface; the atomic upsert below is the
     # deduplication mechanism.
     upsert_open_incident(candidate, fingerprint, observed_at) -> IncidentUpsertResult
         # THE write path — atomic create-or-update. No plain save(): every
         # write goes through this one operation, so nothing can bypass the
-        # dedup guarantee via a find-then-save race.
+        # dedup guarantee via a find-then-save race. Rejects (ValueError,
+        # before any mutation): fingerprint/observed_at inconsistent with
+        # candidate, an unsupported candidate.source, or an empty generated
+        # incident_id; a stale observed_at (older than the existing OPEN
+        # incident's last_seen_at) is also a ValueError with no mutation —
+        # equal timestamps are accepted (Day 4B3).
   TelemetryRepository
     save(device_id, sample)
     get_latest(device_id)
@@ -663,21 +686,57 @@ INSERT INTO incidents (incident_id, fingerprint, device_id, source, rule_ref,
     created_at, last_seen_at, occurrence_count)
 VALUES (:incident_id, :fingerprint, ..., 'OPEN', ..., :observed_at, :observed_at, 1)
 ON CONFLICT (fingerprint) WHERE status = 'OPEN' DO UPDATE SET
-    last_seen_at = :observed_at,
+    last_seen_at = EXCLUDED.last_seen_at,
     occurrence_count = incidents.occurrence_count + 1,
-    evidence = EXCLUDED.evidence
-RETURNING *, (xmax = 0) AS was_inserted;
+    severity = EXCLUDED.severity,
+    evidence = EXCLUDED.evidence,
+    recommendation = EXCLUDED.recommendation
+WHERE EXCLUDED.last_seen_at >= incidents.last_seen_at
+RETURNING incident_id, fingerprint, device_id, source, rule_ref,
+    affected_resource, severity, status, evidence, recommendation,
+    created_at, last_seen_at, occurrence_count, (xmax = 0) AS was_inserted;
 ```
+
+`incident_id`, `fingerprint`, `device_id`, `source`, `rule_ref`,
+`affected_resource`, `status`, and `created_at` are never in the `DO UPDATE
+SET` list — an update only ever refreshes `last_seen_at`, `occurrence_count`,
+`severity`, `evidence`, and `recommendation` (Day 4B3), preserving every
+identity/classification field of the existing row. The `WHERE
+EXCLUDED.last_seen_at >= incidents.last_seen_at` guard makes a stale
+observation (an `observed_at` older than the stored row's `last_seen_at`)
+affect no row at all — equal timestamps still pass the `>=` guard and
+increment `occurrence_count`. When that guard suppresses the update,
+`RETURNING` yields no row; the repository then issues one internal,
+non-public follow-up `SELECT` (never exposed as a port method) solely to
+distinguish "genuinely stale" (raises `ValueError`, no mutation) from an
+unexpected empty result (raises `PersistenceError`) — this is the only
+read the repository ever performs as part of `upsert_open_incident`, and it
+never substitutes for the atomic statement above (no read-before-write).
 
 `xmax = 0` is PostgreSQL's standard tell for "this row was freshly
 inserted, not touched by the `ON CONFLICT` branch" — the SQLAlchemy
 repository maps that boolean straight to `outcome` (`CREATED`/`UPDATED`)
-in the same round trip. `ConfigIngestionService` never infers the outcome
+in the same round trip, returning explicit named columns (never the whole
+ORM row or the raw `xmax` value) and keeping the `xmax` expression private
+to that one module. `ConfigIngestionService` never infers the outcome
 from `occurrence_count` and never issues a second lookup (Section 4, step
-11). The in-memory test double reproduces the same `IncidentUpsertResult`
+11). `incident_id` is generated by the repository via an injected
+`incident_id_factory: Callable[[], str]` (production default:
+`str(uuid4())`) once per call, before the statement executes — an upsert
+that loses the insert race may generate an unused id, which is acceptable
+(Day 4B3). A `device_id` that does not reference an existing `Device`
+raises `ReferencedDeviceNotFoundError`, translated from the `incidents.
+device_id` foreign-key violation inside a SAVEPOINT
+(`session.begin_nested()`), leaving the caller's Session fully usable
+afterward — the same pattern `ConfigurationSnapshotRepository.add` already
+uses (Day 4B2).
+
+The in-memory test double reproduces the same `IncidentUpsertResult`
 contract, including under concurrent calls (guarded by one critical
-section), verified by the conformance suite (test-strategy.md Section 9)
-against both implementations.
+section spanning its own find-OPEN-by-fingerprint -> decide -> mutate
+sequence, plus the same Device-existence check), verified by the
+conformance suite (test-strategy.md Section 9) against both
+implementations.
 
 ### 11.2 Schema Migrations and Policy Seeding
 

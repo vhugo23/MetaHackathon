@@ -319,18 +319,105 @@ Day 4B2 adds:
   bypass-the-repository proofs, Session-reusability-after-conflict, and
   non-UTC-timezone conversion) live in `tests/integration/persistence/`.
 
-Backend test count: **227** (`pytest`; 175 run via `pytest -m "not
-postgres"`, 52 via `pytest -m postgres` against a real PostgreSQL
+Backend test count at this gate: **227** (`pytest`; 175 run via `pytest -m
+"not postgres"`, 52 via `pytest -m postgres` against a real PostgreSQL
 instance).
 
-**Not implemented yet** (deliberately — Day 4B3, per the approved, gated
-Day 4B plan): the concrete `IncidentRepository` (SQLAlchemy or in-memory),
-the atomic `upsert_open_incident` implementation (the `INSERT ... ON
-CONFLICT ... DO UPDATE` strategy is designed and approved, not yet
-built), incident concurrency tests, the concrete `UnitOfWork`,
-`ConfigIngestionService`, FastAPI ingestion endpoints, seed execution
-during application startup, structured logging, `DriftDetector`,
-`RuleEngine`, telemetry, and the React dashboard.
+### Current Day 4B3 scope
+
+The third and final gate of Day 4B ("Slice 1 persistence foundations"):
+the concrete `IncidentRepository` (atomic `upsert_open_incident`) and the
+concrete `UnitOfWork`, both SQLAlchemy/PostgreSQL and in-memory. Day 4B is
+now complete end to end.
+
+Day 4B3 adds:
+
+- **`IncidentRepository`** (`get_by_id`/`list_all`/`upsert_open_incident`)
+  — `upsert_open_incident` is one atomic PostgreSQL statement, never a
+  read-before-write: `INSERT ... ON CONFLICT (fingerprint) WHERE status =
+  'OPEN' DO UPDATE SET last_seen_at = excluded.last_seen_at, occurrence_count
+  = incidents.occurrence_count + 1, severity = excluded.severity, evidence =
+  excluded.evidence, recommendation = excluded.recommendation WHERE
+  excluded.last_seen_at >= incidents.last_seen_at RETURNING <explicit
+  columns>, (xmax = 0) AS was_inserted`. The `DO UPDATE SET` list never
+  touches `incident_id`/`fingerprint`/`device_id`/`source`/`rule_ref`/
+  `affected_resource`/`status`/`created_at`. The `WHERE excluded.
+  last_seen_at >= incidents.last_seen_at` guard makes a stale observation
+  (older than the stored row's `last_seen_at`) affect no row at all — equal
+  timestamps still pass and still increment `occurrence_count`. When that
+  guard suppresses the update, the repository issues exactly one internal,
+  non-public follow-up `SELECT` (never a `find_open_by_fingerprint` port
+  method) to distinguish a genuine stale observation (`ValueError`, no
+  mutation) from an unexpected empty result (`PersistenceError`).
+- **`CREATED`/`UPDATED` outcome detection** via a private `xmax = 0` check
+  inside `SqlAlchemyIncidentRepository` only — the RETURNING clause names
+  explicit columns plus a labeled `was_inserted` expression, never the
+  whole ORM row or the raw `xmax` value; `ConfigIngestionService` (Day 5+)
+  will never infer the outcome from `occurrence_count`.
+- **Injectable incident-ID generation** (`meta_rne.persistence.incident_id.
+  default_incident_id_factory`, `str(uuid4())`) — both repositories accept
+  an `incident_id_factory: Callable[[], str]` constructor argument; no
+  repository calls `uuid4` directly, and `incident_id` is never derived
+  from the fingerprint. The SQLAlchemy side generates one ID per call
+  before the statement executes (an upsert that loses the insert race may
+  generate an unused ID — acceptable); the in-memory side generates one
+  only after determining no OPEN incident exists for the fingerprint. An
+  update always preserves the existing row's `incident_id`.
+- **Validation before mutation** (`meta_rne.persistence.
+  incident_validation`, shared by both implementations): a `fingerprint`
+  inconsistent with `compute_fingerprint(candidate.device_id, candidate.
+  source, candidate.rule_ref, candidate.affected_resource)`, an
+  `observed_at` inconsistent with `candidate.observed_at`, an unsupported
+  `candidate.source` (only `POLICY_VIOLATION` evidence is serializable this
+  phase), or an empty/whitespace-only generated ID all raise `ValueError`
+  before any row is touched.
+- **Unknown-`device_id` translation** — a referenced `Device` that doesn't
+  exist raises `ReferencedDeviceNotFoundError`, translated from the
+  `incidents.device_id` foreign-key violation inside a SAVEPOINT
+  (`session.begin_nested()`), the same pattern
+  `ConfigurationSnapshotRepository.add` already uses — the caller's Session
+  remains fully usable afterward. The in-memory side checks Device
+  existence inside the same lock guarding the rest of the upsert.
+- **In-memory atomicity** — the whole find-OPEN-by-fingerprint -> decide ->
+  mutate sequence (including the Device-existence check) runs inside one
+  `threading.Lock` on the shared `InMemoryStore`, proven under real thread
+  interleaving by a four-worker concurrency test alongside the equivalent
+  real-PostgreSQL test (both assert exactly one `CREATED` outcome, every
+  other successful call `UPDATED`, one persisted `incident_id`, one `OPEN`
+  row, and `occurrence_count` equal to the number of successful workers).
+- **`SqlAlchemyUnitOfWork`** (`session_factory: Callable[[], Session]`,
+  never an already-created `Session`) — creates exactly one `Session`
+  shared by all four repositories; `commit()` calls the real `Session.
+  commit()`, rolling back and re-raising the original exception unchanged
+  on failure (never swallowed or replaced); `rollback()`/`close()`
+  delegate directly to the `Session`. No context-manager syntax yet.
+- **`InMemoryUnitOfWork`** — an isolated *working* `InMemoryStore` (with
+  fresh lock instances, never the committed store's locks) copied from a
+  shared *committed* `InMemoryStore` at construction time; `commit()`
+  publishes all four collections into the committed store at once under
+  its own lock; `rollback()` discards the working store's changes and
+  publishes nothing; `close()` performs no I/O. A fresh `UnitOfWork`
+  against the same committed store sees exactly what was committed.
+- **UnitOfWork contract tests** — one shared suite (parameterized over
+  both implementations) proves all four repositories are available, one
+  transaction can stage a `Device` with null references, a
+  `ConfigurationSnapshot`, the `Device` updated with references to it, a
+  `ConfigurationPolicy`, and an `Incident`; `commit()` publishes all of it,
+  `rollback()`/`close()`-without-`commit()` publish none of it, and a fresh
+  `UnitOfWork` sees committed (never rolled-back) state. Implementation-
+  specific behavior (real commit-failure re-raise, Session-sharing across
+  repositories, isolation between two simultaneously-open in-memory
+  UnitOfWorks) is covered by dedicated SQLAlchemy/in-memory test files.
+
+Backend test count: **311** (`pytest`; 214 run via `pytest -m "not
+postgres"`, 97 via `pytest -m postgres` against a real PostgreSQL
+instance).
+
+**Not implemented yet** (deliberately — Day 5 and later): `ConfigIngestionService`,
+FastAPI ingestion endpoints, request/response schemas, seed execution
+during application startup, incident acknowledgment/resolution commands,
+structured logging, `DriftDetector`, `RuleEngine`, telemetry, and the React
+dashboard.
 
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 
@@ -467,3 +554,26 @@ matching) than what Day 4B1's `domain/ports.py` actually approved — now
 corrected to match. See "Current Day 4B2 scope" above for exactly what is
 and is not implemented — no `IncidentRepository`, atomic upsert, or
 concrete `UnitOfWork` exists yet; those are Day 4B3.
+
+**Day 4B3 — IncidentRepository and UnitOfWork.** The third and final gate
+of Day 4B: concrete `IncidentRepository` implementations (SQLAlchemy/
+PostgreSQL and in-memory) with the atomic `INSERT ... ON CONFLICT ... DO
+UPDATE ... WHERE excluded.last_seen_at >= incidents.last_seen_at
+RETURNING ...` upsert, private `xmax`-based `CREATED`/`UPDATED` detection,
+an injectable `incident_id_factory`, shared caller-consistency validation,
+`ReferencedDeviceNotFoundError` translation via SAVEPOINT, and concrete
+`SqlAlchemyUnitOfWork`/`InMemoryUnitOfWork` implementations, test-first,
+bringing the suite to 311 tests (214 fast + 97 against real PostgreSQL,
+including dedicated four-worker concurrency tests for both the real
+PostgreSQL and in-memory implementations). Stale documentation discovered
+during implementation was corrected (see CLAUDE.md "Documentation
+corrections applied for Day 4B3"): domain-model.md §12 and
+architecture.md §11.1 still described a filtered `IncidentRepository.
+list(filter)` that `domain/ports.py` never actually declared (it has
+declared `list_all()` with no filter since Day 4B1) — now corrected, with
+`list_all()`'s `created_at`-then-`incident_id` ordering documented; the
+`ON CONFLICT ... DO UPDATE` statement's field list and the missing stale-
+observation guard were also brought in line with what was actually built.
+See "Current Day 4B3 scope" above for exactly what is and is not
+implemented — no `ConfigIngestionService`, API endpoints, or startup
+seeding exists yet; those are Day 5.

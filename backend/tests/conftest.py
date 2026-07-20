@@ -1,5 +1,5 @@
 import os
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 import psycopg
@@ -135,6 +135,39 @@ def sqlalchemy_session(
         yield session
     finally:
         session.close()
+        outer_transaction.rollback()
+        connection.close()
+        engine.dispose()
+
+
+# --- SqlAlchemyUnitOfWork test fixtures (Day 4B3) -----------------------
+#
+# SqlAlchemyUnitOfWork.commit() calls the real Session.commit() (item 11's
+# binding contract — no swallowed/replaced exception, no context-manager
+# syntax). To let a test call a real commit() and still roll back
+# everything at teardown, every Session the factory produces joins the same
+# outer connection/transaction as a SAVEPOINT participant
+# (join_transaction_mode="create_savepoint", SQLAlchemy 2.0's documented
+# "joining a Session into an external transaction" recipe): commit()
+# releases that SAVEPOINT rather than the real outer transaction, so the
+# outer transaction's unconditional rollback in teardown still discards
+# every commit the test made.
+
+
+@pytest.fixture()
+def sqlalchemy_session_factory(
+    _meta_rne_test_migrated: None, postgres_test_database_url: str
+) -> Generator[Callable[[], Session], None, None]:
+    engine = create_engine(postgres_test_database_url)
+    connection = engine.connect()
+    outer_transaction = connection.begin()
+
+    def factory() -> Session:
+        return Session(bind=connection, join_transaction_mode="create_savepoint")
+
+    try:
+        yield factory
+    finally:
         outer_transaction.rollback()
         connection.close()
         engine.dispose()

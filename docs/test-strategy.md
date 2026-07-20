@@ -201,39 +201,60 @@ only as fast test doubles for unit/integration tests.
   `seed_if_missing` is a no-op for semantically identical content
   (ignoring `created_at`) and raises `PolicySeedConflictError` otherwise,
   all-or-nothing per call; `upsert_open_incident` returns the right
-  `IncidentUpsertResult.outcome` for both branches and never leaves two
-  `OPEN` rows for one fingerprint, including under concurrency (below);
+  `IncidentUpsertResult.outcome` for both branches, replaces `severity`/
+  `evidence`/`recommendation`/`last_seen_at` and increments
+  `occurrence_count` by exactly one on every repeated match, preserves
+  `incident_id`/`fingerprint`/`created_at`/`status`/`device_id`/`source`/
+  `rule_ref`/`affected_resource`, rejects a stale observation
+  (`ValueError`, no mutation) while accepting equal timestamps, rejects a
+  fingerprint/observed_at inconsistent with the candidate or an
+  unsupported `candidate.source`, and never leaves two `OPEN` rows for one
+  fingerprint, including under concurrency (below) (Day 4B3);
   `TelemetryRepository.get_recent` returns only samples within the
-  requested window; `UnitOfWork.rollback()` discards everything written
-  since it opened. The SQLAlchemy side runs against a real, ephemeral
-  PostgreSQL instance (transaction-per-test rollback) — an
+  requested window; `UnitOfWork.commit()` publishes everything staged
+  across all four repositories in one call, `rollback()` discards it, and
+  a fresh `UnitOfWork` against the same committed state sees exactly what
+  was committed (Day 4B3). The SQLAlchemy side runs against a real,
+  ephemeral PostgreSQL instance (transaction-per-test rollback) — an
   integration-level test, since it touches a real database.
 - **Test isolation.** Unit/integration/contract tests each construct a
   fresh in-memory `UnitOfWork` per test (R-05). The SQLAlchemy conformance
   suite uses a transaction-per-test rollback so tests never see another
-  test's rows.
-- **Failure-path testing without a real outage.** Two hand-written test
+  test's rows; `SqlAlchemyUnitOfWork` contract tests that must call a real
+  `commit()` and still roll back at teardown join every `Session` to the
+  same outer transaction as a SAVEPOINT participant (SQLAlchemy 2.0's
+  `join_transaction_mode="create_savepoint"`), so `commit()` releases the
+  SAVEPOINT rather than the real transaction (Day 4B3).
+- **Failure-path testing without a real outage.** Hand-written test
   doubles, not mocking-framework mocks: a `FailingRepository` whose
   `upsert_open_incident` raises (for testing a failure specifically at the
-  incident write), and a `FailingUnitOfWork` whose `commit()` raises (for
-  testing that a failed commit rolls back everything and suppresses
-  logging, Section 13). Both convert to the controlled `PERSISTENCE_ERROR`
-  / 500 response (architecture.md Section 12), never a leaked stack trace.
-  Deliberately fast and in-process — simulating a real Postgres outage is
-  out of proportion to what these tests need to prove.
+  incident write, Day 5+), and — for `SqlAlchemyUnitOfWork.commit()`'s own
+  contract test (Day 4B3) — a `Session.commit` swapped for a function that
+  raises, proving `commit()` rolls back and re-raises the original
+  exception unchanged, with no partial state left behind. Both convert to
+  the controlled `PERSISTENCE_ERROR` / 500 response (architecture.md
+  Section 12) once `ConfigIngestionService` exists, never a leaked stack
+  trace. Deliberately fast and in-process — simulating a real Postgres
+  outage is out of proportion to what these tests need to prove.
 - **Concurrency test proving atomic deduplication.**
-  `test_incident_repository_sqlalchemy__concurrent_upsert_same_fingerprint__yields_one_open_incident`:
-  two DB connections call `upsert_open_incident` with the same fingerprint
-  at (as close to) the same instant as the harness can arrange. The test
-  asserts exactly one `OPEN` row for that fingerprint afterward, with
-  `occurrence_count == 2`. **This proves the guarantee at the repository
-  level** — it is not a test of two full concurrent HTTP ingestion
-  requests, which would need its own integration test and is not part of
-  Slice 1. Runs against real PostgreSQL (the partial unique index,
-  architecture.md Section 11, is what enforces it); a parallel,
-  lock-based version runs against the in-memory implementation to confirm
-  it honors the same contract without a database constraint. This is the
-  named test behind AC-11's concurrency clause.
+  `test_incident_repository_sqlalchemy__concurrent_upsert_same_fingerprint__yields_one_open`
+  (`tests/integration/persistence/test_incident_repository_concurrency.py`):
+  four worker threads, each with its own connection/Session/repository
+  instance, call `upsert_open_incident` with the same fingerprint
+  synchronized by a `threading.Barrier`, each committing explicitly. The
+  test asserts exactly one `CREATED` outcome, every other successful
+  outcome `UPDATED`, no unhandled unique-violation exception, all four
+  results sharing one persisted `incident_id`, exactly one `OPEN` row
+  afterward, and `occurrence_count == 4`. **This proves the guarantee at
+  the repository level** — it is not a test of two full concurrent HTTP
+  ingestion requests, which would need its own integration test and is not
+  part of Slice 1. Runs against real PostgreSQL (the partial unique index,
+  architecture.md Section 11, is what enforces it); a four-worker,
+  lock-based version
+  (`tests/unit/persistence/test_in_memory_incident_concurrency.py`) runs
+  against the in-memory implementation to confirm it honors the same
+  contract without a database constraint. This is the named test behind
+  AC-11's concurrency clause.
 - E2E tests (Section 7) exercise the real SQLAlchemy repositories against
   a real Postgres container by construction.
 
