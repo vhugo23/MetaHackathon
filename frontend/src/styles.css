@@ -1,0 +1,121 @@
+:root {
+  color-scheme: light dark;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+*:focus-visible {
+  outline: 3px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.app {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 3rem;
+}
+
+.app-header {
+  padding: 0.5rem 0 1rem;
+  border-bottom: 1px solid #d1d5db;
+  margin-bottom: 1.5rem;
+}
+
+.app-title {
+  font-weight: 700;
+  font-size: 1.1rem;
+  margin: 0;
+}
+
+.page-description {
+  color: #4b5563;
+  margin-top: 0;
+}
+
+.status-message {
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  padding: 1.5rem;
+  text-align: center;
+}
+
+.status-message--error {
+  border-color: #dc2626;
+}
+
+.dashboard-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.incident-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.incident-card {
+  border: 1px solid #d1d5db;
+  border-left-width: 6px;
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+.incident-card.severity--critical {
+  border-left-color: #b91c1c;
+}
+.incident-card.severity--high {
+  border-left-color: #ea580c;
+}
+.incident-card.severity--medium {
+  border-left-color: #ca8a04;
+}
+.incident-card.severity--low {
+  border-left-color: #2563eb;
+}
+
+.incident-card__header {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid #9ca3af;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.incident-card__fields {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  margin: 0 0 0.75rem;
+}
+
+.incident-card__fields dt {
+  font-weight: 600;
+  color: #4b5563;
+}
+
+.incident-card__fields dd {
+  margin: 0;
+}
+
+.incident-card__recommendation {
+  font-style: italic;
+}

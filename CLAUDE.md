@@ -45,27 +45,67 @@ For each task:
 
 ## Current Phase
 
-**Day 6A — Docker Compose smoke validation and frontend-facing contract
-stabilization.**
+**Day 6B — React dashboard foundation (first frontend vertical slice).**
 
 Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, Day 4A, Day 4B1, Day 4B2,
-Day 4B3, Day 5A, Day 5B, and Day 6A are complete and approved. See README.md's
-"Current Project Status" for the full history. Day 4B ("Slice 1
+Day 4B3, Day 5A, Day 5B, Day 6A, and Day 6B are complete and approved. See
+README.md's "Current Project Status" for the full history. Day 4B ("Slice 1
 persistence foundations") is complete across all three reviewable gates
 (4B1/4B2/4B3). The first vertical slice (product-spec.md Section 11) is
 runnable end to end over real HTTP against a real PostgreSQL database
-(Day 5B), and Day 6A proves that same slice in its actual deployed Docker
-Compose shape (`scripts/compose_smoke.py`) and stabilizes the OpenAPI/CORS
-contract a future React app will consume — see README.md's "Current Day
-6A scope" and `docs/frontend-api-contract.md`. Day 6A implements no
-frontend (no React, Vite, Node/npm) and changed no Slice 1 business
-behavior — only route metadata (`operation_id`/documented responses), CORS
-middleware wiring, Compose port configuration, and a new standalone smoke
-script.
+(Day 5B), Day 6A proved that same slice in its actual deployed Docker
+Compose shape (`scripts/compose_smoke.py`) and stabilized the OpenAPI/CORS
+contract (`docs/frontend-api-contract.md`), and Day 6B builds the first
+frontend consumer of that contract: a React/TypeScript/Vite dashboard
+(`frontend/`) requesting `GET /incidents` and rendering the complete
+request lifecycle (loading/empty/error-with-retry/populated). Day 6B
+changed no backend code, no API schema, and no domain/application/
+persistence/migration behavior — see README.md's "Current Day 6B scope".
+
+Application code is now allowed for **`frontend/`** in addition to the
+Day 3A–Day 6A backend capabilities listed below:
+
+- `src/api/client.ts` (`getJsonArray`, `ApiRequestError` with an optional
+  `code`), `src/api/incidents.ts` (`fetchIncidents`), `src/api/types.ts`
+  (`IncidentResponse`, `PolicyViolationIncidentEvidenceResponse`,
+  `ApiErrorResponse`, `severity`/`status`/`source`/`violation_type`/
+  `direction` unions, and the `isIncidentResponse`/
+  `isPolicyViolationIncidentEvidenceResponse` runtime structural guards
+  that validate every parsed array element — never a bare type cast) —
+  derived directly from `docs/frontend-api-contract.md`, no invented
+  fields, `fingerprint` preserved. Enum-like fields are validated as
+  non-empty strings only (never a closed union), so an unrecognized future
+  backend value is preserved and rendered as text.
+- `src/hooks/useIncidents.ts` — the loading/success(`isRefreshing`)/error
+  request-lifecycle state machine: one `AbortController` paired with a
+  monotonically increasing request ID per request, so a late-resolving
+  stale success or stale failure can never overwrite a newer result
+  (independent of whether the client honors `AbortSignal`), a superseded
+  request's `AbortError` never surfaces as an error, and unmount aborts the
+  active request. `refresh()` (shared by Refresh and Retry) preserves
+  previously loaded data instead of dropping to a full loading state.
+- `src/pages/IncidentDashboard.tsx` and `src/components/{LoadingState,
+  IncidentEmptyState,IncidentErrorState,IncidentCard}.tsx` — the four
+  required UI states, incidents rendered as responsive cards in backend
+  order, evidence/fingerprint in an accessible `<details>` region, and a
+  Refresh button that is natively `disabled` (not merely `aria-disabled`)
+  while a refresh is pending, with `aria-busy`/an `aria-live="polite"`
+  status communicating the pending refresh
+- the `frontend` GitHub Actions CI job (Node-based, no PostgreSQL/Docker)
+- 75 frontend Vitest/RTL tests across 4 files (`src/api/client.test.ts`,
+  `src/api/incidents.test.ts`, `src/hooks/useIncidents.test.ts`,
+  `src/pages/IncidentDashboard.test.tsx`)
+
+**Still prohibited**: configuration-submission UI, incident acknowledgment/
+resolution, incident mutations, filtering/pagination/client-side sorting,
+authentication/authorization, React Router, any global state library,
+TanStack Query, a component library, Tailwind, charts, telemetry,
+WebSockets/polling, Playwright, browser end-to-end tests, a frontend Docker
+image or Compose service. All of these are Day 6C or later.
 
 Application code is currently allowed **only** for the completed Day 3A,
-Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, Day 5B, and Day 6A
-capabilities:
+Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, Day 5B, Day 6A, and
+Day 6B capabilities:
 
 - explicit OpenAPI `operation_id`s (`health_check`,
   `submit_device_configuration`, `list_incidents`) and documented `409`/
@@ -443,8 +483,10 @@ capabilities:
 **Still prohibited**: incident acknowledgment/resolution commands,
 authentication/authorization, filtering/pagination/sorting query
 parameters, drift detection, anomaly/telemetry ingestion, structured
-logging beyond FastAPI's own request logging, the React dashboard,
-Vite, Node/npm tooling, Playwright, browser end-to-end tests, and new
-Alembic migrations. All of these are Day 6B or later, against the domain
-model, architecture, and ports already documented, with tests written
-first per the Development Rules above.
+logging beyond FastAPI's own request logging, Playwright, browser
+end-to-end tests, and new Alembic migrations. The React dashboard
+(`frontend/`), Vite, and Node/npm tooling are no longer prohibited — Day 6B
+implemented the first frontend vertical slice (see the "Current Phase"
+section above). All remaining items are Day 6C or later, against the
+domain model, architecture, and ports already documented, with tests
+written first per the Development Rules above.

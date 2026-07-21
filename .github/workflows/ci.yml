@@ -120,3 +120,44 @@ jobs:
       - name: Defense-in-depth cleanup (project-scoped, always)
         if: always()
         run: docker compose --project-name meta-rne-smoke down --volumes --remove-orphans
+
+  frontend:
+    # Frontend verification (Day 6B) — independent of the backend jobs
+    # above: no PostgreSQL, no Docker. Builds the React/TypeScript/Vite
+    # dashboard app in frontend/ and runs its own lint/typecheck/test/build
+    # pipeline against pinned exact dependency versions
+    # (frontend/package-lock.json).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: npm ci
+        working-directory: frontend
+        run: npm ci
+
+      - name: prettier --check
+        working-directory: frontend
+        run: npm run format:check
+
+      - name: eslint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: tsc -b
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: vitest run
+        working-directory: frontend
+        run: npm test -- --run
+
+      - name: vite build
+        working-directory: frontend
+        run: npm run build

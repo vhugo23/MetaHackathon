@@ -1132,7 +1132,12 @@ needs:
 
 - **React dashboard implementation** (FR-10) — the boundary is already
   defined (Sections 1, 2, 10, 15); the SPA itself is a later vertical
-  slice, not a cut feature.
+  slice, not a cut feature. **Day 6B built the first slice of it**
+  (`frontend/`): a read-only dashboard consuming `GET /incidents` only,
+  with loading/empty/error/populated states. Configuration-submission UI,
+  incident mutations, filtering/pagination, and authentication remain
+  deferred — see `docs/frontend-api-contract.md` and README.md's "Current
+  Day 6B scope".
 - **Arista adapter** (Section 5) — Cisco only for Slice 1.
 - **Configuration drift detection** (Section 8) and **telemetry/anomaly
   detection** (FR-05/FR-06) — wired in the next slice, using the same

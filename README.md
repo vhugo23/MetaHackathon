@@ -76,7 +76,7 @@ and architecture.md's closing summary.
 |---|---|
 | Backend | Python 3.12, FastAPI, Pydantic |
 | Persistence | PostgreSQL via SQLAlchemy (in-memory repos are test doubles only) |
-| Frontend (later slice) | React, TypeScript, Vite |
+| Frontend | React, TypeScript, Vite (Day 6B — `frontend/`) |
 | Testing | pytest, Vitest, Playwright |
 | Deployment | Docker Compose |
 | CI | GitHub Actions |
@@ -180,6 +180,77 @@ the API — `docker-compose.yml` already defaults it to
 `http://localhost:5173` (the Vite dev server origin) for local Compose
 development. See [docs/frontend-api-contract.md](./docs/frontend-api-contract.md)
 for the full frontend-facing contract.
+
+### Frontend (Day 6B)
+
+A React/TypeScript/Vite dashboard lives at `frontend/`, consuming
+`GET /incidents` — the only frontend business operation implemented so far.
+Requires Node.js (verified locally against **Node v24.11.1, npm 11.6.2**).
+
+```bash
+cd frontend
+npm ci
+npm run dev        # starts the Vite dev server at http://localhost:5173
+```
+
+Copy `frontend/.env.example` to `frontend/.env` to override the backend base
+URL for local development:
+
+```
+VITE_API_BASE_URL=http://localhost:8080
+```
+
+Defaults to `http://localhost:8080` (the Compose `api` service's default
+host port) when unset. `docker-compose.yml`'s `META_RNE_CORS_ALLOWED_ORIGINS`
+default (`http://localhost:5173`) already matches Vite's default dev port,
+so `docker compose up -d` (backend) + `npm run dev` (frontend) work together
+with no extra configuration.
+
+The dashboard (`IncidentDashboard`) renders four states — loading, empty
+(`GET /incidents` returns `[]`), a controlled error state (with a Retry
+action) on request failure, and the populated incident list, in the exact
+order the backend returns them, each incident exposing its policy-violation
+evidence (including `fingerprint`) in a keyboard-accessible `<details>`
+region. No incident mutation, filtering, pagination, sorting, authentication,
+or routing is implemented — `GET /incidents` remains the only frontend
+business operation. Configuration submission, incident acknowledgment/
+resolution, and the Playwright/browser E2E suite remain deferred to a later
+day.
+
+**Response validation.** `GET /incidents`'s parsed JSON is never trusted via
+a bare type cast: `src/api/types.ts`'s `isIncidentResponse`/
+`isPolicyViolationIncidentEvidenceResponse` runtime guards check every
+returned array element structurally (required string fields non-empty,
+`occurrence_count` a non-negative integer, nested evidence shape) before the
+data reaches the dashboard; a malformed element rejects the whole response
+into the controlled error state rather than rendering partial/incorrect
+data. Severity/status/source/violation_type/direction are checked as
+non-empty strings only, never against a closed enum — an unrecognized
+future backend value is preserved and rendered as plain text instead of
+failing the page.
+
+**Refresh behavior.** Clicking Refresh (or Retry, after an error) keeps
+previously loaded incident cards visible and marks the Refresh button
+natively `disabled` (plus `aria-busy` on the list and an
+`aria-live="polite"` "Refreshing incidents…" status) for the duration of the
+new request — it does not drop back to a full loading screen, and the
+native `disabled` attribute means a second click cannot start an
+overlapping request. Internally, `src/hooks/useIncidents.ts` pairs one
+`AbortController` per request with a monotonically increasing request ID:
+whichever guard fires first, a stale request's late success or late
+failure can never overwrite a newer result, and a request superseded by a
+newer one never surfaces as a user-visible error.
+
+Frontend verification, from `frontend/`:
+
+```bash
+npm ci
+npm run format:check   # prettier --check .
+npm run lint            # eslint .
+npm run typecheck       # tsc -b
+npm test -- --run       # vitest run (non-watch)
+npm run build            # tsc -b && vite build
+```
 
 ### Current Day 4A scope
 
@@ -683,6 +754,112 @@ by the Day 6A Compose smoke script), browser end-to-end tests,
 authentication/authorization, filtering/pagination, incident
 acknowledgment/resolution, drift detection, telemetry, and any new API
 endpoint.
+
+### Current Day 6B scope
+
+Builds the first frontend vertical slice against the Day 6A-stabilized
+contract: a React/TypeScript/Vite dashboard (`frontend/`) that requests
+`GET /incidents` and renders the complete request lifecycle. No backend
+code, API schema, or domain/application/persistence behavior changed.
+
+Day 6B adds:
+
+- **`frontend/`** — a Vite + React 19 + TypeScript app (strict mode,
+  `noUncheckedIndexedAccess`/`noImplicitOverride`/`noFallthroughCasesInSwitch`
+  all enabled), with all direct dependencies pinned to exact versions
+  (`frontend/package-lock.json`) after verifying peer-dependency
+  compatibility across `vite`/`@vitejs/plugin-react`/`vitest`/`typescript`/
+  `eslint`/`typescript-eslint`/`react` — notably **TypeScript is pinned to
+  `6.0.3`** rather than the newer `7.0.2`, the highest release still inside
+  `typescript-eslint@8.65.0`'s supported peer range (`>=4.8.4 <6.1.0`).
+- **`src/api/client.ts`/`incidents.ts`/`types.ts`** — a narrow
+  `fetch`-based HTTP client (`getJsonArray`), `fetchIncidents()`, and
+  explicit TypeScript types (`IncidentResponse`,
+  `PolicyViolationIncidentEvidenceResponse`, `ApiErrorResponse`, and enum
+  unions for `severity`/`status`/`source`/`violation_type`/`direction`)
+  derived directly from `docs/frontend-api-contract.md`, preserving
+  `fingerprint` and every other documented field, adding none. Base URL is
+  read once through a typed `import.meta.env.VITE_API_BASE_URL`
+  (`src/vite-env.d.ts`), trailing slash stripped, defaulting to
+  `http://localhost:8080`.
+- **`src/api/types.ts`** runtime guards (`isIncidentResponse`,
+  `isPolicyViolationIncidentEvidenceResponse`) — structural validation of
+  every parsed array element (never a bare `as IncidentResponse[]` cast):
+  required string fields non-empty, `occurrence_count` a non-negative
+  integer, nested evidence shape checked; a malformed element rejects the
+  whole response into the controlled error state. Severity/status/source/
+  violation_type/direction are checked as non-empty strings only, never a
+  closed enum, so an unrecognized future backend value still renders as
+  text instead of failing the page.
+- **`src/hooks/useIncidents.ts`** — the request-lifecycle state machine
+  (`loading` / `success` (with `isRefreshing`) / `error`). One
+  `AbortController` paired with a monotonically increasing request ID per
+  request: a completion is applied only when its request ID still matches
+  the current one, so a late-resolving stale success or stale failure can
+  never overwrite a newer result, independent of whether the underlying
+  client actually honors `AbortSignal`; a superseded request's own
+  `AbortError` never surfaces as a user-visible error. Unmount aborts the
+  active request and blocks any further state update. `refresh()` (used by
+  both the Refresh and Retry controls) preserves the previous successful
+  `data` and sets `isRefreshing: true` instead of dropping to a full
+  loading screen.
+- **`src/pages/IncidentDashboard.tsx`** and the state components
+  (`LoadingState`, `IncidentEmptyState`, `IncidentErrorState`,
+  `IncidentCard`) — the four required states (loading, empty, controlled
+  error with Retry, populated), incidents rendered as responsive cards (not
+  a table — chosen to avoid a duplicated desktop/mobile markup structure)
+  in the exact order the backend returns them, with severity/status shown
+  as text (not color-only) and evidence (including `fingerprint`) in a
+  keyboard-accessible `<details>` region. The Refresh button is natively
+  `disabled` (not merely `aria-disabled`) while a refresh is pending, so a
+  second click cannot start an overlapping request; existing cards stay
+  visible and `aria-busy`/an `aria-live="polite"` status communicate the
+  pending refresh accessibly.
+- **A fourth CI job, `frontend`** (`.github/workflows/ci.yml`) — Node-based,
+  no PostgreSQL, no Docker: `npm ci`, `prettier --check`, `eslint`,
+  `tsc -b`, `vitest run`, `vite build`. Independent of `ci`/
+  `postgres-tests`/`compose-smoke`, all of which are unmodified and still
+  pass.
+- **75 frontend tests across 4 files** (Vitest + React Testing Library):
+  21 API-client tests (`src/api/client.test.ts` — URL joining/defaulting,
+  exact request options, `{code, detail}` error surfacing with the code
+  preserved, malformed/empty/HTML error bodies falling back to one stable
+  message, malformed 2xx JSON rejected, `AbortSignal` passthrough), 24
+  runtime-parser tests (`src/api/incidents.test.ts` — valid payload,
+  top-level non-array, null entries, missing/wrong-typed/negative/
+  non-integer fields, missing or null evidence, each enum-like field
+  rejecting an empty string and separately preserving an unrecognized
+  future value, backend order preserved, opaque IDs byte-for-byte
+  unchanged), 5 hook-level lifecycle tests (`src/hooks/useIncidents.test.ts`
+  — abort on unmount, refresh aborts an in-flight request and starts
+  exactly one new one, a late stale success/failure cannot overwrite a
+  newer success, a superseded rejection never produces an error state —
+  using deferred promises and direct `refresh()` calls, deliberately
+  ignoring `AbortSignal` to prove the request-ID guard independently), and
+  25 dashboard tests (`src/pages/IncidentDashboard.test.tsx` — loading,
+  empty, populated with preserved ordering, evidence/fingerprint exposure,
+  `occurrence_count === 1` rendering, severity/status as text, semantic
+  `<time>` timestamps, controlled error state, retry-to-success, one click
+  produces exactly one request, cards preserved while a refresh is
+  pending, an accessible busy status, Refresh enabled after a successful
+  load, Refresh natively `disabled` while pending, another click on the
+  disabled button starting no new request, Refresh re-enabled after a
+  successful refresh, a failed refresh's Retry control enabled, refresh
+  success/failure outcomes, heading persistence, unmount aborts the active
+  request). Deliberately overlapping requests are proven at the hook
+  level only — the native `disabled` attribute makes a second overlapping
+  Refresh click impossible to produce by clicking through the rendered
+  dashboard.
+
+**Not implemented yet** (deliberately — Day 6C and later): configuration
+submission from the browser, incident acknowledgment/resolution, incident
+mutations, filtering/pagination/client-side sorting, authentication, React
+Router, any global state library, TanStack Query, a component library,
+Tailwind, charts, telemetry, WebSockets/polling, Playwright, browser
+end-to-end tests, a frontend Docker image or Compose service.
+
+Backend test count: unchanged at **470** (360 non-`postgres` + 110
+`postgres`-marked) — Day 6B changed no backend code.
 
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 

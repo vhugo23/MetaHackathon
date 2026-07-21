@@ -1,6 +1,8 @@
 # Frontend API Contract — Meta RNE Platform
 
-**Status:** Day 6A — stabilized for frontend consumption, no frontend built yet
+**Status:** Day 6A stabilized this contract; Day 6B built the first
+frontend consumer (`frontend/`) against it, exercising `GET /incidents`
+only — see README.md's "Current Day 6B scope".
 **Derived from:** `backend/src/meta_rne/api/schemas.py`, `api/routes.py`,
 `api/errors.py`, `api/cors.py` (current source, not a planning aspiration)
 

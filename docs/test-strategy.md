@@ -168,12 +168,65 @@ Playwright is used in **HTTP request mode**, not browser automation —
 there is no browser UI until FR-10 ships. When the React dashboard is
 built, `e2e/` grows a browser-driven suite alongside this one.
 
-### 7.1 Vitest (frontend) — not applicable to the first slice
+### 7.1 Vitest (frontend)
 
-No frontend code exists until FR-10 (later slice). When it ships, its
-component/unit tests live in `frontend/tests/` using Vitest, following
-the same principles as Sections 2–7 (`describe`/`it("should ...")`,
-real components by default).
+**Day 6B**: `frontend/` now exists with **75 colocated Vitest + React
+Testing Library tests across 4 files** (`src/**/*.test.ts(x)`, not a
+separate `frontend/tests/` directory):
+
+- `src/api/client.test.ts` (21) — base-URL joining/defaulting (no trailing
+  slash, one, several), exact request options (`GET`, `Accept:
+  application/json`, no `Content-Type`, no `Authorization`, `credentials:
+  "omit"`), successful array response, `{code, detail}` error surfacing
+  with the `code` preserved on `ApiRequestError`, a stable fallback message
+  for malformed/empty/HTML error bodies (never rendering their raw
+  content), malformed 2xx JSON rejected with the controlled
+  incidents-response message (no parser internals leaked), `AbortSignal`
+  passthrough as the exact same object.
+- `src/api/incidents.test.ts` (24) — the `isIncidentResponse`/
+  `isPolicyViolationIncidentEvidenceResponse` runtime structural
+  validators: a valid payload passes; a top-level object, a `null` array
+  entry, missing/wrong-typed/non-integer/negative `occurrence_count`, and a
+  missing-or-null `evidence` are all rejected; `actual_acl_name: null` is
+  accepted; each enum-like field (`severity`/`status`/`source`/
+  `violation_type`/`direction`) is tested twice — rejecting an empty
+  string, and separately preserving an unrecognized future value as text;
+  backend order is preserved; opaque IDs pass through byte-for-byte.
+- `src/hooks/useIncidents.test.ts` (5) — `useIncidents`'s request lifecycle
+  in isolation via `renderHook`: the active request is aborted on unmount;
+  `refresh()` aborts an in-flight request and starts exactly one new one;
+  a late-resolving stale success and a late-resolving stale failure can
+  each never overwrite a newer successful result; a superseded request's
+  rejection never produces a visible error state. These use deferred
+  promises and direct `refresh()` calls whose mocked responses deliberately
+  ignore `AbortSignal`, proving the monotonic request-ID guard
+  independently of cancellation actually being honored.
+- `src/pages/IncidentDashboard.test.tsx` (25) — loading, empty, populated
+  with preserved backend ordering, evidence/fingerprint exposure,
+  `occurrence_count === 1`, severity/status as text, semantic `<time>`
+  timestamps, a controlled error state (including a malformed-payload
+  response), retry-to-success, one Refresh/Retry click producing exactly
+  one request, existing cards remaining visible with an accessible
+  `aria-live` busy status while a refresh is pending, Refresh enabled after
+  a successful load, Refresh natively `disabled` (not merely
+  `aria-disabled`) while pending, a further click on the disabled button
+  starting no additional request, Refresh re-enabled after a successful
+  refresh completes, a failed refresh's resulting Retry control enabled, a
+  successful refresh replacing old data, a failed refresh producing the
+  controlled error state, heading persistence across states, and unmount
+  aborting the active request. Deliberately overlapping requests are *not*
+  produced through this component's UI — that is the hook-level suite's
+  job, now that the native `disabled` attribute makes a second overlapping
+  click impossible to produce by clicking through the rendered dashboard
+  (a real click on a disabled button dispatches no event at all).
+
+Fetch is stubbed directly (`vi.stubGlobal("fetch", ...)`) — no mocking
+library beyond what Vitest/RTL already provide. Run via `npm test -- --run`
+(CI) or `npm test` (watch, local). Only `GET /incidents` is exercised — no
+mutation endpoint is called from the frontend yet.
+
+Playwright browser E2E for the dashboard remains deferred (Section 7)
+— HTTP-mode Playwright is unaffected and untouched by Day 6B.
 
 ---
 
