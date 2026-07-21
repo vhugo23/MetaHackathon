@@ -1357,10 +1357,15 @@ needs:
   remain deferred — see `docs/frontend-api-contract.md` and README.md's
   "Current Day 6C scope". **Day 7A added the backend resolution endpoint
   (Section 10.2, Section 11.3) with no corresponding frontend change at
-  all** — the dashboard still only reads (`GET /incidents`) and submits
-  configuration; it has no resolve button or other way to call
-  `POST /incidents/{id}/resolve`. No new infrastructure, Docker Compose
-  service, or CI job was added for it either.
+  all** — the dashboard still only read (`GET /incidents`) and submitted
+  configuration; it had no resolve button or other way to call
+  `POST /incidents/{id}/resolve`. **Day 7B built that third frontend
+  vertical slice**: a "Resolve incident" control on every `OPEN` incident
+  card, calling the same endpoint through a dedicated no-body transport
+  primitive and a per-incident pending/error lifecycle (Section 17.1.2
+  below) — see `docs/frontend-api-contract.md` Section 7 and README.md's
+  "Current Day 7B scope". No new infrastructure, Docker Compose service, or
+  CI job was added for either Day 7A or Day 7B.
 - **Arista adapter** (Section 5) — Cisco only for Slice 1.
 - **Configuration drift detection** (Section 8) and **telemetry/anomaly
   detection** (FR-05/FR-06) — wired in the next slice, using the same
@@ -1441,6 +1446,112 @@ of the latest one. This does not mean callback identity is watched or
 compared to restart anything: `submit()` itself has no dependency on
 `onSuccess` and never restarts or duplicates a POST because the callback
 prop changed.
+
+### 17.1.2 Frontend incident resolution (Day 7B)
+
+Adds a third narrow ownership chain alongside the two in Section 17.1.1,
+still reporting into `useIncidents` rather than a new hook — the incident
+array has exactly one owner:
+
+```
+IncidentDashboard
+├── ConfigurationSubmissionForm → useConfigurationSubmission → ...
+└── useIncidents
+    ├── fetchIncidents            (GET /incidents)
+    └── resolveIncident           (POST /incidents/{id}/resolve)
+        └── postNoBody
+```
+
+**API client.** `postNoBody` (`src/api/client.ts`) is a focused sibling to
+`getJsonArray`/`postJson`: `method: "POST"`, `Accept: application/json`,
+`credentials: "omit"`, an optional `AbortSignal`, and deliberately no `body`
+key at all (not even `{}`) and no `Content-Type` header, since there is
+nothing to describe the content type of. It reuses the same non-OK/
+malformed-response handling every other transport function uses. `src/api/
+incidents.ts`'s `resolveIncident` layers two validation passes on top: the
+shared, forward-compatible `isIncidentResponse` structural check (Section
+17.1.1's same validator `GET /incidents` uses), then this endpoint's own
+narrower semantic check — the response is trusted only if `incident_id`
+matches the request, `status` is exactly `"RESOLVED"`, and `resolved_at` is
+non-null. Failing either check produces the same controlled
+malformed-response error every other endpoint uses; the shared validator
+itself is never tightened to make this endpoint-specific check redundant.
+
+**Hook ownership — extended, not duplicated.** `useIncidents` gains
+`resolvingIds: ReadonlySet<string>`, `resolveErrors: Readonly<Record<string,
+string>>`, and a `resolveIncident(incidentId)` action, all colocated with
+the existing `state`/`refresh` — no second `useResolveIncident` hook and no
+second copy of the incident array. A `useRef<Map<string, AbortController>>`
+keyed by `incident_id` is the *authoritative* same-incident duplicate
+guard, populated synchronously before any `await`/`.then()`, so two calls
+issued in the same tick (before React commits a `resolvingIds` update)
+still can't both start a POST; two *different* incident IDs get independent
+controllers, independent pending flags, and independent error entries, so
+one incident's failure can never cancel or clear another's in-flight
+request. Every completion path (`.then`/`.catch`) re-checks that its own
+controller is still the map's current entry for that ID before doing
+anything — a settled-but-superseded attempt (an old request whose retry has
+already started) can never clear a newer retry's state.
+
+**Successful resolution — local, atomic, no refresh.** On success, the
+complete `IncidentResponse` the POST returned is applied via a functional
+`setState` that finds the one matching `incident_id` in the current array
+and replaces only that element — array order is preserved, and every other
+element keeps its original object reference (no re-render-triggering copy
+of unrelated incidents). `lastUpdatedAt` is left untouched, since it
+represents the last list fetch/refresh, not a local resolution clock. No
+`GET /incidents` is ever issued as a consequence of a resolution, success or
+failure — the POST response is already the persisted, authoritative state.
+
+**Stale-result reconciliation (GET and POST alike).** A shared, unexported
+helper, `pickIncident(current, incoming)`, decides which of two
+representations of the same `incident_id` is authoritative, using
+`Date.parse` on both `updated_at` values — never lexicographic string
+comparison, since two valid ISO timestamps do not always compare correctly
+as strings once formatting varies. A definite instant ordering wins
+outright; at equal instants, a `RESOLVED` value always outranks a
+non-`RESOLVED` one (lifecycle safety — resolution is terminal in this UI),
+then the higher `occurrence_count`, then the incoming value; if either
+timestamp fails to parse, the function falls back to the same
+`RESOLVED`-wins-or-prefer-incoming lifecycle rule rather than ever guessing
+from raw string ordering. The identical helper is used in two places:
+applying a resolve POST response against the currently-held incident (so a
+resolution response that raced behind a concurrent refresh's newer data
+never reverts it), and reconciling a fresh `GET /incidents` response against
+the list already in state (`mergeIncidentLists`) — matching by
+`incident_id`, preserving the incoming response's order, and *appending any
+current-only incident the incoming response omitted*, in its prior order.
+Retaining current-only incidents is correct specifically because
+`GET /incidents` is unfiltered and append-only in the current scope and
+there is no deletion endpoint — an older or narrower GET response is never
+evidence that an incident was removed, only that this particular read raced
+ahead of some other write. No generic optimistic-concurrency/versioning
+scheme, global state library, or distributed synchronization primitive was
+introduced to achieve any of this — the existing per-hook abort-and-supersede
+idiom (Section 17.1.1) plus this one small timestamp-comparison helper were
+sufficient. One residual, accepted limitation: if a manual refresh's GET is
+*sent* before a concurrent resolution commits but its *response* arrives
+after the resolution's, the refresh's (now-stale) data can transiently
+redisplay the incident as `OPEN` until the next refresh corrects it — fixing
+this fully would require a cross-request version/sequence number the
+current scope does not need.
+
+**Presentation.** `IncidentCard` remains purely presentational — it receives
+`isResolving`/`resolveError`/`onResolve` as props, calls
+`onResolve(incident.incident_id)`, and owns no asynchronous state itself;
+`IncidentDashboard` only wires `resolvingIds`/`resolveErrors`/
+`resolveIncident` from the hook down to each card, adding no local copy of
+any of the three. A "Resolve incident" control renders only when
+`incident.status === "OPEN"` exactly — `RESOLVED`, the dormant
+`ACKNOWLEDGED`, and any unrecognized future status all render no action at
+all. Pending state uses the native `disabled` attribute plus a visible
+"Resolving…" label (the native attribute making a second click physically
+inert, same idiom as the existing Refresh button); a per-incident error uses
+`role="alert"` scoped inside that incident's own card, never affecting
+another card's controls. `updated_at` renders unconditionally as "Updated";
+`resolved_at` renders as "Resolved" only when populated — both via the same
+`<time dateTime=... title=...>` convention `last_seen_at` already uses, no
+new date library.
 
 ### 17.2 Deferred beyond the final MVP (non-goals)
 

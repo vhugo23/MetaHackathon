@@ -120,6 +120,25 @@ body {
   font-style: italic;
 }
 
+.incident-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0 0 0.75rem;
+}
+
+.incident-card__resolve-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.incident-card__resolve-error {
+  color: #dc2626;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
 .configuration-submission {
   border: 1px solid #d1d5db;
   border-radius: 0.5rem;

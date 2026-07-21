@@ -2,6 +2,9 @@ import type { IncidentResponse } from "../api/types";
 
 interface IncidentCardProps {
   incident: IncidentResponse;
+  isResolving: boolean;
+  resolveError: string | undefined;
+  onResolve: (incidentId: string) => void;
 }
 
 const VIOLATION_TYPE_LABELS: Record<string, string> = {
@@ -23,8 +26,14 @@ function humanize(code: string, labels: Record<string, string>): string {
   return labels[code] ?? code;
 }
 
-export function IncidentCard({ incident }: IncidentCardProps) {
+export function IncidentCard({
+  incident,
+  isResolving,
+  resolveError,
+  onResolve,
+}: IncidentCardProps) {
   const { evidence } = incident;
+  const isOpen = incident.status === "OPEN";
 
   return (
     <article className={`incident-card severity--${incident.severity.toLowerCase()}`}>
@@ -58,7 +67,43 @@ export function IncidentCard({ incident }: IncidentCardProps) {
             </time>
           </dd>
         </div>
+        <div>
+          <dt>Updated</dt>
+          <dd>
+            <time dateTime={incident.updated_at} title={incident.updated_at}>
+              {formatTimestamp(incident.updated_at)}
+            </time>
+          </dd>
+        </div>
+        {incident.resolved_at && (
+          <div>
+            <dt>Resolved</dt>
+            <dd>
+              <time dateTime={incident.resolved_at} title={incident.resolved_at}>
+                {formatTimestamp(incident.resolved_at)}
+              </time>
+            </dd>
+          </div>
+        )}
       </dl>
+
+      {isOpen && (
+        <div className="incident-card__actions">
+          <button
+            type="button"
+            className="incident-card__resolve-button"
+            disabled={isResolving}
+            onClick={() => onResolve(incident.incident_id)}
+          >
+            {isResolving ? "Resolving…" : "Resolve incident"}
+          </button>
+          {resolveError && (
+            <p className="incident-card__resolve-error" role="alert">
+              {resolveError}
+            </p>
+          )}
+        </div>
+      )}
 
       <p className="incident-card__recommendation">{incident.recommendation}</p>
 

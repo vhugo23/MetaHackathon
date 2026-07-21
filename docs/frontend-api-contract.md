@@ -6,11 +6,13 @@ only; Day 6C added the second frontend consumer, exercising
 `POST /devices/{device_id}/config` — see README.md's "Current Day 6C
 scope". Day 7A added a new endpoint, `POST /incidents/{incident_id}/resolve`
 (Section 7), and two new `IncidentResponse` fields, `updated_at`/
-`resolved_at` (Section 6) — **the current dashboard does not call the new
-endpoint; this is a backend-only addition with no frontend consumer yet.**
-The "Frontend consumption notes" subsections added to Sections 5–6 below
-describe how the *existing* frontend uses this contract, not a claim that
-it uses Day 7A's new endpoint.
+`resolved_at` (Section 6), as a backend-only addition with no frontend
+consumer yet. **Day 7B added the third frontend consumer: the dashboard now
+calls `POST /incidents/{incident_id}/resolve` for every `OPEN` incident's
+"Resolve incident" control** — see README.md's "Current Day 7B scope". The
+"Frontend consumption notes" subsections added to Sections 5–7 below
+describe how the *current* frontend uses this contract, including Day 7B's
+resolution flow.
 **Derived from:** `backend/src/meta_rne/api/schemas.py`, `api/routes.py`,
 `api/errors.py`, `api/cors.py` (current source, not a planning aspiration)
 
@@ -222,7 +224,7 @@ is a required *key* whose value is `datetime` or `null` — `null` while
 no filtering/pagination/sorting query parameter, and no query parameter
 hides either status.
 
-## 7. `POST /incidents/{incident_id}/resolve` (Day 7A)
+## 7. `POST /incidents/{incident_id}/resolve` (Day 7A backend; Day 7B frontend)
 
 Explicitly resolves one existing `OPEN` incident. `OPEN -> RESOLVED` is the
 only transition; there is no acknowledgment, reopening, assignment, or
@@ -269,11 +271,40 @@ the first successful call, never a new timestamp and never an error.
 {"code": "incident_not_found", "detail": "Incident 'missing-incident' was not found."}
 ```
 
-**No frontend control exists for this endpoint as of Day 7A.** The current
-dashboard only calls `GET /incidents` and
-`POST /devices/{device_id}/config` — there is no resolve button or other
-UI affordance yet. A future frontend phase may add one against this exact
-contract; nothing about the current dashboard invokes this route.
+**Frontend consumption notes (Day 7B).** The dashboard now calls this route
+for every `OPEN` incident's "Resolve incident" control
+(`resolveIncident`, `src/api/incidents.ts`). `incident_id` is encoded via
+`encodeURIComponent` as one opaque path segment, exactly like
+`submitDeviceConfiguration`'s `device_id` handling; the request is issued
+through a dedicated no-body transport primitive (`postNoBody`,
+`src/api/client.ts`) — `method: "POST"`, `Accept: application/json`,
+`credentials: "omit"`, no `body` key at all (not even `{}`), no
+`Content-Type` header, and an optional `AbortSignal`.
+
+The successful `2xx` body is validated in two layers: `isIncidentResponse`
+(Section 6's shared, forward-compatible structural validator — the same one
+`GET /incidents` uses) first, then this endpoint's own stricter semantic
+check — the response is trusted only if its `incident_id` matches the one
+requested, `status` is exactly `"RESOLVED"`, and `resolved_at` is a
+non-null string. A response that is structurally valid but fails any of
+those three checks (wrong incident, still `OPEN`, `resolved_at` still
+`null`) is rejected as the same controlled malformed-response error every
+other endpoint uses — never returned to the caller. The complete validated
+object is then used directly as the new persisted incident state; no
+follow-up `GET /incidents` is ever issued after a resolution, success or
+failure.
+
+The `404` `incident_not_found` body (above) surfaces through the existing
+`ApiRequestError` abstraction unchanged — `code`/`detail` preserved
+verbatim — with no special-casing of the status code anywhere in the
+frontend; a per-incident controlled error is shown next to the affected
+card, and another click retries.
+
+The control itself is rendered only for an incident whose `status` is
+exactly `"OPEN"` — `RESOLVED`, the dormant `ACKNOWLEDGED`, and any
+unrecognized future status all render no action, matching Section 3's
+"treat unknown values defensively" guidance without ever exposing a control
+for a status this endpoint can't legally accept.
 
 ## 8. Errors
 
@@ -358,8 +389,9 @@ Do not build frontend features assuming any of the following exist:
 - Pagination, filtering, or sorting query parameters on `GET /incidents`
 - Incident acknowledgment, reopening, assignment, comments/notes, audit
   history, or bulk resolution — `POST /incidents/{incident_id}/resolve`
-  (Section 7, Day 7A) is the one narrow exception: explicit, single-incident
-  `OPEN -> RESOLVED` resolution, with **no frontend control calling it yet**
+  (Section 7, Day 7A backend / Day 7B frontend) is the one narrow exception:
+  explicit, single-incident `OPEN -> RESOLVED` resolution, now called by the
+  dashboard's "Resolve incident" control for exact `OPEN` incidents only
 - `GET /devices`, `GET /devices/{id}`, `GET /incidents/{id}`
 - Drift detection, telemetry ingestion, or anomaly rules
 - Any vendor besides `cisco-ios-xe`

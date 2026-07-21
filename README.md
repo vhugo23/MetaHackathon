@@ -1219,6 +1219,82 @@ Backend test count: **571** (`pytest`; 431 non-`postgres` + 140
 Playwright) is unchanged — Day 7A added no frontend, Playwright, or CI
 change. **767 automated tests combined.**
 
+### Current Day 7B scope
+
+Builds the frontend vertical slice for the endpoint Day 7A added: an
+operator can now resolve an `OPEN` incident directly from the dashboard.
+
+**Operator flow:**
+
+1. Every incident whose `status` is exactly `OPEN` shows a "Resolve
+   incident" button on its card.
+2. Clicking it sends exactly one `POST /incidents/{incident_id}/resolve`
+   with no request body (`Accept: application/json`, `credentials: "omit"`,
+   no `Content-Type` header — there is no body to describe).
+3. Only that incident's button disables and its label changes to
+   "Resolving…" — every other card (including another pending resolution)
+   stays fully interactive.
+4. On success, the complete persisted `RESOLVED` incident the `POST`
+   response returned replaces the matching card locally — status becomes
+   `RESOLVED`, the button disappears, and `updated_at`/`resolved_at` render
+   as new "Updated"/"Resolved" timestamp rows (the same `<time>` convention
+   `Last seen` already uses).
+5. **No `GET /incidents` refresh is ever performed** as a consequence of a
+   resolution, success or failure — the `POST` response is already the
+   authoritative persisted state.
+6. A failure (including the exact `incident_not_found` `404`) renders a
+   controlled `role="alert"` message inside that one card only, re-enables
+   its button, and leaves the incident `OPEN` — pressing Resolve again
+   retries, clearing the previous error as the new attempt starts.
+
+**Eligibility.** The control renders only for exact `status === "OPEN"` —
+`RESOLVED`, the dormant `ACKNOWLEDGED`, and any unrecognized future status
+value all render no action at all (never a disabled/hidden button, simply
+none).
+
+**Concurrency.** Two different incidents can be resolved at the same time,
+each with its own independent pending/error state; a same-incident double
+click is suppressed synchronously (before React even commits a pending
+state update), not merely by the disabled button. `useIncidents` remains
+the single owner of the incident array — there is no second hook and no
+duplicate list.
+
+**Stale-response reconciliation.** Both a resolve `POST` response and a
+`GET /incidents` refresh response are reconciled against whatever the
+dashboard currently holds for that `incident_id`, using each side's parsed
+`updated_at` instant (never string comparison) — the newer instant wins;
+at an equal instant, `RESOLVED` always wins over a non-`RESOLVED` value, so
+a stale `OPEN` read can never revert an already-`RESOLVED` incident.
+Because `GET /incidents` is unfiltered and append-only in the current
+scope, a refresh response that happens to omit a previously-seen incident
+never deletes it from the dashboard — that incident is retained,
+appended after the incoming response's own incidents, in its prior order.
+
+**Unchanged.** A successful configuration submission still triggers exactly
+one incident refresh, independent of any pending resolution. There is no
+confirmation modal, no bulk resolution, no acknowledgment/reopening/
+assignment control, and no `GET /incidents` call anywhere in the resolution
+path itself. The existing Playwright browser test still covers only
+configuration submission and refresh — it does not exercise resolution;
+that remains a future Day 7C scenario.
+
+Frontend verification, from `frontend/`:
+
+```bash
+npm ci
+npm run format:check
+npm run lint
+npm run typecheck
+npm test -- --run
+npm run build
+```
+
+Verified totals as of Day 7B: **571** backend `pytest` tests (431
+non-`postgres` + 140 `postgres`-marked, unchanged since Day 7A), **276**
+frontend Vitest tests across 7 files, **19** Python orchestration-helper
+tests, **1** Playwright browser test (still configuration-submission/
+refresh only) — **867 automated tests combined**.
+
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 
 - `ConfigurationPolicy` and `RequiredAclRule` — a seeded, fixture-data
@@ -1491,3 +1567,38 @@ acknowledgment/reopening/assignment/comments, bulk resolution, status
 filtering, authentication, and every other Day 6D-era deferral remain
 later-day scope; the existing five CI jobs are unchanged, and no sixth job
 was added.
+
+**Day 7B — Frontend Incident-Resolution Vertical Slice.** Builds the
+frontend consumer of Day 7A's endpoint: a "Resolve incident" control on
+every exact-`OPEN` incident card, calling
+`POST /incidents/{incident_id}/resolve` with no request body through a
+dedicated `postNoBody` transport primitive, validated first by the shared
+`isIncidentResponse` structural check and then by endpoint-specific success
+semantics (matching `incident_id`, exact `RESOLVED` status, populated
+`resolved_at`). `useIncidents` (still the single owner of the incident
+array) gains per-incident pending/error state, a synchronous
+active-request-ref duplicate guard, and independent resolution for
+different incidents; a successful response atomically replaces only the
+matching incident (order and unrelated object references preserved,
+`lastUpdatedAt` untouched, zero follow-up `GET /incidents`). A shared
+timestamp-reconciliation helper (`Date.parse`, never lexical string
+comparison) protects both the resolve response and any concurrent
+`GET /incidents` refresh from reverting an already-newer or already-
+`RESOLVED` incident, and retains any current-only incident a refresh
+response happens to omit — correct because `GET /incidents` is unfiltered
+and append-only, never evidence of deletion. `IncidentCard` remains
+presentational (native button, native `disabled`, visible "Resolving…"
+label, card-scoped `role="alert"`); `IncidentDashboard` only wires hook
+state to cards, adding no duplicate state of its own. See "Current Day 7B
+scope" above for the full detail. Test totals as of Day 7B: 276 Vitest
+tests (7 files, up from 176), 19 Python orchestration-helper tests (1 file,
+unchanged), 1 Playwright browser test (1 file, unchanged — still
+configuration submission/refresh only), 571 backend `pytest` tests
+(unchanged since Day 7A — Day 7B is frontend-only) — **867 automated tests
+combined**. Day 7B is implemented across five reviewable gates
+(7B-A/7B-B/7B-C/7B-D/7B-E), all approved, and passes the full
+backend/frontend/browser verification matrix, but has not yet been
+committed — see CLAUDE.md's "Current Phase". A Playwright resolution
+scenario, incident acknowledgment/reopening/assignment/comments, bulk
+resolution, status filtering, and authentication remain later-day scope;
+the existing five CI jobs are unchanged, and no sixth job was added.

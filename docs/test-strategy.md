@@ -352,23 +352,27 @@ project-scoped defense-in-depth cleanup step.
 no mobile/device-emulation project, no visual-regression snapshot testing.
 Deferred alongside Section 18's existing deferrals.
 
-**Verified counts, as of Day 7A** (each recorded separately — none of
+**Verified counts, as of Day 7B** (each recorded separately — none of
 these are interchangeable substitutes for another, see below):
 
 | Layer | Count | Location |
 |---|---|---|
-| Vitest (frontend) | 176 tests, 7 files (unchanged since Day 6D) | `frontend/src/**/*.test.{ts,tsx}` |
+| Vitest (frontend) | 276 tests, 7 files (176 as of Day 6D/7A; see Section 7.3 for the Day 7B additions) | `frontend/src/**/*.test.{ts,tsx}` |
 | Python `unittest` (orchestration helpers) | 19 tests, 1 file (unchanged) | `scripts/test_browser_e2e.py` |
 | Playwright (browser) | 1 test, 1 file (unchanged — still config-submission/refresh only, does not resolve an incident) | `frontend/e2e/config-submission-refresh.spec.ts` |
-| pytest (backend) | 571 tests (431 non-`postgres` + 140 `postgres`) | `backend/tests/` |
-| **Combined** | **767 automated tests** | — |
+| pytest (backend) | 571 tests (431 non-`postgres` + 140 `postgres`, unchanged since Day 7A) | `backend/tests/` |
+| **Combined** | **867 automated tests** | — |
 
 Day 7A's 101 new/extended backend tests (571 vs. Day 6D's 470) are covered
 in Section 20 below, by layer. Vitest, the orchestration helpers, and
-Playwright are all unchanged from Day 6D — Day 7A is a backend-only vertical
-slice, verified by re-running the existing frontend/browser suites
-unmodified against the migrated schema and expanded `IncidentResponse`
-(Section 20.13).
+Playwright were all unchanged from Day 6D through Day 7A — Day 7A was a
+backend-only vertical slice, verified by re-running the existing frontend/
+browser suites unmodified against the migrated schema and expanded
+`IncidentResponse` (Section 20.13). **Day 7B is the inverse: frontend-only.**
+It adds 100 new Vitest tests (276 vs. Day 7A's 176 — see Section 7.3) and
+changes no backend code, so the orchestration helpers and Playwright are
+verified unmodified, exactly as Day 7A verified the frontend/browser suites
+unmodified against its own backend-only change.
 
 **Why these layers are not interchangeable.** Each proves something the
 others structurally cannot: Vitest proves frontend units, components, and
@@ -389,6 +393,104 @@ every error path, every repository conformance case) far more cheaply than
 a browser ever could, which is exactly why the browser suite stays at one
 test — it exists to prove wiring, not to re-prove business logic already
 covered exhaustively at the layers below it.
+
+---
+
+### 7.3 Day 7B — Incident Resolution Frontend Vertical Slice
+
+Adds 100 new/extended Vitest tests (276 vs. Day 7A's 176) across the same
+7 files, covering the frontend consumer of Day 7A's
+`POST /incidents/{incident_id}/resolve` endpoint, by layer:
+
+- **`IncidentResponse` contract** (`src/api/types.test.ts` is not a separate
+  file — these live in `src/api/incidents.test.ts`): `updated_at`/
+  `resolved_at` accepted as a datetime string and (`resolved_at` only) as
+  `null`; a missing `updated_at` or a missing `resolved_at` key rejected;
+  an empty-string or wrong-typed `resolved_at` (number/object/array)
+  rejected; every field, old and new, preserved on a valid response; `OPEN`/
+  `RESOLVED`/the dormant `ACKNOWLEDGED`/an unrecognized future status all
+  remain structurally accepted (the shared validator stays forward-
+  compatible — eligibility is a rendering concern, not a validation one).
+- **`postNoBody` transport** (`src/api/client.test.ts`): `POST` method,
+  exact configured-base-URL path construction, `Accept: application/json`,
+  `credentials: "omit"`, no `body` key in the constructed `RequestInit` at
+  all, no `Content-Type` header, `AbortSignal` passthrough, a successful
+  JSON body returned, the existing `{code, detail}`/malformed/HTML/network/
+  invalid-JSON-success error conventions all reused and reproven for this
+  transport function specifically (not just assumed from `postJson`'s
+  coverage).
+- **`resolveIncident` endpoint client** (`src/api/incidents.test.ts`): exact
+  encoded path (`/incidents/{encodeURIComponent(id)}/resolve`, proven
+  against space/slash/quote/Unicode/reserved-character incident IDs), no
+  body sent, `Accept`/`credentials`/`AbortSignal` as above, a complete
+  `RESOLVED` response returned with every field intact, and — the
+  endpoint-specific semantic layer — rejection of an otherwise-structurally-
+  valid response with a mismatched `incident_id`, a non-`RESOLVED` status
+  (`OPEN`, `ACKNOWLEDGED`, or an unrecognized value), or a `null`
+  `resolved_at`; the exact `incident_not_found` `404` converted to
+  `ApiRequestError` with `code`/`detail` preserved verbatim; malformed-error
+  and network-failure handling reused from the shared client conventions.
+- **Hook eligibility, concurrency, and reconciliation**
+  (`src/hooks/useIncidents.test.ts`): `resolveIncident` issues a `POST` only
+  for a matching, exactly-`OPEN` incident while the top-level state is
+  `success` — no `POST` for `RESOLVED`/`ACKNOWLEDGED`/an unknown status/a
+  missing ID/the `loading` or top-level `error` states; two synchronous
+  calls for the same incident produce exactly one `POST` (the
+  active-request-ref guard, proven to run before React commits any
+  `resolvingIds` state); two different incident IDs resolve independently,
+  each with its own pending/error entry, and one's failure never touches
+  the other's state; a successful response replaces only the matching array
+  element, preserving order and every unrelated element's object identity,
+  leaving `lastUpdatedAt` untouched, with zero `GET /incidents` calls; a
+  failure leaves the array and top-level state untouched, storing a
+  controlled message under only that incident's key; a retry clears the
+  prior error and can succeed; unmount aborts every active resolution
+  controller in addition to the list-fetch controller, and a late
+  (superseded) completion produces no state update and no React act
+  warning; a stale completion can never clear a newer retry's own
+  in-progress state. A dedicated, non-exported `pickIncident`/
+  `mergeIncidentLists` reconciliation suite proves: parsed-instant
+  comparison (`Date.parse`, never lexicographic string ordering — proven
+  with a deliberately-unparseable timestamp that would sort incorrectly
+  under naive string comparison); an older resolve response never
+  overwriting a newer current incident; a newer resolve response replacing
+  it; an equal-instant tie preferring `RESOLVED` over non-`RESOLVED` on
+  both the resolve-response and the `GET`-refresh path; incoming-only
+  incidents added; current-only incidents retained and appended in their
+  prior order after the incoming list; and a `GET` refresh reconciling
+  correctly around an in-flight/just-completed resolution.
+- **Component/dashboard rendering and accessibility**
+  (`src/pages/IncidentDashboard.test.tsx`, `within(article)`-scoped
+  throughout so an assertion can never accidentally target another
+  incident's card): a "Resolve incident" button renders only for exact
+  `OPEN`, never for `RESOLVED`/`ACKNOWLEDGED`/an unknown status; `Updated`
+  renders unconditionally from `updated_at` via a semantic `<time
+  dateTime=...>` element and `Resolved` renders only when `resolved_at` is
+  populated, both asserted via the `dateTime` source value, never a
+  locale-formatted string; clicking Resolve sends exactly one `POST` with
+  no body; the clicked card's button natively disables and shows
+  "Resolving…" while an unrelated card's button stays enabled, and two
+  different incidents can both show pending simultaneously; a rapid second
+  interaction (blocked by the now-native-`disabled` button) sends no second
+  `POST`; success renders the returned `RESOLVED` incident, removes the
+  button, renders the new timestamps, leaves an unrelated card and card
+  order unchanged, performs zero additional `GET`s, and leaves the
+  dashboard's Refresh/configuration-submission controls visible; failure
+  renders a `role="alert"` scoped to only the affected card, leaves the
+  incident `OPEN`, re-enables the button, performs zero additional `GET`s,
+  and leaves dashboard-level data visible; a retry after failure starts a
+  second `POST`, clears the previous error, and a later success renders
+  `RESOLVED`. Existing loading/top-level-error/manual-refresh/
+  configuration-submission-refresh regression tests (already present before
+  Day 7B) continue to pass unmodified except for one intentional correction
+  (below).
+- **One corrected pre-existing test.** `IncidentDashboard.test.tsx`'s
+  refresh-replaces-data test previously asserted that a `GET` refresh
+  response fully replaces the incident list; Day 7B's GET-reconciliation
+  contract (current-only-incident retention, above) makes that assumption
+  incorrect by design, so the test was renamed and its expectation updated
+  to assert both the incoming and the retained current-only incident are
+  present — not a behavior regression, a corrected assumption.
 
 ---
 

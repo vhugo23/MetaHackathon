@@ -10,7 +10,7 @@ function incidentCountLabel(count: number): string {
 }
 
 export function IncidentDashboard() {
-  const { state, refresh } = useIncidents();
+  const { state, refresh, resolvingIds, resolveErrors, resolveIncident } = useIncidents();
 
   return (
     <main>
@@ -52,7 +52,13 @@ export function IncidentDashboard() {
           </div>
           <div className="incident-list">
             {state.data.map((incident) => (
-              <IncidentCard key={incident.incident_id} incident={incident} />
+              <IncidentCard
+                key={incident.incident_id}
+                incident={incident}
+                isResolving={resolvingIds.has(incident.incident_id)}
+                resolveError={resolveErrors[incident.incident_id]}
+                onResolve={resolveIncident}
+              />
             ))}
           </div>
         </div>

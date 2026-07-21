@@ -27,6 +27,8 @@ export interface IncidentResponse {
   created_at: string;
   last_seen_at: string;
   occurrence_count: number;
+  updated_at: string;
+  resolved_at: string | null;
 }
 
 export interface ApiErrorResponse {
@@ -155,7 +157,9 @@ export function isIncidentResponse(value: unknown): value is IncidentResponse {
     typeof value.recommendation === "string" &&
     isNonEmptyString(value.created_at) &&
     isNonEmptyString(value.last_seen_at) &&
-    isNonNegativeInteger(value.occurrence_count)
+    isNonNegativeInteger(value.occurrence_count) &&
+    isNonEmptyString(value.updated_at) &&
+    (value.resolved_at === null || isNonEmptyString(value.resolved_at))
   );
 }
 

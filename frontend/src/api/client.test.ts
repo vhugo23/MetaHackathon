@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { getJsonArray, postJson, ApiRequestError } from "./client";
+import { getJsonArray, postJson, postNoBody, ApiRequestError } from "./client";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -502,4 +502,179 @@ test("postJson rejects an empty successful response body", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 201 })));
 
   await expect(postJson("/devices/spine-01/config", { a: 1 })).rejects.toThrow(ApiRequestError);
+});
+
+// ---------------------------------------------------------------------------
+// postNoBody
+// ---------------------------------------------------------------------------
+
+test("postNoBody uses POST and the exact configured-base-URL path", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 200));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postNoBody("/incidents/inc-1/resolve");
+
+  const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(url).toBe("http://localhost:8080/incidents/inc-1/resolve");
+  expect(init.method).toBe("POST");
+});
+
+test("postNoBody sends Accept: application/json", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 200));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postNoBody("/incidents/inc-1/resolve");
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  const headers = new Headers(init.headers);
+  expect(headers.get("Accept")).toBe("application/json");
+});
+
+test("postNoBody credentials is omit", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 200));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postNoBody("/incidents/inc-1/resolve");
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(init.credentials).toBe("omit");
+});
+
+test("postNoBody sends no body key in the RequestInit at all", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 200));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postNoBody("/incidents/inc-1/resolve");
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect("body" in init).toBe(false);
+});
+
+test("postNoBody sends no Content-Type header", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 200));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postNoBody("/incidents/inc-1/resolve");
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  const headers = new Headers(init.headers);
+  expect(headers.has("Content-Type")).toBe(false);
+});
+
+test("postNoBody passes an AbortSignal through as the exact same object", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 200));
+  vi.stubGlobal("fetch", fetchMock);
+  const controller = new AbortController();
+
+  await postNoBody("/incidents/inc-1/resolve", { signal: controller.signal });
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(init.signal).toBe(controller.signal);
+});
+
+test("postNoBody returns the parsed JSON body on a successful response", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ incident_id: "inc-1" }, 200)));
+
+  const result = await postNoBody("/incidents/inc-1/resolve");
+
+  expect(result).toEqual({ incident_id: "inc-1" });
+});
+
+test("postNoBody surfaces a {code, detail} error using the existing ApiRequestError shape", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(
+          { code: "incident_not_found", detail: "Incident 'missing-incident' was not found." },
+          404,
+        ),
+      ),
+  );
+
+  try {
+    await postNoBody("/incidents/missing-incident/resolve");
+    expect.unreachable("expected postNoBody to reject");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect((error as ApiRequestError).code).toBe("incident_not_found");
+    expect((error as ApiRequestError).message).toBe("Incident 'missing-incident' was not found.");
+  }
+});
+
+test("postNoBody produces the existing stable fallback message for a malformed (non-JSON) error body", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue(
+        new Response("not json", { status: 500, headers: { "Content-Type": "text/plain" } }),
+      ),
+  );
+
+  await expect(postNoBody("/incidents/inc-1/resolve")).rejects.toThrow(
+    "The request failed and no further detail is available.",
+  );
+});
+
+test("postNoBody produces the existing stable fallback message for an HTML error body", async () => {
+  const htmlBody =
+    "<!DOCTYPE html><html><head><title>502 Bad Gateway</title></head><body><h1>Bad Gateway</h1></body></html>";
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue(
+        new Response(htmlBody, { status: 502, headers: { "Content-Type": "text/html" } }),
+      ),
+  );
+
+  const message = await postNoBody("/incidents/inc-1/resolve").catch(
+    (error: unknown) => (error as ApiRequestError).message,
+  );
+  expect(message).toBe("The request failed and no further detail is available.");
+  expect(message).not.toContain("Bad Gateway");
+});
+
+test("postNoBody rejects an invalid-JSON successful response using the controlled malformed-response message", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(new Response("{not valid json", { status: 200 })),
+  );
+
+  try {
+    await postNoBody("/incidents/inc-1/resolve");
+    expect.unreachable("expected postNoBody to reject");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect((error as ApiRequestError).message).toBe(
+      "The server returned a response that could not be understood.",
+    );
+  }
+});
+
+test("postNoBody propagates a network failure", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+
+  await expect(postNoBody("/incidents/inc-1/resolve")).rejects.toThrow("Failed to fetch");
+});
+
+test("postNoBody propagates an abort as an AbortError, unwrapped", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockImplementation(() => {
+      const error = new DOMException("The operation was aborted.", "AbortError");
+      return Promise.reject(error);
+    }),
+  );
+  const controller = new AbortController();
+
+  try {
+    await postNoBody("/incidents/inc-1/resolve", { signal: controller.signal });
+    expect.unreachable("expected postNoBody to reject");
+  } catch (error) {
+    expect(error).toBeInstanceOf(DOMException);
+    expect((error as DOMException).name).toBe("AbortError");
+  }
 });

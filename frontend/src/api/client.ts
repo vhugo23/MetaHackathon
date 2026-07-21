@@ -118,6 +118,37 @@ export interface PostJsonOptions {
  * shape unvalidated — callers apply their own runtime structural validator
  * (see `configurations.ts`'s use of `isConfigurationSubmissionResponse`).
  */
+export interface PostNoBodyOptions {
+  signal?: AbortSignal;
+}
+
+/**
+ * POSTs with no request body at all — no `body` key, no empty `{}`, and no
+ * `Content-Type` header (there is nothing to describe the content type of).
+ * Reuses the same non-OK/malformed-response handling as `getJsonArray`/
+ * `postJson` (see `resolveIncident` in `incidents.ts`, the one current
+ * caller); shape unvalidated — callers apply their own runtime validator.
+ */
+export async function postNoBody<T>(path: string, options: PostNoBodyOptions = {}): Promise<T> {
+  const response = await fetch(buildUrl(path), {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    credentials: "omit",
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    const { detail, code } = await parseErrorDetail(response);
+    throw new ApiRequestError(detail, code);
+  }
+
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new ApiRequestError(MALFORMED_RESPONSE_MESSAGE);
+  }
+}
+
 export async function postJson(
   path: string,
   body: unknown,

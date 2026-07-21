@@ -45,29 +45,105 @@ For each task:
 
 ## Current Phase
 
-**Day 7A — Backend-only incident-resolution vertical slice (implemented
-across gates 7A-A/7A-B/7A-C/7A-D/7A-E, all approved, awaiting commit/CI
-approval).**
+**Day 7B — Frontend incident-resolution vertical slice (implemented across
+gates 7B-A/7B-B/7B-C/7B-D/7B-E, all approved, awaiting commit/CI approval).**
 
 Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, Day 4A, Day 4B1, Day 4B2,
-Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B, Day 6C, and Day 6D are complete and
-approved. Day 7A adds the first incident-lifecycle mutation
-(`OPEN -> RESOLVED`) end to end through the backend: domain invariants and
-`Incident.resolve(at)` (Gate 7A-A, plus a timestamp-monotonicity
-correctness patch checked against `updated_at` rather than `last_seen_at`),
-an explicit application-layer `Clock` protocol and `ResolveIncidentService`
-with a controlled `IncidentNotFoundError` (Gate 7A-B), a production
-`CallableClock` adapter and `POST /incidents/{incident_id}/resolve` wired
-through the existing `create_app`/`build_router` composition with a direct
-`IncidentResponse` and an exact `incident_not_found` 404 (Gate 7A-C), and a
-binding real-PostgreSQL proof that reingesting a resolved finding creates a
-new `OPEN` incident while existing `OPEN` deduplication and concurrent
-resolution remain correct (Gate 7A-D). Day 7A changed no frontend source,
-no Playwright test, no CI workflow, and no `docker-compose.yml` — see
-README.md's "Current Day 7A scope".
+Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B, Day 6C, Day 6D, and Day 7A are
+complete and approved. Day 7A added the first incident-lifecycle mutation
+(`OPEN -> RESOLVED`) end to end through the backend only (domain
+invariants/`Incident.resolve(at)`, `ResolveIncidentService`,
+`POST /incidents/{incident_id}/resolve`, real-PostgreSQL recurrence/
+concurrency proofs — see below for full detail). **Day 7B adds the
+corresponding frontend vertical slice: a "Resolve incident" control on
+every `OPEN` incident card, calling that same Day 7A endpoint.**
 
-Application code is allowed for **`frontend/`** (unchanged since Day 6D) in
-addition to the Day 3A–Day 7A backend capabilities listed below:
+Day 7B, by gate:
+
+- **Gate 7B-A** — `IncidentResponse` (`src/api/types.ts`) gains required
+  `updated_at: string` and `resolved_at: string | null` fields; the shared
+  `isIncidentResponse` runtime validator requires a non-empty `updated_at`
+  and either `null` or a non-empty `resolved_at` (a missing key fails, since
+  `undefined` satisfies neither branch), while remaining forward-compatible
+  on `status` (still validated only as a non-empty string, so `OPEN`,
+  `RESOLVED`, the dormant `ACKNOWLEDGED`, and an unrecognized future value
+  all pass structural validation — the validator's job is shape, not
+  business eligibility). No validated field is ever discarded — the parsed
+  object *is* the returned object.
+- **Gate 7B-B** — `postNoBody<T>(path, options)` (`src/api/client.ts`), a
+  focused sibling to `getJsonArray`/`postJson`: `method: "POST"`,
+  `Accept: application/json`, `credentials: "omit"`, an optional
+  `AbortSignal`, and — deliberately — no `body` key at all (not even `{}`)
+  and no `Content-Type` header, reusing the same non-OK/malformed-response
+  handling as the other two transport functions. `resolveIncident(incidentId,
+  options)` (`src/api/incidents.ts`) POSTs to
+  `/incidents/{encodeURIComponent(incidentId)}/resolve` (same encoding
+  convention as `submitDeviceConfiguration`'s `device_id`), validates the
+  response with the shared `isIncidentResponse`, then enforces
+  endpoint-specific success semantics the shared validator deliberately
+  does not: the returned `incident_id` must match the request,
+  `status` must be exactly `"RESOLVED"`, and `resolved_at` must be
+  non-null — any structurally-valid-but-semantically-wrong response (wrong
+  incident, still `OPEN`, `resolved_at` still `null`) is rejected as the
+  same controlled malformed-response error every endpoint uses. The
+  `incident_not_found` 404 surfaces through the existing `ApiRequestError`
+  abstraction unchanged (`code`/`detail` preserved verbatim) — no
+  status-code special-casing anywhere in the frontend.
+- **Gate 7B-C** — `useIncidents` (still the sole owner of the incident
+  array; no second hook) gains `resolvingIds: ReadonlySet<string>`,
+  `resolveErrors: Readonly<Record<string, string>>`, and
+  `resolveIncident(incidentId)`. A `useRef<Map<string, AbortController>>`
+  keyed by `incident_id` is the *authoritative* same-incident duplicate
+  guard, populated synchronously before any `await`, so two calls in one
+  tick can never both start a POST; different incident IDs get independent
+  controllers/pending flags/errors, so one incident's failure can never
+  cancel or clear another's request. `resolveIncident` no-ops entirely
+  (no POST, no pending state) unless the top-level state is `success`, the
+  incident exists, and its `status` is exactly `"OPEN"`. On success, the
+  complete returned object atomically replaces the one matching array
+  element (order preserved, every other element's object reference
+  preserved, `lastUpdatedAt` untouched, zero `GET /incidents` calls). A
+  shared, unexported `pickIncident(current, incoming)` helper — using
+  `Date.parse` on `updated_at`, never lexicographic string comparison —
+  decides which of two representations of the same incident is
+  authoritative (newer instant wins; at equal instants, `RESOLVED`
+  outranks non-`RESOLVED`, then higher `occurrence_count`, then incoming;
+  an unparseable timestamp never falls back to string ordering, only the
+  same lifecycle-safety rule). The identical helper reconciles both a
+  resolve POST response against current state *and* a fresh
+  `GET /incidents` response against the list already held — the GET side
+  (`mergeIncidentLists`) preserves incoming order and *retains* any
+  current-only incident the incoming response omitted (append-only,
+  unfiltered backend contract; no incident is ever deleted). Every
+  completion path re-checks its controller is still the map's current
+  entry before doing anything, so a settled-but-superseded attempt can
+  never clear a newer retry's state; unmount aborts every active
+  resolution controller in addition to the existing list-fetch controller.
+- **Gate 7B-D** — `IncidentCard` (still purely presentational — no API
+  call, no async state, no HTTP-status interpretation) gains
+  `isResolving`/`resolveError`/`onResolve` props; a native
+  `<button type="button" disabled={isResolving}>` renders only when
+  `incident.status === "OPEN"` exactly (`RESOLVED`/`ACKNOWLEDGED`/any
+  unknown status render no action at all), labeled "Resolve incident" or,
+  while pending, the visible text "Resolving…"; a per-incident
+  `role="alert"` renders `resolveError` scoped inside that incident's own
+  card. `Updated` (from `updated_at`, always) and `Resolved` (from
+  `resolved_at`, only when non-null) render via the same `<time
+  dateTime=... title=...>` convention `Last seen` already uses — no date
+  library. `IncidentDashboard` only wires `resolvingIds`/`resolveErrors`/
+  `resolveIncident` from the hook down to each card — no local copy of any
+  of the three; the existing configuration-submission refresh and manual
+  Refresh wiring are unchanged.
+
+Day 7B changed no backend code, no Playwright test, no CI workflow, and no
+`docker-compose.yml` — see README.md's "Current Day 7B scope". One residual,
+accepted limitation (not fixed, out of scope): if a manual refresh's GET is
+sent before a concurrent resolution commits but its response arrives after
+the resolution's, the stale refresh data can transiently redisplay the
+incident as `OPEN` until the next refresh corrects it.
+
+Application code is allowed for **`frontend/`** in addition to the Day
+3A–Day 7B backend capabilities listed below:
 
 - `src/api/client.ts` (`getJsonArray`, `postJson`, `ApiRequestError` with an
   optional `code`), `src/api/incidents.ts` (`fetchIncidents`),
@@ -147,20 +223,25 @@ addition to the Day 3A–Day 7A backend capabilities listed below:
   protection, abort behavior) unchanged; a subsequent refresh failure
   produces the incident section's own controlled error state without ever
   changing the already-successful submission result.
-- `src/components/{LoadingState,IncidentEmptyState,IncidentErrorState,
-  IncidentCard}.tsx` — unchanged from Day 6B: the four required incident-
-  list UI states, incidents rendered as responsive cards in backend order,
-  evidence/fingerprint in an accessible `<details>` region, and a Refresh
-  button that is natively `disabled` (not merely `aria-disabled`) while a
-  refresh is pending, with `aria-busy`/an `aria-live="polite"` status
-  communicating the pending refresh.
+- `src/components/{LoadingState,IncidentEmptyState,IncidentErrorState}.tsx`
+  — unchanged from Day 6B. `src/components/IncidentCard.tsx` — the four
+  required incident-list UI states, incidents rendered as responsive cards
+  in backend order, evidence/fingerprint in an accessible `<details>`
+  region, and a Refresh button that is natively `disabled` (not merely
+  `aria-disabled`) while a refresh is pending, with `aria-busy`/an
+  `aria-live="polite"` status communicating the pending refresh (unchanged
+  from Day 6B), **plus (Day 7B)** `isResolving`/`resolveError`/`onResolve`
+  props, a native "Resolve incident" button rendered only for exact
+  `status === "OPEN"`, and `Updated`/`Resolved` timestamp rendering — see
+  "Current Phase" above for the full Day 7B detail.
 - the `frontend` GitHub Actions CI job (Node-based, no PostgreSQL/Docker)
-- 176 frontend Vitest/RTL tests across 7 files (`src/api/client.test.ts`,
+- 276 frontend Vitest/RTL tests across 7 files (`src/api/client.test.ts`,
   `src/api/incidents.test.ts`, `src/api/configurations.test.ts`,
   `src/hooks/useIncidents.test.ts`,
   `src/hooks/useConfigurationSubmission.test.ts`,
   `src/components/ConfigurationSubmissionForm.test.tsx`,
-  `src/pages/IncidentDashboard.test.tsx`)
+  `src/pages/IncidentDashboard.test.tsx`) — 176 as of Day 6D/7A, 276 as of
+  Day 7B (see "Current Phase" above)
 
 **Day 6D adds** a single browser-level end-to-end test proving the Day 6C
 flow works through the real, deployed shape, plus the isolated,
@@ -231,28 +312,33 @@ developer's machine and in CI:
   (`if: failure()`, 7-day retention), and an always-run, project-scoped
   defense-in-depth cleanup step.
 
-Verified automated-test inventory as of Day 7A: **176** frontend Vitest
-tests (7 files, unchanged from Day 6D), **19** Python orchestration-helper
+Verified automated-test inventory as of Day 7B: **276** frontend Vitest
+tests (7 files; 176 as of Day 6D/7A), **19** Python orchestration-helper
 tests (1 file, unchanged), **1** Playwright browser test (1 file — never
 counted as part of the Vitest file total; still covers configuration
-submission and refresh only, does not resolve an incident), **571** backend
-`pytest` tests (431 non-PostgreSQL + 140 PostgreSQL) — **767** automated
-tests combined.
+submission and refresh only, does not resolve an incident — a browser-driven
+resolution scenario is deferred to Day 7C), **571** backend `pytest` tests
+(431 non-PostgreSQL + 140 PostgreSQL, unchanged since Day 7A — Day 7B is
+frontend-only) — **867** automated tests combined.
 
 **Still prohibited**: additional vendors, vendor autodetection, file upload,
 configuration history, device inventory, `GET /devices`, incident
 acknowledgment (the enum member and DB constraint remain dormant
-compatibility state — no public transition into it exists), reopening,
-assignment, comments/notes, audit history, user identity, bulk resolution,
-status filtering/pagination/client-side sorting, authentication/
-authorization, React Router, any global state library, TanStack Query, a
-component library, Tailwind, charts, telemetry, WebSockets/polling, a
-frontend Docker image or Compose service, production deployment, and cloud
-infrastructure. A frontend resolve control does not exist yet — Day 7A is
-backend-only; a future frontend phase may add one. Within browser testing
-specifically, Firefox/WebKit projects, mobile/device-emulation projects,
-visual-regression snapshot testing, and accessibility-auditing libraries
-remain out of scope. All of these are later days.
+compatibility state — no public transition into it exists, and no frontend
+control renders for it), reopening, assignment, comments/notes, audit
+history, user identity, bulk resolution, status filtering/pagination/
+client-side sorting, authentication/authorization, React Router, any global
+state library, TanStack Query, a component library, Tailwind, charts,
+telemetry, WebSockets/polling, a frontend Docker image or Compose service,
+production deployment, and cloud infrastructure. **A frontend resolve
+control now exists as of Day 7B** — a "Resolve incident" button on every
+exact-`OPEN` incident card, calling the same Day 7A endpoint; see "Current
+Phase" above for the full detail. A browser (Playwright) resolution
+scenario does not exist yet — Day 7B is Vitest-only; a future Day 7C may add
+one. Within browser testing specifically, Firefox/WebKit projects,
+mobile/device-emulation projects, visual-regression snapshot testing, and
+accessibility-auditing libraries remain out of scope. All of these are
+later days.
 
 Application code is currently allowed **only** for the completed Day 3A,
 Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B,
@@ -754,7 +840,10 @@ Playwright and browser end-to-end tests are therefore no longer prohibited,
 though Firefox/WebKit, mobile-device-emulation projects, visual-regression
 snapshot testing, accessibility-auditing libraries, a frontend Docker image
 or Compose service, production deployment, and cloud infrastructure remain
-so. A frontend resolve control does not exist yet (Day 7A is backend-only).
+so. **A frontend resolve control exists as of Day 7B** — the third frontend
+vertical slice (Day 6B: incident list; Day 6C: configuration submission;
+Day 7B: incident resolution) — see "Current Phase" above. A browser
+(Playwright) resolution scenario remains deferred to a future Day 7C.
 All remaining items are later days, against the domain model, architecture,
 and ports already documented, with tests written first per the Development
 Rules above.
