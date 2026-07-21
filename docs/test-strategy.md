@@ -276,8 +276,112 @@ cover, by responsibility rather than as an exhaustive per-test list:
   arriving while an unrelated manual refresh is still pending supersedes it
   under `useIncidents`'s existing rules.
 
-Playwright browser E2E for the dashboard remains deferred (Section 7) —
-HTTP-mode Playwright is unaffected and untouched by Day 6B or Day 6C.
+Browser E2E for the dashboard was deferred through Day 6B/6C — see Section
+7.2 below for Day 6D, which adds it. The HTTP-mode Playwright suite
+described in Section 7 above remains separately deferred and was
+unaffected and untouched by Day 6B, 6C, or 6D.
+
+### 7.2 Browser (Playwright/Chromium) End-to-End Testing (Day 6D)
+
+**Distinct from Section 7 above.** Section 7 describes a still-unbuilt
+*HTTP-mode* Playwright suite that drives the API directly via `request` —
+no browser, no frontend, no CORS. Day 6D instead builds a genuinely
+different *browser*-mode suite, whose purpose is exactly what an HTTP-only
+suite cannot prove: that a real browser, loading the real built frontend,
+can actually reach the API across origins (real CORS headers, not a test
+assumption) and render the result.
+
+| | |
+|---|---|
+| **Tested** | The complete configuration-submission → incident-refresh vertical slice, driven by a real Chromium browser via Playwright, against a real `vite preview` production build, real cross-origin HTTP, a real FastAPI process, and a real, disposable PostgreSQL database (architecture.md Section 15.2). |
+| **Mocked** | Nothing — the one level (alongside Section 7's still-unbuilt HTTP-mode suite) where "no mocks" is absolute. The spec observes real requests/responses (`page.on("request")`, `page.waitForResponse()`) and never calls `page.route()` to intercept or fulfill one. |
+| **Real components** | Chromium (via Playwright), the actual built React app served by `vite preview`, the actual FastAPI app, and a real PostgreSQL instance started from the existing `docker-compose.yml`'s `db`+`api` services (no new Compose file, no frontend Docker image or Compose service). |
+| **Speed** | A few seconds for the test itself; the full orchestrated run (image build, health waits, frontend build, preview startup) is minutes, dominated by the same costs as `compose-smoke` (Section 6.1). Not run on every save — a dedicated CI job (`browser-e2e`), and on demand locally. |
+| **Location** | `frontend/e2e/config-submission-refresh.spec.ts` (test), `frontend/playwright.config.ts` (Chromium-only project, `workers: 1`, `retries: 0`, `PLAYWRIGHT_BASE_URL` mandatory — the config fails to load if it is unset/blank rather than silently defaulting), `scripts/browser_e2e.py` (the isolated, Python-standard-library-only orchestrator; single authoritative implementation, same discipline as `scripts/compose_smoke.py`), `scripts/test_browser_e2e.py` (19 `unittest` tests for the orchestrator's own pure/narrowly-isolated helpers — project-name validation/generation, simultaneous three-port reservation and independent release, runtime-environment/CORS construction, Compose/Vite/npm command assembly). |
+
+**Fresh-database assertions (exact, not soft-checked).** The orchestrator
+guarantees a fresh, disposable database and the backend's existing
+idempotent Slice 1 policy seeding (architecture.md Section 11.2,
+unchanged) for every run, so the spec asserts exact values rather than
+permitting dirty-state ranges: the dashboard starts with an empty incident
+list; the `POST` response has `violations_detected: 1`,
+`incidents_created: 1`, `incidents_updated: 0`; the resulting incident has
+`occurrence_count: 1`. A present, non-empty `snapshot_id` is asserted
+without ever asserting its generated value; `incident_id`, `fingerprint`,
+and every timestamp are never asserted as literals.
+
+**Request-count assertions.** The spec attaches its request observer and
+its `GET /incidents`/`POST /devices/spine-01/config` response waiters
+*before* the triggering action in every case (before `page.goto()`, before
+clicking Submit, before `page.reload()`) so a fast response can never be
+missed. Counts are asserted at three checkpoints: after the initial page
+load (one `GET`, zero `POST`s), after a successful submission (two `GET`s,
+one `POST`), and after a page reload (three `GET`s, still one `POST`).
+
+**Reload persistence.** After the reload's third `GET /incidents`, the same
+logical incident (matched on `device_id`/`rule_ref`/`affected_resource` —
+never on `incident_id`, per the "no generated-ID literal" rule above) is
+still visible, proving the finding survived in PostgreSQL across a full
+page reload, not merely in React state.
+
+**Failure artifacts.** On failure, Playwright retains a trace, a
+screenshot, and a video (all failure-only, never on success) under
+`frontend/test-results/`, plus an HTML report under
+`frontend/playwright-report/` in CI — uploaded as a GitHub Actions artifact
+only when the job fails (`if: failure()`, 7-day retention), never on a
+passing run.
+
+**Isolated cleanup.** Every run uses a unique, validated, lowercase Compose
+project name and a disposable volume; `docker compose down --volumes
+--remove-orphans` runs unconditionally in a `finally` block, followed by an
+independent verification (via `com.docker.compose.project` label queries)
+that no container or volume for that project remains. There is no `--keep`
+option and no path that intentionally retains state — every run is
+disposable by construction (architecture.md Section 15.2).
+
+**Dedicated CI job.** `browser-e2e` (`.github/workflows/ci.yml`) is
+independent of `ci`/`postgres-tests`/`compose-smoke`/`frontend` (all four
+unchanged): Python 3.12, Node 24, pinned npm 11.6.2, the orchestration
+helper tests run *before* Chromium is installed (so a broken helper fails
+fast rather than after paying for the browser download), Chromium-only
+installation, the isolated orchestration command with a deterministic
+per-run project name, failure-only artifact upload, and an always-run,
+project-scoped defense-in-depth cleanup step.
+
+**Scope, explicitly bounded.** Chromium only — no Firefox/WebKit project,
+no mobile/device-emulation project, no visual-regression snapshot testing.
+Deferred alongside Section 18's existing deferrals.
+
+**Verified counts, as of Day 6D** (each recorded separately — none of
+these are interchangeable substitutes for another, see below):
+
+| Layer | Count | Location |
+|---|---|---|
+| Vitest (frontend) | 176 tests, 7 files | `frontend/src/**/*.test.{ts,tsx}` |
+| Python `unittest` (orchestration helpers) | 19 tests, 1 file | `scripts/test_browser_e2e.py` |
+| Playwright (browser) | 1 test, 1 file | `frontend/e2e/config-submission-refresh.spec.ts` |
+| pytest (backend) | 470 tests (360 non-`postgres` + 110 `postgres`) | `backend/tests/` |
+| **Combined** | **666 automated tests** | — |
+
+**Why these layers are not interchangeable.** Each proves something the
+others structurally cannot: Vitest proves frontend units, components, and
+hooks in isolation (React state machines, runtime response validators,
+accessible markup) with a stubbed `fetch` — fast, but it never sends a real
+HTTP request or renders in a real browser. Python `unittest` proves the
+orchestration script's own pure/narrowly-isolated helpers (port
+reservation, project-name validation, command assembly) — it never starts
+Docker, Node, or a browser, so it cannot prove the orchestrated flow
+actually works end to end. Playwright proves *system wiring*: that the
+built frontend, served for real, can actually reach the real backend across
+a real network origin boundary with real CORS headers, and that what a user
+would see in a real browser matches what the backend actually persisted —
+something no amount of mocked-`fetch` Vitest coverage or in-memory-repository
+pytest coverage can demonstrate by construction. pytest proves backend
+domain/application/persistence/API correctness in depth (every branch,
+every error path, every repository conformance case) far more cheaply than
+a browser ever could, which is exactly why the browser suite stays at one
+test — it exists to prove wiring, not to re-prove business logic already
+covered exhaustively at the layers below it.
 
 ---
 

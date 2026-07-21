@@ -1096,6 +1096,74 @@ database that's always empty going in — the same steps also run
 unchanged if a CI retry reuses a stack that got as far as step 3 before
 failing.
 
+### 15.2 Browser (Playwright/Chromium) End-to-End Path (Day 6D, binding)
+
+**Distinct from Section 15.1 above.** Section 15.1 describes a still-
+unbuilt *HTTP-mode* Playwright suite (`e2e/vertical-slice/`,
+`compose.e2e.yml`, test-strategy.md Section 7) that drives the API directly
+via `request` — no browser, no frontend. Day 6D instead built a *browser*-
+mode suite, a genuinely different thing, that exists specifically to prove
+the browser-level wiring (CORS, real cross-origin fetches, the rendered
+React UI) that an HTTP-only suite cannot:
+
+```
+Playwright (Chromium)
+  → real `vite preview` production build (frontend/, real static assets)
+  → real React frontend (IncidentDashboard / ConfigurationSubmissionForm)
+  → cross-origin HTTP (real fetch(), real CORS preflight/response headers)
+  → real FastAPI (Section 4/10: POST /devices/{id}/config, GET /incidents)
+  → real, disposable PostgreSQL (Section 11)
+```
+
+**Orchestration ownership (`scripts/browser_e2e.py`, Python standard
+library only — the single authoritative implementation, same discipline as
+`scripts/compose_smoke.py`):**
+
+```
+scripts/browser_e2e.py
+  → reserve three host ports simultaneously (db, api, frontend preview)
+  → create an isolated, uniquely-named Compose project
+  → release the db/api reservations, start db + api (existing
+    docker-compose.yml — unchanged, no new Compose file)
+  → wait for container health, then GET /health
+  → build the frontend with VITE_API_BASE_URL baked in
+  → release the frontend-port reservation, start `vite preview` directly
+    through node (never npm)
+  → wait for GET / to return 200
+  → run the one Playwright test, PLAYWRIGHT_BASE_URL == the frontend
+    origin, META_RNE_CORS_ALLOWED_ORIGINS == the same origin
+  → terminate the preview process (bounded, cross-platform)
+  → docker compose down --volumes --remove-orphans (always, in `finally`)
+  → verify no project-scoped container or volume remains
+```
+
+**Explicitly not containerized.** The frontend is never built into a Docker
+image and no `frontend` Compose service was added — `docker-compose.yml`
+(Section 15) is reused as-is, exactly as `scripts/compose_smoke.py` already
+reuses it; only `db` and `api` run under Docker, while the frontend runs as
+a plain `vite preview` Node process on the host, matching how a developer
+would actually run it locally.
+
+**Observation, never fulfillment.** The Playwright spec
+(`frontend/e2e/config-submission-refresh.spec.ts`) counts and asserts on
+real requests/responses (`page.on("request")`, `page.waitForResponse()`) —
+it never calls `page.route()` to intercept or fulfill an API response. Every
+assertion (the `201` POST body, the refreshed incident list, the reload
+persistence) reflects what the real backend and real database actually
+returned.
+
+**One worker, by design.** The suite runs with exactly one Playwright
+worker against exactly one disposable database populated by exactly one
+idempotently-seeded policy (Section 11.2) — there is no proof in Day 6D
+that two workers could safely share one fresh database concurrently, so no
+such claim is made or relied upon.
+
+**Scope, explicitly bounded.** Day 6D is Chromium only (no Firefox/WebKit
+project), no mobile/device-emulation project, and no visual-regression
+snapshot testing. It is distinct from, and does not anticipate the design
+of, any future multi-browser suite, visual-regression suite, or production-
+deployment pipeline — none of those are designed here.
+
 ---
 
 ## 16. Architectural Constraints

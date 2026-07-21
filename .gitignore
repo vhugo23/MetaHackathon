@@ -25,6 +25,8 @@ htmlcov/
 frontend/node_modules/
 frontend/dist/
 frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
 
 # Editors / OS
 .DS_Store

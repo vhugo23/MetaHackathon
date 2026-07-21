@@ -215,8 +215,10 @@ the exact order the backend returns them, each incident exposing its
 policy-violation evidence (including `fingerprint`) in a keyboard-accessible
 `<details>` region. No incident mutation, filtering, pagination, sorting,
 authentication, or routing is implemented. Incident acknowledgment/
-resolution and the Playwright/browser E2E suite remain deferred to a later
-day.
+resolution remains deferred to a later day. This exact dashboard and form —
+served as a real production build, not the dev server — is what Day 6D's
+Playwright browser test drives end to end; see
+["Current Day 6D scope"](#current-day-6d-scope) below.
 
 ### Current Day 6C scope
 
@@ -1067,6 +1069,98 @@ Backend test count: unchanged at **470** (360 non-`postgres` + 110
 **176** across 7 files (see `docs/test-strategy.md` Section 7.1 for the full
 inventory).
 
+### Current Day 6D scope
+
+A single browser-level end-to-end test proves the Day 6C configuration-
+submission → incident-refresh flow works through the system's real,
+deployed shape — not through Vitest's mocked `fetch`, not through in-memory
+repositories — driven by an actual Chromium browser via Playwright:
+
+```
+Chromium (Playwright)
+  → real `vite preview` production build
+  → real React frontend (IncidentDashboard / ConfigurationSubmissionForm)
+  → real cross-origin HTTP
+  → real FastAPI (POST /devices/spine-01/config, GET /incidents)
+  → real, disposable PostgreSQL
+```
+
+**The exact scenario proven**, against a guaranteed-fresh database (the
+backend's existing idempotent Slice 1 policy seeding, unchanged since
+Day 5B): the dashboard starts with an empty incident list; submitting the
+`spine-01` / `cisco-ios-xe` / missing-ACL configuration from this README's
+own worked example (`hostname spine-01\n!\ninterface
+GigabitEthernet0/1\n!\n`) yields a real `201` response with
+`violations_detected: 1`, `incidents_created: 1`, `incidents_updated: 0`,
+and a present (never literally asserted) `snapshot_id`; the submission
+triggers exactly one automatic `GET /incidents` refresh (never a second
+`POST`), after which the resulting incident is visible with `device_id:
+"spine-01"`, `status: "OPEN"`, `severity: "Medium"`,
+`rule_ref: "policy-acl-external-in"`, the affected `GigabitEthernet0/1`
+interface, and `occurrence_count: 1`; reloading the page issues a third
+real `GET /incidents` and the same incident is still there. Generated
+UUIDs, fingerprints, timestamps, and locale-formatted dates are
+deliberately never asserted as literal values.
+
+**Isolation.** `scripts/browser_e2e.py` (Python standard library only, same
+discipline as `scripts/compose_smoke.py`) reserves three host ports
+simultaneously (PostgreSQL, API, frontend preview — never a bind-then-
+close-then-reuse pattern), generates a unique, validated Compose project
+name, starts only the existing `docker-compose.yml`'s `db`+`api` services
+(no new Compose file, no frontend Docker image, no frontend Compose
+service — the frontend stays uncontainerized), and computes
+`META_RNE_CORS_ALLOWED_ORIGINS` and the browser's own origin from the exact
+same selected frontend port, both as `http://127.0.0.1:<port>` — never
+`localhost`, never a mismatch — so the real CORS check the browser performs
+actually has to pass. `docker compose down --volumes --remove-orphans`
+always runs in a `finally` block, followed by an independent verification
+(via `com.docker.compose.project` label queries) that no container or
+volume for that project remains; there is no `--keep` option and no path
+that intentionally retains state.
+
+**Run it locally**, from the repository root (requires Docker, Node, and
+npm on `PATH`; Chromium must already be installed — see below):
+
+```bash
+python scripts/browser_e2e.py
+```
+
+The orchestration helpers themselves have their own fast, dependency-free
+test suite:
+
+```bash
+python scripts/test_browser_e2e.py
+```
+
+Playwright's Chromium browser binary is not committed to the repository and
+must be installed locally when needed:
+
+```bash
+cd frontend
+npx playwright install chromium
+```
+
+**Scope.** Chromium only — no Firefox, WebKit, or mobile-device-emulation
+project; one worker, zero retries; no visual-regression snapshot testing.
+`frontend/playwright.config.ts` requires `PLAYWRIGHT_BASE_URL` to be set
+(the config fails to load otherwise, never silently defaulting), retains a
+trace/screenshot/video on failure only, and writes an HTML report only in
+CI. A fifth GitHub Actions job, `browser-e2e` (independent of `ci`/
+`postgres-tests`/`compose-smoke`/`frontend`, all four unchanged), runs the
+orchestration helper tests before installing Chromium (so a broken helper
+fails fast, before paying for the browser download), installs Chromium
+only, runs `scripts/browser_e2e.py` with a deterministic per-run project
+name, uploads the Playwright report/test-results as an artifact only on
+failure (7-day retention), and always runs a project-scoped defense-in-depth
+cleanup step.
+
+Test count: **1** Playwright browser test (1 file), plus **19** Python
+`unittest` tests for the orchestration helpers (1 file) — neither counted
+as part of the 176 Vitest tests or the 470 backend `pytest` tests. Backend
+test count is unchanged at 470 (360 non-`postgres` + 110 `postgres`-marked)
+— Day 6D changed no backend code, no API schema, no domain/application/
+persistence/migration behavior, and no React application source.
+
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 
 - `ConfigurationPolicy` and `RequiredAclRule` — a seeded, fixture-data
@@ -1277,8 +1371,29 @@ code, API schema, or domain/application/persistence behavior changed across
 any of the three. See "Current Day 6A scope"/"Current Day 6B scope"/"Current
 Day 6C scope" above for exactly what is and is not implemented; backend test
 count is unchanged at 470 (360 non-`postgres` + 110 `postgres`-marked) since
-Day 5B, and frontend test count stands at 176 across 7 files. Day 6C is
-implemented and passes the full verification matrix but has not yet been
+Day 5B, and frontend test count stands at 176 across 7 files.
+
+**Day 6D — Browser (Playwright/Chromium) End-to-End Vertical-Slice
+Validation.** Adds one browser-level Playwright test
+(`frontend/e2e/config-submission-refresh.spec.ts`) proving the Day 6C
+configuration-submission → incident-refresh flow through a real Chromium
+browser, a real production `vite preview` build, real cross-origin HTTP, a
+real FastAPI process, and a real, disposable PostgreSQL database — never a
+mock, never an in-memory repository, never an intercepted/fulfilled
+response — plus the isolated, cross-platform orchestration
+(`scripts/browser_e2e.py`, `scripts/test_browser_e2e.py`) that makes the
+run reproducible on a developer's machine and in a fifth, independent
+GitHub Actions job (`browser-e2e`). No backend code, API schema,
+domain/application/persistence/migration behavior, or React application
+source changed — Day 6D is validation of already-approved Day 6C behavior,
+not a new product feature. See "Current Day 6D scope" above for the full
+detail. Test totals as of Day 6D: 176 Vitest tests (7 files), 19 Python
+orchestration-helper tests (1 file), 1 Playwright browser test (1 file),
+470 backend `pytest` tests (360 non-`postgres` + 110 `postgres`-marked) —
+**666 automated tests combined**. Day 6D is implemented and passes the full
+frontend/browser/backend verification matrix but has not yet been
 committed — see CLAUDE.md's "Current Phase". Additional vendors, drift
 detection, telemetry, incident acknowledgment/resolution, authentication,
-and the Playwright/browser E2E suite remain Day 6D and later.
+Firefox/WebKit and mobile-emulation browser projects, visual-regression
+snapshot testing, a frontend Docker image or Compose service, and
+production/cloud deployment remain Day 6E and later.

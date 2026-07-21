@@ -169,3 +169,84 @@ jobs:
       - name: vite build
         working-directory: frontend
         run: npm run build
+
+  browser-e2e:
+    # Isolated, cross-platform browser (Playwright/Chromium) E2E job (Day
+    # 6D) — proves the configuration-submission -> incident-refresh slice
+    # through a real Chromium browser, a real production `vite preview`
+    # build, real cross-origin HTTP, a real FastAPI process, and a real,
+    # disposable PostgreSQL instance. scripts/browser_e2e.py is the single
+    # authoritative implementation of the orchestration flow (mirroring how
+    # scripts/compose_smoke.py is the single authoritative implementation of
+    # the compose-smoke job above) — this job only invokes it, and owns no
+    # Compose lifecycle logic of its own beyond defense-in-depth cleanup.
+    # Independent of ci/postgres-tests/compose-smoke/frontend: no shared
+    # service container, since the script brings up its own disposable
+    # db + api via docker compose.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install pinned npm
+        run: npm install --global npm@11.6.2
+
+      - name: Report runtime versions
+        run: |
+          node --version
+          npm --version
+          python --version
+          docker --version
+          docker compose version
+
+      - name: Orchestration helper tests (fail fast before installing Chromium)
+        run: python scripts/test_browser_e2e.py
+
+      - name: npm ci
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Chromium (with required Linux dependencies)
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run isolated browser E2E orchestration
+        run: |
+          python scripts/browser_e2e.py \
+            --project-name meta-rne-browser-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload Playwright report/test-results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-browser-e2e-${{ github.run_attempt }}
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Defense-in-depth cleanup (project-scoped, always)
+        if: always()
+        run: |
+          docker compose \
+            --project-name meta-rne-browser-e2e-${{ github.run_id }}-${{ github.run_attempt }} \
+            down --volumes --remove-orphans
+          echo "residual containers (expected empty):"
+          docker ps -a \
+            --filter label=com.docker.compose.project=meta-rne-browser-e2e-${{ github.run_id }}-${{ github.run_attempt }} \
+            --quiet
+          echo "residual volumes (expected empty):"
+          docker volume ls \
+            --filter label=com.docker.compose.project=meta-rne-browser-e2e-${{ github.run_id }}-${{ github.run_attempt }} \
+            --quiet

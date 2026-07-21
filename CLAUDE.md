@@ -45,29 +45,37 @@ For each task:
 
 ## Current Phase
 
-**Day 6C — Configuration submission frontend vertical slice (implemented,
-awaiting commit/CI approval).**
+**Day 6D — Browser (Playwright/Chromium) end-to-end vertical-slice
+validation (implemented, awaiting commit/CI approval).**
 
 Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, Day 4A, Day 4B1, Day 4B2,
-Day 4B3, Day 5A, Day 5B, Day 6A, and Day 6B are complete and approved; Day 6C
-is implemented (four reviewable gates, all approved) and passes the full
-frontend/backend verification matrix, but has not yet been committed or
-merged. See README.md's "Current Project Status" for the full history. Day 4B
-("Slice 1 persistence foundations") is complete across all three reviewable
-gates (4B1/4B2/4B3). The first vertical slice (product-spec.md Section 11) is
-runnable end to end over real HTTP against a real PostgreSQL database
-(Day 5B), Day 6A proved that same slice in its actual deployed Docker
-Compose shape (`scripts/compose_smoke.py`) and stabilized the OpenAPI/CORS
-contract (`docs/frontend-api-contract.md`), Day 6B built the first frontend
-consumer of that contract — a React/TypeScript/Vite dashboard (`frontend/`)
-requesting `GET /incidents` and rendering the complete request lifecycle
-(loading/empty/error-with-retry/populated) — and Day 6C adds the second
+Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B, and Day 6C are complete and
+approved; Day 6D is implemented (three reviewable gates, all approved) and
+passes the full frontend/browser/backend verification matrix, but has not
+yet been committed or merged. See README.md's "Current Project Status" for
+the full history. Day 4B ("Slice 1 persistence foundations") is complete
+across all three reviewable gates (4B1/4B2/4B3). The first vertical slice
+(product-spec.md Section 11) is runnable end to end over real HTTP against a
+real PostgreSQL database (Day 5B), Day 6A proved that same slice in its
+actual deployed Docker Compose shape (`scripts/compose_smoke.py`) and
+stabilized the OpenAPI/CORS contract (`docs/frontend-api-contract.md`),
+Day 6B built the first frontend consumer of that contract — a
+React/TypeScript/Vite dashboard (`frontend/`) requesting `GET /incidents`
+and rendering the complete request lifecycle
+(loading/empty/error-with-retry/populated) — Day 6C added the second
 frontend vertical slice: a configuration-submission form
 (`ConfigurationSubmissionForm`) integrated into that same dashboard, POSTing
 to the existing `POST /devices/{device_id}/config` endpoint and triggering
-exactly one `GET /incidents` refresh after a successful submission. Day 6C
-changed no backend code, no API schema, and no domain/application/
-persistence/migration behavior — see README.md's "Current Day 6C scope".
+exactly one `GET /incidents` refresh after a successful submission — and
+Day 6D adds a real **browser-level** proof of that same flow: a single
+Playwright/Chromium test, driven against a real production Vite build
+(`vite preview`), issuing real cross-origin HTTP requests to a real FastAPI
+process backed by a real, disposable PostgreSQL database — never a mock,
+never an in-memory repository, never an intercepted/fulfilled response. Day
+6D changed no backend code, no API schema, no domain/application/
+persistence/migration behavior, and no React application source — it is
+validation of already-approved Day 6C behavior, not a new product feature.
+See README.md's "Current Day 6D scope".
 
 Application code is now allowed for **`frontend/`** in addition to the
 Day 3A–Day 6A backend capabilities listed below:
@@ -165,18 +173,98 @@ Day 3A–Day 6A backend capabilities listed below:
   `src/components/ConfigurationSubmissionForm.test.tsx`,
   `src/pages/IncidentDashboard.test.tsx`)
 
+**Day 6D adds** a single browser-level end-to-end test proving the Day 6C
+flow works through the real, deployed shape, plus the isolated,
+cross-platform orchestration that makes that test reproducible on a
+developer's machine and in CI:
+
+- `frontend/playwright.config.ts` — Chromium only (no Firefox/WebKit/mobile
+  emulation), `workers: 1`, `retries: 0`, no `webServer` block (the
+  orchestrator below owns the stack's lifecycle instead), a mandatory
+  `PLAYWRIGHT_BASE_URL` (the config throws at load time if it is unset or
+  blank — never a silent `localhost` fallback), `trace: "retain-on-failure"`,
+  `screenshot: "only-on-failure"`, `video: "retain-on-failure"`, an explicit
+  `outputDir` under `frontend/test-results`, and no visual-snapshot
+  behavior.
+- `frontend/e2e/config-submission-refresh.spec.ts` — the one Playwright
+  test: navigates the real dashboard, confirms the fresh-database empty
+  state, submits the exact `spine-01` / `cisco-ios-xe` / missing-ACL
+  configuration from README's own worked example, asserts the real `201`
+  POST response and the visible success fields (`device_id`, a present
+  non-empty `snapshot_id`, `violations_detected: 1`, `incidents_created: 1`,
+  `incidents_updated: 0`), asserts exactly one initial `GET /incidents` and
+  exactly one additional `GET /incidents` after the POST (never a second
+  POST), asserts the resulting incident's stable fields (device, `OPEN`,
+  `Medium`, `policy-acl-external-in`, the affected interface,
+  `occurrence_count: 1`), reloads the page, and asserts the same incident
+  is still visible through a third real `GET /incidents` — all via pure
+  network *observation* (`page.on("request")`/`page.waitForResponse()`),
+  never `page.route()` interception or fulfillment. No generated UUID,
+  fingerprint, timestamp, or locale-formatted date is ever asserted as a
+  literal value.
+- `scripts/browser_e2e.py` — the single authoritative, Python-standard-
+  library-only orchestration script (same discipline as
+  `scripts/compose_smoke.py`): reserves three host ports simultaneously
+  (never bind-then-close-then-reuse), generates a unique, validated,
+  lowercase Compose project name, starts only `docker-compose.yml`'s
+  existing `db`+`api` services (no new Compose file, no frontend Compose
+  service, no frontend Docker image), waits for container health and a real
+  `GET /health` before touching the browser, builds the real frontend with
+  `VITE_API_BASE_URL` baked in, launches `vite preview` directly through
+  `node` (never `npm`, so `terminate()` cannot leave an orphaned wrapper
+  process), waits for a real `GET /` 200, runs
+  `npm run test:e2e:direct` with `PLAYWRIGHT_BASE_URL` computed from the
+  same frontend-port value used to build `META_RNE_CORS_ALLOWED_ORIGINS`
+  (so the CORS origin and the actual browser origin are always identical,
+  with `127.0.0.1` used everywhere, never `localhost`), preserves
+  Playwright's real exit code, and — in a `finally` block that runs on any
+  outcome — terminates the preview process, releases every port
+  reservation, runs `docker compose down --volumes --remove-orphans`, and
+  independently verifies (via `com.docker.compose.project` label queries)
+  that no container or volume for that project remains. No `--keep` option
+  exists; there is no debugging path that intentionally retains state.
+- `scripts/test_browser_e2e.py` — 19 `unittest`-based tests (Python
+  standard library only) covering the orchestration script's pure/narrowly-
+  isolated helpers (project-name validation/generation, simultaneous
+  three-port reservation and independent release, runtime-
+  environment/CORS construction, Compose/Vite/npm command assembly) —
+  never the browser or backend, which are proved by actually running
+  `scripts/browser_e2e.py`.
+- a fifth GitHub Actions job, `browser-e2e` (independent of `ci`/
+  `postgres-tests`/`compose-smoke`/`frontend`, all four unchanged):
+  Python 3.12 + Node 24 + pinned npm 11.6.2, the helper tests run *before*
+  installing Chromium (fail fast on a broken helper before paying for the
+  browser download), Chromium-only installation
+  (`playwright install --with-deps chromium`), the isolated orchestration
+  command with a deterministic CI project name
+  (`meta-rne-browser-e2e-${{ github.run_id }}-${{ github.run_attempt }}`),
+  a failure-only Playwright report/test-results artifact upload
+  (`if: failure()`, 7-day retention), and an always-run, project-scoped
+  defense-in-depth cleanup step.
+
+Verified automated-test inventory as of Day 6D: **176** frontend Vitest
+tests (7 files), **19** Python orchestration-helper tests (1 file), **1**
+Playwright browser test (1 file — never counted as part of the Vitest file
+total), **470** backend `pytest` tests (360 non-PostgreSQL + 110
+PostgreSQL) — **666** automated tests combined.
+
 **Still prohibited**: additional vendors, vendor autodetection, file upload,
 configuration history, device inventory, `GET /devices`, incident
 acknowledgment/resolution, incident mutations,
 filtering/pagination/client-side sorting, authentication/authorization,
 React Router, any global state library, TanStack Query, a component library,
-Tailwind, charts, telemetry, WebSockets/polling, Playwright, browser
-end-to-end tests, a frontend Docker image or Compose service. All of these
-are Day 6D or later.
+Tailwind, charts, telemetry, WebSockets/polling, a frontend Docker image or
+Compose service, production deployment, and cloud infrastructure. Within
+browser testing specifically, Firefox/WebKit projects, mobile/device-
+emulation projects, visual-regression snapshot testing, and accessibility-
+auditing libraries remain out of scope — Day 6D is Chromium-only, one
+worker, zero retries, no snapshot testing. All of these are Day 6E or
+later.
 
 Application code is currently allowed **only** for the completed Day 3A,
 Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B,
-and Day 6C capabilities:
+Day 6C, and Day 6D capabilities (Day 6D added no new backend capability —
+see the Day 6D bullet list above):
 
 - explicit OpenAPI `operation_id`s (`health_check`,
   `submit_device_configuration`, `list_incidents`) and documented `409`/
@@ -554,11 +642,16 @@ and Day 6C capabilities:
 **Still prohibited**: incident acknowledgment/resolution commands,
 authentication/authorization, filtering/pagination/sorting query
 parameters, drift detection, anomaly/telemetry ingestion, structured
-logging beyond FastAPI's own request logging, Playwright, browser
-end-to-end tests, and new Alembic migrations. The React dashboard
-(`frontend/`), Vite, and Node/npm tooling are no longer prohibited — Day 6B
-implemented the first frontend vertical slice, and Day 6C implemented the
-second (configuration submission — see the "Current Phase" section above).
-All remaining items are Day 6D or later, against the domain model,
+logging beyond FastAPI's own request logging, and new Alembic migrations.
+The React dashboard (`frontend/`), Vite, and Node/npm tooling are no longer
+prohibited — Day 6B implemented the first frontend vertical slice, Day 6C
+implemented the second (configuration submission), and Day 6D added a
+Chromium-only Playwright browser end-to-end test plus its isolated
+orchestration (see the "Current Phase" section above) — Playwright and
+browser end-to-end tests are therefore no longer prohibited, though
+Firefox/WebKit, mobile-device-emulation projects, visual-regression
+snapshot testing, accessibility-auditing libraries, a frontend Docker image
+or Compose service, production deployment, and cloud infrastructure remain
+so. All remaining items are Day 6E or later, against the domain model,
 architecture, and ports already documented, with tests written first per
 the Development Rules above.
