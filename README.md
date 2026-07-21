@@ -220,6 +220,47 @@ served as a real production build, not the dev server — is what Day 6D's
 Playwright browser test drives end to end; see
 ["Current Day 6D scope"](#current-day-6d-scope) below.
 
+### Operations Interface (Day 8B)
+
+The frontend described above has since grown into a restrained,
+operations-oriented interface for both currently supported vendors. An
+operator submits a running **Cisco IOS-XE** or **Arista EOS** configuration
+through one shared form; the backend normalizes it, evaluates it against the
+applicable required-ACL policy, and creates or updates a deduplicated
+incident — the dashboard then reflects that incident's `OPEN` or `RESOLVED`
+state, refreshable on demand and resolvable with one click. The interface is
+responsive across desktop, tablet, and mobile widths, and supports
+user-selectable **light and dark themes**: it starts from the operating
+system's `prefers-color-scheme` on first visit, and an explicit choice (via
+the header toggle) is persisted in `localStorage` and takes precedence over
+the system preference on every later visit. Every control — the theme
+toggle, vendor select, form fields, Submit, Refresh, and Resolve — is a
+native, keyboard-operable HTML element with a visible focus ring; contrast
+and keyboard behavior were manually audited across both themes, not
+formally certified against WCAG.
+
+This exact production build was verified through the real stack — PostgreSQL,
+FastAPI, and a production-built Vite preview — driven by Playwright/Chromium
+across three browser scenarios (Cisco submission, Arista submission, and
+incident resolution, each proving persistence across a page reload).
+
+#### Light theme
+
+![Desktop dashboard, light theme](./docs/assets/day-8b/desktop-light.png)
+
+#### Dark theme
+
+![Desktop dashboard, dark theme](./docs/assets/day-8b/desktop-dark.png)
+
+<details>
+<summary>Mobile (375px), both themes</summary>
+
+| Light | Dark |
+|---|---|
+| ![Mobile dashboard, light theme](./docs/assets/day-8b/mobile-light.png) | ![Mobile dashboard, dark theme](./docs/assets/day-8b/mobile-dark.png) |
+
+</details>
+
 ### Current Day 6C scope
 
 `ConfigurationSubmissionForm` is now rendered inside `IncidentDashboard`,

@@ -467,3 +467,62 @@ test("editing an invalid field clears its local validation message without rewri
   expect(deviceIdInput).not.toHaveAttribute("aria-invalid");
   expect(deviceIdInput).toHaveValue("spine-01");
 });
+
+// ---------------------------------------------------------------------------
+// 21. Day 8B-B approved static copy and placeholders
+// ---------------------------------------------------------------------------
+
+test("renders the approved explanatory sentence exactly", () => {
+  render(<ConfigurationSubmissionForm />);
+
+  expect(
+    screen.getByText(
+      "Submit a running configuration for normalization, policy evaluation, and incident detection.",
+    ),
+  ).toBeInTheDocument();
+});
+
+test("the Device ID field has the approved placeholder", () => {
+  render(<ConfigurationSubmissionForm />);
+
+  expect(screen.getByLabelText(/device id/i)).toHaveAttribute("placeholder", "spine-01 or leaf-02");
+});
+
+test("the Raw configuration field has the approved placeholder", () => {
+  render(<ConfigurationSubmissionForm />);
+
+  expect(screen.getByLabelText(/raw configuration/i)).toHaveAttribute(
+    "placeholder",
+    "Paste Cisco IOS-XE or Arista EOS configuration",
+  );
+});
+
+test("Device ID and Raw configuration remain initially empty despite having placeholders", () => {
+  render(<ConfigurationSubmissionForm />);
+
+  expect(screen.getByLabelText(/device id/i)).toHaveValue("");
+  expect(screen.getByLabelText(/raw configuration/i)).toHaveValue("");
+});
+
+test("the raw-configuration textarea has spellcheck disabled", () => {
+  render(<ConfigurationSubmissionForm />);
+
+  expect(screen.getByLabelText(/raw configuration/i)).toHaveAttribute("spellcheck", "false");
+});
+
+test("existing labels and vendor option values/order remain unchanged after the Day 8B-B copy/placeholder additions", () => {
+  render(<ConfigurationSubmissionForm />);
+
+  expect(screen.getByLabelText(/device id/i)).toBeInTheDocument();
+  expect(screen.getByLabelText(/vendor/i)).toBeInTheDocument();
+  expect(screen.getByLabelText(/raw configuration/i)).toBeInTheDocument();
+
+  const select = screen.getByLabelText(/vendor/i);
+  const options = within(select).getAllByRole("option");
+  expect(options).toHaveLength(2);
+  expect(options[0]).toHaveValue("cisco-ios-xe");
+  expect(options[0]).toHaveTextContent("Cisco IOS-XE");
+  expect(options[1]).toHaveValue("arista-eos");
+  expect(options[1]).toHaveTextContent("Arista EOS");
+  expect(select).toHaveValue("cisco-ios-xe");
+});

@@ -69,7 +69,13 @@ export function ConfigurationSubmissionForm({
 
   return (
     <section className="configuration-submission">
-      <h2>Submit device configuration</h2>
+      <div className="configuration-submission__intro">
+        <h2>Submit device configuration</h2>
+        <p className="configuration-submission__description">
+          Submit a running configuration for normalization, policy evaluation, and incident
+          detection.
+        </p>
+      </div>
 
       <form
         className="configuration-submission__form"
@@ -77,32 +83,35 @@ export function ConfigurationSubmissionForm({
         aria-busy={isSubmitting}
         noValidate
       >
-        <div className="form-field">
-          <label htmlFor="configuration-device-id">Device ID</label>
-          <input
-            id="configuration-device-id"
-            type="text"
-            value={deviceId}
-            onChange={handleDeviceIdChange}
-            aria-invalid={deviceIdError ? "true" : undefined}
-            aria-describedby={deviceIdError ? "configuration-device-id-error" : undefined}
-          />
-          {deviceIdError && (
-            <p id="configuration-device-id-error" className="form-field__error" role="alert">
-              {deviceIdError}
-            </p>
-          )}
+        <div className="configuration-submission__identity">
+          <div className="form-field">
+            <label htmlFor="configuration-device-id">Device ID</label>
+            <input
+              id="configuration-device-id"
+              type="text"
+              value={deviceId}
+              onChange={handleDeviceIdChange}
+              placeholder="spine-01 or leaf-02"
+              aria-invalid={deviceIdError ? "true" : undefined}
+              aria-describedby={deviceIdError ? "configuration-device-id-error" : undefined}
+            />
+            {deviceIdError && (
+              <p id="configuration-device-id-error" className="form-field__error" role="alert">
+                {deviceIdError}
+              </p>
+            )}
+          </div>
+
+          <div className="form-field">
+            <label htmlFor="configuration-vendor">Vendor</label>
+            <select id="configuration-vendor" value={vendor} onChange={handleVendorChange}>
+              <option value="cisco-ios-xe">Cisco IOS-XE</option>
+              <option value="arista-eos">Arista EOS</option>
+            </select>
+          </div>
         </div>
 
-        <div className="form-field">
-          <label htmlFor="configuration-vendor">Vendor</label>
-          <select id="configuration-vendor" value={vendor} onChange={handleVendorChange}>
-            <option value="cisco-ios-xe">Cisco IOS-XE</option>
-            <option value="arista-eos">Arista EOS</option>
-          </select>
-        </div>
-
-        <div className="form-field">
+        <div className="form-field configuration-submission__code-field">
           <label htmlFor="configuration-raw-config-text">Raw configuration</label>
           <textarea
             id="configuration-raw-config-text"
@@ -110,6 +119,8 @@ export function ConfigurationSubmissionForm({
             value={rawConfigText}
             onChange={handleRawConfigChange}
             rows={12}
+            placeholder="Paste Cisco IOS-XE or Arista EOS configuration"
+            spellCheck={false}
             aria-invalid={rawConfigError ? "true" : undefined}
             aria-describedby={rawConfigError ? "configuration-raw-config-text-error" : undefined}
           />
@@ -120,15 +131,17 @@ export function ConfigurationSubmissionForm({
           )}
         </div>
 
-        <button type="submit" disabled={isSubmitting}>
-          Submit configuration
-        </button>
+        <div className="configuration-submission__actions">
+          <button type="submit" disabled={isSubmitting}>
+            Submit configuration
+          </button>
 
-        {isSubmitting && (
-          <p role="status" className="configuration-submission__pending">
-            Submitting configuration…
-          </p>
-        )}
+          {isSubmitting && (
+            <p role="status" className="configuration-submission__pending">
+              Submitting configuration…
+            </p>
+          )}
+        </div>
       </form>
 
       {state.status === "error" && (

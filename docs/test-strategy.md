@@ -1506,3 +1506,56 @@ happened to place it first — see Section 7.5 for the full reasoning.
 job was added, removed, or reconfigured; `browser-e2e` discovers the new
 third spec file with no configuration change, exactly as it already
 discovered the second in Day 7C.
+
+## 22. Frontend Visual, Responsive, and Accessibility Verification (Day 8B)
+
+Verifies the restyled, themeable frontend (Section 19 of architecture.md)
+through the existing automated suites plus a manual/ad-hoc rendered-browser
+audit — the latter is not an automated visual-regression suite; it produced
+retained screenshots for human review, not a repeatable pass/fail check.
+
+**Automated coverage, current totals (all verified this gate):**
+
+| Layer | Count | Location |
+|---|---|---|
+| Frontend Vitest | 298, 8 files | `frontend/src/**/*.test.{ts,tsx}` |
+| Playwright (browser) | 3, 3 files | `frontend/e2e/` |
+
+Backend `pytest` and Python orchestration-helper counts are unchanged from
+Day 8A (Section 21) and were not independently reverified during this
+frontend-only gate. The one new Vitest file is `frontend/src/App.test.tsx`
+(the theme toggle/resolution logic); the existing `ConfigurationSubmissionForm.test.tsx`
+and `IncidentDashboard.test.tsx` gained focused additive assertions
+(approved copy/placeholder text, a Refresh/Submit document-order and
+accessible-name check) with no existing assertion weakened or removed.
+
+**Browser regression, unchanged orchestration.** All three Playwright
+scenarios — Cisco configuration submission and reload, Arista configuration
+submission and reload, and incident resolution and reload — were re-run
+through the existing `scripts/browser_e2e.py` orchestration (real
+PostgreSQL, real FastAPI, a real production-built Vite preview) after every
+visual change in this gate, unmodified.
+
+**Manual visual/accessibility audit.** Using a temporary, ad-hoc
+Playwright-driven script (never added to `frontend/e2e/` or the repository),
+the real, production-built application was driven through representative
+Cisco and Arista submissions and one incident resolution, then inspected at:
+
+- a fixed viewport matrix — 1440×900 (desktop), 768×1024 (tablet), and
+  375×812 (mobile) — in both light and dark theme, with retained PNG
+  screenshots for each combination;
+- a full keyboard `Tab` cycle from a freshly reloaded, unfocused document,
+  confirming a logical order (theme toggle → configuration form fields →
+  Submit → Refresh → per-card Resolve/Evidence controls) and a visible focus
+  ring on every stop;
+- `document.documentElement.scrollWidth`/`clientWidth` equality at all three
+  widths in both themes, confirming no horizontal page overflow;
+- spot-checked contrast ratios (a temporary Node calculation of the WCAG
+  relative-luminance formula, not a dependency) against the actual rendered
+  token values, correcting two combinations found below the 4.5:1 text
+  threshold (a severity-badge color and the dark-theme primary button's
+  fill) and two placeholder-text combinations found meaningfully low.
+
+This audit is manual and non-repeatable by design — it is a one-time,
+human-reviewed check of the current rendered state, not a CI gate. No
+automated visual-regression tool was added.

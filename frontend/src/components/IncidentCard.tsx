@@ -36,13 +36,10 @@ export function IncidentCard({
   const isOpen = incident.status === "OPEN";
 
   return (
-    <article className={`incident-card severity--${incident.severity.toLowerCase()}`}>
-      <header className="incident-card__header">
-        <span className="badge">{incident.severity}</span>
-        <span className="badge badge--status">{incident.status}</span>
-      </header>
-
-      <dl className="incident-card__fields">
+    <article
+      className={`incident-card severity--${incident.severity.toLowerCase()} status--${incident.status.toLowerCase()}`}
+    >
+      <dl className="incident-card__identity">
         <div>
           <dt>Device</dt>
           <dd>{incident.device_id}</dd>
@@ -51,6 +48,20 @@ export function IncidentCard({
           <dt>Affected resource</dt>
           <dd>{incident.affected_resource}</dd>
         </div>
+      </dl>
+
+      <div className="incident-card__badges">
+        <span className={`badge badge--severity severity--${incident.severity.toLowerCase()}`}>
+          {incident.severity}
+        </span>
+        <span className={`badge badge--status status--${incident.status.toLowerCase()}`}>
+          {incident.status}
+        </span>
+      </div>
+
+      <p className="incident-card__recommendation">{incident.recommendation}</p>
+
+      <dl className="incident-card__fields">
         <div>
           <dt>Rule</dt>
           <dd>{incident.rule_ref}</dd>
@@ -104,8 +115,6 @@ export function IncidentCard({
           )}
         </div>
       )}
-
-      <p className="incident-card__recommendation">{incident.recommendation}</p>
 
       <details>
         <summary>Evidence</summary>

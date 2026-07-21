@@ -1787,3 +1787,47 @@ legitimately differ between the two policy rows.
 `'arista-eos'` since migration `0001` (Day 1) — confirmed, not assumed,
 before this phase began. No new migration was written; no CI job was
 added, removed, or modified.
+
+## 19. Frontend Visual and Theme Architecture (Day 8B)
+
+Restyles and reorganizes the existing frontend (Section 17.1.1/17.1.2) with
+a design-token system and a user-selectable theme — no backend, API, or
+domain-layer change.
+
+**Composition, unchanged at the component-responsibility level.**
+`IncidentDashboard` remains the sole owner of `useIncidents()` and page-level
+layout (header, the configuration workspace, and the incident-results
+section); `ConfigurationSubmissionForm` remains the single vendor-neutral
+submission form; `IncidentCard` remains the presentational incident view,
+receiving `isResolving`/`resolveError`/`onResolve` from `IncidentDashboard`
+exactly as before. Day 8B's changes to these three files are markup/CSS
+reorganization (e.g. `IncidentCard`'s identity/badges/metadata regions,
+`IncidentDashboard`'s header and toolbar), not new state, props, or data
+flow.
+
+**Centralized semantic design tokens.** `frontend/src/styles.css` defines
+one CSS custom-property vocabulary — surfaces, text tiers, accent, semantic
+status colors, radius, shadow, spacing, and type scale — consumed by every
+component's styling. No component defines its own hard-coded color; a
+palette or contrast correction is made once, in `styles.css`, and applies
+everywhere that token is used.
+
+**Theme selection is a frontend-only concern.** `frontend/src/theme.ts`
+exposes pure functions (`getSystemTheme`, `getStoredTheme`, `storeTheme`,
+`resolveInitialTheme`) with no backend call and no new API endpoint.
+`App.tsx` resolves the initial theme once, in a `useState` initializer
+(`resolveInitialTheme()`), and applies it via `useLayoutEffect` by setting
+`document.documentElement.dataset.theme` (`"light"` or `"dark"`) before the
+browser paints — never a `prefers-color-scheme` media query, so an explicit
+selection always wins regardless of the current OS setting.
+`styles.css` mirrors this with two themed blocks, `:root, :root[data-theme="light"]`
+and `:root[data-theme="dark"]`, each defining the same token names with
+theme-appropriate values.
+
+**Persistence and system fallback.** A user's explicit choice is persisted
+in `localStorage` (`storeTheme`) and takes precedence over the OS preference
+on every subsequent load (`resolveInitialTheme`'s `getStoredTheme() ??
+getSystemTheme()`). No cookie, session, or server-side state is involved —
+theme selection survives a reload or a new tab on the same browser profile,
+never across devices or accounts, since there is no user identity in this
+MVP.

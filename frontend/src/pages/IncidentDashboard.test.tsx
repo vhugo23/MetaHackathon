@@ -1110,3 +1110,32 @@ test("a retry after a failed resolution starts a second POST, clears the previou
   expect(within(article).queryByRole("alert")).not.toBeInTheDocument();
   expect(router.calls.filter((call) => call.init.method === "POST")).toHaveLength(2);
 });
+
+// ---------------------------------------------------------------------------
+// Day 8B-D: Refresh renders after the configuration form, keeps its exact
+// accessible name, and still triggers a refresh (supersedes the Day 8B-C
+// header-grouping contract, which required an incorrect keyboard/DOM order)
+// ---------------------------------------------------------------------------
+
+test("Refresh renders in a populated state after Submit configuration in document order, keeps its exact accessible name, and clicking it fetches incidents again", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse([incidentA]));
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<IncidentDashboard />);
+  await screen.findByRole("article");
+
+  const submitButton = screen.getByRole("button", { name: /submit configuration/i });
+  const refreshButton = screen.getByRole("button", { name: /^refresh$/i });
+  expect(refreshButton).toBeInTheDocument();
+
+  expect(
+    submitButton.compareDocumentPosition(refreshButton) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+
+  const callCountBeforeClick = fetchMock.mock.calls.length;
+  fireEvent.click(refreshButton);
+
+  await waitFor(() => {
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callCountBeforeClick);
+  });
+});
