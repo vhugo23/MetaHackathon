@@ -44,6 +44,15 @@ def test_openapi_contract__approved_operation_ids__are_exact() -> None:
     assert schema["paths"]["/incidents"]["get"]["operationId"] == "list_incidents"
 
 
+def test_openapi_contract__resolve_incident__operation_id_is_exact() -> None:
+    schema = _openapi_schema()
+
+    assert (
+        schema["paths"]["/incidents/{incident_id}/resolve"]["post"]["operationId"]
+        == "resolve_incident"
+    )
+
+
 def test_openapi_contract__paths__are_exactly_the_approved_set() -> None:
     schema = _openapi_schema()
 
@@ -51,6 +60,7 @@ def test_openapi_contract__paths__are_exactly_the_approved_set() -> None:
         "/health",
         "/devices/{device_id}/config",
         "/incidents",
+        "/incidents/{incident_id}/resolve",
     }
 
 
@@ -178,6 +188,63 @@ def test_openapi_contract__incident_response__contains_fingerprint() -> None:
 
     properties = schema["components"]["schemas"]["IncidentResponse"]["properties"]
     assert "fingerprint" in properties
+
+
+def test_openapi_contract__resolve_incident__documents_200() -> None:
+    schema = _openapi_schema()
+
+    responses = schema["paths"]["/incidents/{incident_id}/resolve"]["post"]["responses"]
+    assert "200" in responses
+    body_schema = responses["200"]["content"]["application/json"]["schema"]
+    assert body_schema["$ref"] == "#/components/schemas/IncidentResponse"
+
+
+def test_openapi_contract__resolve_incident__documents_404_with_api_error_response() -> None:
+    schema = _openapi_schema()
+
+    responses = schema["paths"]["/incidents/{incident_id}/resolve"]["post"]["responses"]
+    assert "404" in responses
+    schema_ref = responses["404"]["content"]["application/json"]["schema"]
+    assert schema_ref["$ref"] == "#/components/schemas/ApiErrorResponse"
+
+
+def test_openapi_contract__resolve_incident__has_no_request_body() -> None:
+    schema = _openapi_schema()
+
+    operation = schema["paths"]["/incidents/{incident_id}/resolve"]["post"]
+    assert "requestBody" not in operation
+
+
+def test_openapi_contract__resolve_incident__and_list_incidents__share_same_response_schema() -> (
+    None
+):
+    schema = _openapi_schema()
+
+    list_schema = schema["paths"]["/incidents"]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    resolve_schema = schema["paths"]["/incidents/{incident_id}/resolve"]["post"]["responses"][
+        "200"
+    ]["content"]["application/json"]["schema"]
+    assert list_schema["items"]["$ref"] == "#/components/schemas/IncidentResponse"
+    assert resolve_schema["$ref"] == "#/components/schemas/IncidentResponse"
+
+
+def test_openapi_contract__incident_response__has_updated_at_and_resolved_at() -> None:
+    schema = _openapi_schema()
+
+    incident_schema = schema["components"]["schemas"]["IncidentResponse"]
+    assert "updated_at" in incident_schema["properties"]
+    assert "resolved_at" in incident_schema["properties"]
+    assert "updated_at" in incident_schema["required"]
+
+    # resolved_at is a required key (always present in the response) but
+    # its value is nullable — Pydantic v2's `datetime | None` renders as an
+    # `anyOf` including an explicit null type, not `required` absence.
+    assert "resolved_at" in incident_schema["required"]
+    resolved_at_schema = incident_schema["properties"]["resolved_at"]
+    types_in_any_of = {member.get("type") for member in resolved_at_schema["anyOf"]}
+    assert "null" in types_in_any_of
 
 
 def test_openapi_contract__list_incidents__documents_500_with_api_error_response() -> None:

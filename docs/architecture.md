@@ -580,6 +580,7 @@ disabled everywhere else composition doesn't explicitly opt in.
 |---|---|---|---|---|
 | `POST` | `/devices/{id}/config` | Ingest a vendor config | FR-01–03 | **1** |
 | `GET` | `/incidents` | List incidents, filter by `device_id`/`severity` | FR-07, FR-08 | **1** |
+| `POST` | `/incidents/{id}/resolve` | Explicitly resolve one `OPEN` incident (`OPEN -> RESOLVED` only, idempotent) | FR-08 | Day 7A |
 | `GET` | `/devices` | List devices + current normalized config | FR-08 | Later |
 | `GET` | `/devices/{id}` | One device's current normalized config | FR-08 | Later |
 | `GET` | `/incidents/{id}` | One incident | FR-08 | Later |
@@ -651,6 +652,37 @@ callers only ever see the aggregated counts.
 holds for the policy path. This response shape is also how Slice 1 tests
 verify normalization (test-strategy.md Section 19, test 5) — never via
 `GET /devices/{id}`, which is deferred.
+
+### 10.2 `POST /incidents/{id}/resolve` — Success Response (binding, Day 7A)
+
+```json
+// 200 OK — the response body IS the resolved incident, no envelope
+{
+  "incident_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "fingerprint": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "device_id": "spine-01",
+  "source": "POLICY_VIOLATION",
+  "rule_ref": "policy-acl-external-in",
+  "affected_resource": "interface:GigabitEthernet0/1:acl_in",
+  "severity": "Medium",
+  "status": "RESOLVED",
+  "evidence": { "...": "unchanged" },
+  "recommendation": "Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1",
+  "created_at": "2026-07-18T10:00:00Z",
+  "last_seen_at": "2026-07-18T10:00:00Z",
+  "occurrence_count": 1,
+  "updated_at": "2026-07-18T11:00:00Z",
+  "resolved_at": "2026-07-18T11:00:00Z"
+}
+```
+
+This is exactly `IncidentResponse` (`api/schemas.py`) — the same schema
+`GET /incidents` returns — with `updated_at`/`resolved_at` now populated
+(both equal to the one `Clock` value the resolution captured); no wrapper,
+no separate "resolve response" type. No request body: `incident_id` is
+the only input, taken from the path. `application.ResolveIncidentService`
+(Section 11.3) is the only place a resolution is performed — the route
+itself does not touch `status`, `resolved_at`, or `updated_at` directly.
 
 ---
 
@@ -850,6 +882,109 @@ implementations.
   per-test Postgres transaction rollback; E2E tests use a real, disposable
   Postgres container (Section 15.1, test-strategy.md Section 9).
 
+### 11.3 Incident Resolution (Day 7A)
+
+The first incident-lifecycle mutation: an operator explicitly transitions
+an `OPEN` incident to `RESOLVED` via `POST /incidents/{id}/resolve`
+(Section 10.2). Three layers, each with one narrow responsibility:
+
+```
+application.ResolveIncidentService.resolve(incident_id) -> Incident
+    │  one UnitOfWork per call, same exception-preserving rollback/close
+    │  lifecycle as ConfigIngestionService/ListIncidentsService
+    ▼
+uow.incidents.get_by_id(incident_id)
+    ├─ None                    → IncidentNotFoundError, no Clock call, no commit
+    ├─ already RESOLVED        → return unchanged, zero Clock calls, no commit
+    └─ OPEN                    → Clock.now() called exactly once, then:
+         uow.incidents.resolve(incident_id, resolved_at) -> Incident | None
+             │  one atomic conditional SQL UPDATE (SQLAlchemy) or one
+             │  lock-guarded domain-method call (in-memory) — never a
+             │  generic full-row save(); only status/resolved_at/updated_at
+             │  are ever written, so a concurrent upsert_open_incident on
+             │  the same row can never be clobbered, or vice versa
+             ▼
+         uow.commit() → return the repository's persisted result
+```
+
+**`Clock` (application-layer port, distinct from Section 4.1's deferred
+domain-level `Clock`).** A minimal structural protocol,
+`meta_rne.application.incident_resolution.Clock` (`.now() -> datetime`),
+that `ResolveIncidentService` depends on — `application` still never
+imports `meta_rne.api.clock` or calls the system clock directly. The API
+composition layer (`api/app.py`) supplies a `CallableClock`
+(`meta_rne.api.clock`) that adapts `create_app`'s existing
+`clock: Callable[[], datetime]` parameter — the **same** injected time
+source already used for `POST /devices/{id}/config`'s `observed_at`, never
+a second, independent clock — validating each read via the existing
+`require_utc`.
+
+**`IncidentRepository.resolve(incident_id, resolved_at) -> Incident | None`**
+(both SQLAlchemy/PostgreSQL and in-memory) is deliberately narrow, not a
+generic `save()` — a full-row save risked clobbering a concurrent
+`upsert_open_incident`'s writes to `occurrence_count`/`evidence`/
+`last_seen_at`/`severity` on the same row. The SQLAlchemy implementation is
+one atomic conditional statement, the same "never a read-before-write"
+idiom as `upsert_open_incident` (Section 9):
+
+```sql
+UPDATE incidents
+SET status = 'RESOLVED', resolved_at = :resolved_at, updated_at = :resolved_at
+WHERE incident_id = :incident_id
+  AND status = 'OPEN'
+  AND updated_at <= :resolved_at
+RETURNING <explicit columns>;
+```
+
+The `updated_at <= :resolved_at` guard — checked against `updated_at`, not
+`last_seen_at` — is what makes resolution monotonic: an `OPEN` incident may
+legally already have `last_seen_at < updated_at` (nothing else currently
+produces that gap, but the invariant is defended unconditionally), and a
+`last_seen_at`-only check would let a resolution move `updated_at`
+backward. When the statement affects no row, one internal, non-public
+follow-up `SELECT` (`populate_existing=True`, so a Session's earlier
+identity-map-cached object is never returned stale) distinguishes exactly
+which of four cases occurred — never a read-before-write, and never an
+apparent-success return for an unresolved conflict:
+
+| Follow-up finds | Repository returns |
+|---|---|
+| no row | `None` (caller raises `IncidentNotFoundError`) |
+| `RESOLVED` | that incident, unchanged (idempotent success) |
+| still `OPEN` (supplied `resolved_at` was stale) | raises `ValueError` |
+| any other status (the dormant `ACKNOWLEDGED`) | raises `ValueError` |
+
+The in-memory repository performs the equivalent transition under its
+existing `incidents_lock`, delegating the actual invariant enforcement to
+`Incident.resolve(at)` (domain-model.md Section 10).
+
+**Recurrence and the partial unique index.** `ux_incidents_open_fingerprint`
+(`UNIQUE (fingerprint) WHERE status = 'OPEN'`, Section 9, unchanged since
+Day 4B1) already excludes any `RESOLVED` row — no migration or index change
+was needed for Day 7A. This is what lets the same fingerprint recur: once
+an incident is resolved, `upsert_open_incident`'s `ON CONFLICT` target no
+longer sees a conflicting row, so reingesting the identical finding inserts
+a **new** `OPEN` incident (new `incident_id`, `occurrence_count: 1`) rather
+than reopening the resolved one — the historical `RESOLVED` row is left
+completely unchanged, and further reingestion against the new `OPEN`
+incident deduplicates exactly as it always has (Section 9). Proven by real
+PostgreSQL tests (test-strategy.md Section 9), not by any behavior change
+to `upsert_open_incident` itself.
+
+**Concurrency guarantees and explicit limits.** Two concurrent
+`resolve()` calls against one incident: the atomic conditional `UPDATE`
+means only one transaction's `WHERE status = 'OPEN'` can match; the other
+falls through to the follow-up `SELECT`, finds the row already `RESOLVED`,
+and returns it unchanged — both callers receive a consistent, persisted
+`RESOLVED` result, never a corrupted row or a duplicate. A committed
+ingestion update that lands between a resolve's read and its write is
+similarly safe: `resolve()` only ever writes `status`/`resolved_at`/
+`updated_at`, so `occurrence_count`/`last_seen_at`/`evidence` from that
+ingestion are preserved. No advisory lock, distributed lock, queue, Redis,
+optimistic-version column, retry loop, or `SERIALIZABLE`-isolation change
+was introduced to achieve any of this — the existing atomic-statement
+design (Section 9's own precedent) was already sufficient.
+
 ---
 
 ## 12. Error Handling Strategy
@@ -863,11 +998,15 @@ Layered, matching Section 2's dependency structure:
   conditions.
 - **Application layer** — raises specific, typed exceptions (never a bare
   `Exception`): `UnsupportedVendorError` (domain), `ConfigurationParseError`
-  (application, wrapping a `ParseError` verbatim), `DeviceConflictError`/
-  `SnapshotAlreadyExistsError`/`ReferencedDeviceNotFoundError`
-  (persistence), plain `ValueError` for other caller/application
-  invariants, `PersistenceError` (persistence, base), and
-  `SerializationError` (persistence). No HTTP knowledge.
+  (application, wrapping a `ParseError` verbatim), `IncidentNotFoundError`
+  (application, Day 7A — preserves `incident_id` as structured data),
+  `DeviceConflictError`/`SnapshotAlreadyExistsError`/
+  `ReferencedDeviceNotFoundError` (persistence), plain `ValueError` for
+  other caller/application invariants (including the repository's own
+  resolution-transition/monotonicity failures, Section 11.3 — e.g. the
+  dormant `ACKNOWLEDGED` status, or a stale resolution timestamp),
+  `PersistenceError` (persistence, base), and `SerializationError`
+  (persistence). No HTTP knowledge.
 - **API layer** — maps categories to status + `code` (`api/errors.py`,
   Day 5B binding correction — supersedes this table's original
   `product-spec.md` NFR-05 values, which `product-spec.md` itself was not
@@ -884,11 +1023,18 @@ Layered, matching Section 2's dependency structure:
 | other caller/application `ValueError` | 422 | `invalid_request` |
 | `PersistenceError` (registered after the three conflict subclasses above) | 500 | `persistence_error` (generic public detail) |
 | `SerializationError` | 500 | `serialization_error` (generic public detail) |
+| `IncidentNotFoundError` (Day 7A) | 404 | `incident_not_found` — `detail` built from `exc.incident_id`, never `str(exc)` |
 | `InvalidClockError` (injected clock returned non-UTC/naive — a server-composition failure, not caller input) | 500 | no custom handler — falls through to FastAPI's normal unmapped-exception behavior |
 | anything else unmapped | 500 | no custom handler — FastAPI's normal production 500 behavior, never a broad catch-all echoing exception internals |
 
-`Resource not found` (404, `NOT_FOUND`) remains **not in Slice 1** — no
-single-resource `GET` endpoint exists yet (Section 10).
+`Resource not found` (404) was **not in Slice 1** (no single-resource `GET`
+endpoint existed) but is no longer hypothetical as of Day 7A:
+`POST /incidents/{incident_id}/resolve` is the first endpoint to produce it,
+mapped from `IncidentNotFoundError` above — the dormant `ACKNOWLEDGED`
+status and a stale resolution timestamp are deliberately **not** mapped to
+404; both remain internal invariant failures (`ValueError` → 422
+`invalid_request`, Section 11.3), since neither means "the incident doesn't
+exist."
 
 - **No silent failures.** Every error reaching the API boundary produces a
   structured `ApiErrorResponse{code, detail}` body (or, for request-schema
@@ -1209,7 +1355,12 @@ needs:
   triggering exactly one incident refresh on success (Section 17.1.1
   below). Incident mutations, filtering/pagination, and authentication
   remain deferred — see `docs/frontend-api-contract.md` and README.md's
-  "Current Day 6C scope".
+  "Current Day 6C scope". **Day 7A added the backend resolution endpoint
+  (Section 10.2, Section 11.3) with no corresponding frontend change at
+  all** — the dashboard still only reads (`GET /incidents`) and submits
+  configuration; it has no resolve button or other way to call
+  `POST /incidents/{id}/resolve`. No new infrastructure, Docker Compose
+  service, or CI job was added for it either.
 - **Arista adapter** (Section 5) — Cisco only for Slice 1.
 - **Configuration drift detection** (Section 8) and **telemetry/anomaly
   detection** (FR-05/FR-06) — wired in the next slice, using the same
@@ -1307,10 +1458,14 @@ Not designed or built for any MVP milestone (product-spec Section 7):
 - **Third+ vendor adapters** — Juniper, Nokia, Huawei, etc.
 - **Full drift-to-incident severity table** — beyond "removed ACL →
   Medium," a general mapping for every drift kind.
-- **Incident resolution / reopen workflow** — `status` values beyond
-  `OPEN` exist in the enum (domain-model.md Section 16) but nothing
-  transitions an incident into them yet; this also means the dedup
-  fingerprint's `OPEN`-only scope (A-09) is currently the whole story.
+- **Incident reopen workflow, acknowledgment, assignment, comments/notes,
+  audit history, and bulk resolution** — Day 7A added explicit `OPEN ->
+  RESOLVED` resolution (Section 11.3, `POST /incidents/{id}/resolve`), the
+  first and only transition; the dormant `ACKNOWLEDGED` status still has no
+  public transition into it, and there is no reopen path back to `OPEN`
+  from `RESOLVED`. A resolved incident's fingerprint recurring simply
+  creates a new `OPEN` incident (Section 11.3) rather than reopening the
+  old one — this remains the whole story for A-09's dedup scope.
 - **Config snapshot replay/re-parse** — the raw/normalized split makes
   this possible later; no replay mechanism is built.
 - **Async/queued incident processing** — synchronous within one DB

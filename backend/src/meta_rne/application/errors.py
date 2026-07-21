@@ -22,3 +22,16 @@ class ConfigurationParseError(Exception):
     def __init__(self, parse_error: ParseError) -> None:
         super().__init__(f"configuration parse failed: {parse_error.code}")
         self.parse_error = parse_error
+
+
+class IncidentNotFoundError(Exception):
+    """Raised by ``ResolveIncidentService`` (Day 7A) when the requested
+    ``incident_id`` does not exist. Preserves ``incident_id`` as structured
+    data — never only baked into the message string — so a future API layer
+    can produce its controlled 404 body without re-parsing anything. No
+    FastAPI/Pydantic/HTTP-status dependency here; that mapping belongs to
+    the API layer alone."""
+
+    def __init__(self, incident_id: str) -> None:
+        super().__init__(f"incident not found: {incident_id!r}")
+        self.incident_id = incident_id

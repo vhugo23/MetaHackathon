@@ -22,6 +22,7 @@ from meta_rne.api.schemas import (
 )
 from meta_rne.application.config_ingestion import ConfigIngestionService
 from meta_rne.application.incident_queries import ListIncidentsService
+from meta_rne.application.incident_resolution import ResolveIncidentService
 from meta_rne.application.models import IngestConfigurationCommand
 
 # Documents the real runtime 422 contract (api/errors.py): FastAPI's own
@@ -53,6 +54,7 @@ def build_router(
     *,
     config_ingestion_service: ConfigIngestionService,
     list_incidents_service: ListIncidentsService,
+    resolve_incident_service: ResolveIncidentService,
     clock: Callable[[], datetime],
 ) -> APIRouter:
     router = APIRouter()
@@ -104,5 +106,20 @@ def build_router(
     def list_incidents() -> list[IncidentResponse]:
         incidents = list_incidents_service.list_all()
         return [IncidentResponse.from_domain(incident) for incident in incidents]
+
+    @router.post(
+        "/incidents/{incident_id}/resolve",
+        response_model=IncidentResponse,
+        operation_id="resolve_incident",
+        responses={
+            404: {
+                "model": ApiErrorResponse,
+                "description": "incident_not_found.",
+            },
+        },
+    )
+    def resolve_incident(incident_id: str) -> IncidentResponse:
+        incident = resolve_incident_service.resolve(incident_id)
+        return IncidentResponse.from_domain(incident)
 
     return router

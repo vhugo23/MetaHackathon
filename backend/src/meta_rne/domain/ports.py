@@ -70,6 +70,18 @@ class IncidentRepository(Protocol):
     def get_by_id(self, incident_id: str) -> Incident | None: ...
     def list_all(self) -> tuple[Incident, ...]: ...
 
+    def resolve(self, incident_id: str, resolved_at: datetime) -> Incident | None:
+        """Narrow, atomic OPEN -> RESOLVED transition (Day 7A) — not a
+        generic full-row ``save()``, deliberately: it only ever writes
+        `status`/`resolved_at`/`updated_at`, so it can never clobber a
+        concurrent `upsert_open_incident` call's `occurrence_count`/
+        `evidence`/`last_seen_at`/`severity` writes to the same row.
+        Returns ``None`` for an unknown `incident_id`; returns the incident
+        unchanged if it is already `RESOLVED`; raises for any other
+        persisted status (e.g. the dormant `ACKNOWLEDGED`) rather than
+        silently treating it as resolvable."""
+        ...
+
 
 class UnitOfWork(Protocol):
     """One session/transaction per instance (Day 4B3's concrete

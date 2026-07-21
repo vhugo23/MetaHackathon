@@ -4,12 +4,13 @@
 frontend consumer (`frontend/`) against it, exercising `GET /incidents`
 only; Day 6C added the second frontend consumer, exercising
 `POST /devices/{device_id}/config` — see README.md's "Current Day 6C
-scope". **This document describes the existing backend contract only; Day
-6C did not modify any backend schema or endpoint** — every shape and error
-mapping below was already true as of Day 6A/6B and remains unchanged. The
-"Frontend consumption notes" subsections added to Sections 5–7 below
-describe how the frontend uses this contract, not a change to the contract
-itself.
+scope". Day 7A added a new endpoint, `POST /incidents/{incident_id}/resolve`
+(Section 7), and two new `IncidentResponse` fields, `updated_at`/
+`resolved_at` (Section 6) — **the current dashboard does not call the new
+endpoint; this is a backend-only addition with no frontend consumer yet.**
+The "Frontend consumption notes" subsections added to Sections 5–6 below
+describe how the *existing* frontend uses this contract, not a claim that
+it uses Day 7A's new endpoint.
 **Derived from:** `backend/src/meta_rne/api/schemas.py`, `api/routes.py`,
 `api/errors.py`, `api/cors.py` (current source, not a planning aspiration)
 
@@ -67,6 +68,7 @@ generated client off of):
 | `GET /health` | `health_check` |
 | `POST /devices/{device_id}/config` | `submit_device_configuration` |
 | `GET /incidents` | `list_incidents` |
+| `POST /incidents/{incident_id}/resolve` | `resolve_incident` |
 
 ## 3. Identifiers, timestamps, and enums
 
@@ -199,7 +201,9 @@ GET /incidents
     "recommendation": "Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1",
     "created_at": "2026-07-18T10:00:00Z",
     "last_seen_at": "2026-07-18T10:00:00Z",
-    "occurrence_count": 1
+    "occurrence_count": 1,
+    "updated_at": "2026-07-18T10:00:00Z",
+    "resolved_at": null
   }
 ]
 ```
@@ -208,7 +212,70 @@ GET /incidents
 `evidence` is currently always the `POLICY_VIOLATION` shape shown above —
 the only `IncidentSource` any current detection path produces.
 
-## 7. Errors
+**`updated_at`/`resolved_at` (Day 7A).** `updated_at` is a required
+`datetime` field — the most recent persisted mutation to this incident of
+any kind (creation, a repeated-detection update, or an explicit
+resolution), distinct from `last_seen_at` (detection-only). `resolved_at`
+is a required *key* whose value is `datetime` or `null` — `null` while
+`status` is `"OPEN"`, populated once `status` is `"RESOLVED"`. `GET
+/incidents` includes both `OPEN` and `RESOLVED` incidents — there is still
+no filtering/pagination/sorting query parameter, and no query parameter
+hides either status.
+
+## 7. `POST /incidents/{incident_id}/resolve` (Day 7A)
+
+Explicitly resolves one existing `OPEN` incident. `OPEN -> RESOLVED` is the
+only transition; there is no acknowledgment, reopening, assignment, or
+bulk-resolution endpoint.
+
+```
+POST /incidents/{incident_id}/resolve
+```
+
+No request body.
+
+**Success response** — `200 OK`, the resource itself, no envelope: the
+identical `IncidentResponse` shape `GET /incidents` returns (Section 6),
+with `status: "RESOLVED"` and both `updated_at`/`resolved_at` populated
+(equal to each other):
+
+```json
+{
+  "incident_id": "8f14e45f-ceea-4c1d-8f1e-1234567890ab",
+  "fingerprint": "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3",
+  "device_id": "spine-01",
+  "source": "POLICY_VIOLATION",
+  "rule_ref": "policy-acl-external-in",
+  "affected_resource": "acl:ACL-EXTERNAL-IN:GigabitEthernet0/1:in",
+  "severity": "Medium",
+  "status": "RESOLVED",
+  "evidence": { "...": "unchanged from before resolution" },
+  "recommendation": "Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1",
+  "created_at": "2026-07-18T10:00:00Z",
+  "last_seen_at": "2026-07-18T10:00:00Z",
+  "occurrence_count": 1,
+  "updated_at": "2026-07-18T11:00:00Z",
+  "resolved_at": "2026-07-18T11:00:00Z"
+}
+```
+
+**Idempotent.** Resolving an already-`RESOLVED` incident also returns
+`200` with the incident unchanged — the same `resolved_at`/`updated_at` as
+the first successful call, never a new timestamp and never an error.
+
+**Unknown incident** — exact `404` body (see the error table below):
+
+```json
+{"code": "incident_not_found", "detail": "Incident 'missing-incident' was not found."}
+```
+
+**No frontend control exists for this endpoint as of Day 7A.** The current
+dashboard only calls `GET /incidents` and
+`POST /devices/{device_id}/config` — there is no resolve button or other
+UI affordance yet. A future frontend phase may add one against this exact
+contract; nothing about the current dashboard invokes this route.
+
+## 8. Errors
 
 Every failure response is a bare object, no envelope:
 
@@ -234,10 +301,13 @@ occurred, not on the status code alone:
 | 409 | `referenced_device_not_found` | `ApiErrorResponse` | Internal referential-integrity failure. |
 | 500 | `persistence_error` | `ApiErrorResponse` | Database failure. `detail` is generic — never SQL, constraint names, or a stack trace. |
 | 500 | `serialization_error` | `ApiErrorResponse` | Internal data-encoding failure. `detail` is generic. |
+| 404 | `incident_not_found` | `ApiErrorResponse` | (Day 7A) `POST /incidents/{incident_id}/resolve` with an `incident_id` that does not exist. `detail` is exactly `"Incident '<incident_id>' was not found."`. |
 | 500 | — (no custom body) | none | Any unmapped/unexpected server failure — normal production 500 behavior, no leaked internals. |
 
 `GET /incidents` can only produce the `persistence_error`/500 row above
-(read-only, no request body to validate).
+(read-only, no request body to validate). `POST /incidents/{incident_id}/
+resolve` can only produce the `incident_not_found`/404 row (no request
+body to validate) or an unmapped 500.
 
 **Frontend consumption notes (Day 6C).** Both `GET /incidents` and
 `POST /devices/{device_id}/config` failures are funneled through the same
@@ -267,7 +337,7 @@ trace, SQL detail, or other internal value this document's error table
 already says the backend keeps generic is ever exposed further by the
 frontend.
 
-## 8. Example: missing-ACL submission
+## 9. Example: missing-ACL submission
 
 ```bash
 curl -X POST http://localhost:8080/devices/spine-01/config \
@@ -280,13 +350,16 @@ Produces the `201` response shown in Section 5 with
 ACL is assigned inbound on `GigabitEthernet0/1`, and a
 `policy-acl-external-in` policy applies to `spine-01`.
 
-## 9. Not implemented yet
+## 10. Not implemented yet
 
 Do not build frontend features assuming any of the following exist:
 
 - Authentication or authorization (every endpoint is unauthenticated)
 - Pagination, filtering, or sorting query parameters on `GET /incidents`
-- Incident acknowledgment/resolution commands
+- Incident acknowledgment, reopening, assignment, comments/notes, audit
+  history, or bulk resolution — `POST /incidents/{incident_id}/resolve`
+  (Section 7, Day 7A) is the one narrow exception: explicit, single-incident
+  `OPEN -> RESOLVED` resolution, with **no frontend control calling it yet**
 - `GET /devices`, `GET /devices/{id}`, `GET /incidents/{id}`
 - Drift detection, telemetry ingestion, or anomaly rules
 - Any vendor besides `cisco-ios-xe`

@@ -40,13 +40,13 @@ def test_incident_repository_sqlalchemy__malformed_evidence__raises_serializatio
             "INSERT INTO incidents "
             "(incident_id, fingerprint, device_id, source, rule_ref, affected_resource, "
             " severity, status, evidence, recommendation, created_at, last_seen_at, "
-            " occurrence_count) "
+            " occurrence_count, updated_at) "
             "VALUES ('incident-malformed', "
             " 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
             " 'spine-01', 'POLICY_VIOLATION', 'policy-acl-external-in', "
             " 'interface:GigabitEthernet0/1:acl_in', 'Medium', 'OPEN', "
             " :evidence, 'Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1', "
-            " :t, :t, 1)"
+            " :t, :t, 1, :t)"
         ),
         {
             # structurally malformed: missing every required key

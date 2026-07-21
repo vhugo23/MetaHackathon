@@ -45,40 +45,29 @@ For each task:
 
 ## Current Phase
 
-**Day 6D — Browser (Playwright/Chromium) end-to-end vertical-slice
-validation (implemented, awaiting commit/CI approval).**
+**Day 7A — Backend-only incident-resolution vertical slice (implemented
+across gates 7A-A/7A-B/7A-C/7A-D/7A-E, all approved, awaiting commit/CI
+approval).**
 
 Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, Day 4A, Day 4B1, Day 4B2,
-Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B, and Day 6C are complete and
-approved; Day 6D is implemented (three reviewable gates, all approved) and
-passes the full frontend/browser/backend verification matrix, but has not
-yet been committed or merged. See README.md's "Current Project Status" for
-the full history. Day 4B ("Slice 1 persistence foundations") is complete
-across all three reviewable gates (4B1/4B2/4B3). The first vertical slice
-(product-spec.md Section 11) is runnable end to end over real HTTP against a
-real PostgreSQL database (Day 5B), Day 6A proved that same slice in its
-actual deployed Docker Compose shape (`scripts/compose_smoke.py`) and
-stabilized the OpenAPI/CORS contract (`docs/frontend-api-contract.md`),
-Day 6B built the first frontend consumer of that contract — a
-React/TypeScript/Vite dashboard (`frontend/`) requesting `GET /incidents`
-and rendering the complete request lifecycle
-(loading/empty/error-with-retry/populated) — Day 6C added the second
-frontend vertical slice: a configuration-submission form
-(`ConfigurationSubmissionForm`) integrated into that same dashboard, POSTing
-to the existing `POST /devices/{device_id}/config` endpoint and triggering
-exactly one `GET /incidents` refresh after a successful submission — and
-Day 6D adds a real **browser-level** proof of that same flow: a single
-Playwright/Chromium test, driven against a real production Vite build
-(`vite preview`), issuing real cross-origin HTTP requests to a real FastAPI
-process backed by a real, disposable PostgreSQL database — never a mock,
-never an in-memory repository, never an intercepted/fulfilled response. Day
-6D changed no backend code, no API schema, no domain/application/
-persistence/migration behavior, and no React application source — it is
-validation of already-approved Day 6C behavior, not a new product feature.
-See README.md's "Current Day 6D scope".
+Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B, Day 6C, and Day 6D are complete and
+approved. Day 7A adds the first incident-lifecycle mutation
+(`OPEN -> RESOLVED`) end to end through the backend: domain invariants and
+`Incident.resolve(at)` (Gate 7A-A, plus a timestamp-monotonicity
+correctness patch checked against `updated_at` rather than `last_seen_at`),
+an explicit application-layer `Clock` protocol and `ResolveIncidentService`
+with a controlled `IncidentNotFoundError` (Gate 7A-B), a production
+`CallableClock` adapter and `POST /incidents/{incident_id}/resolve` wired
+through the existing `create_app`/`build_router` composition with a direct
+`IncidentResponse` and an exact `incident_not_found` 404 (Gate 7A-C), and a
+binding real-PostgreSQL proof that reingesting a resolved finding creates a
+new `OPEN` incident while existing `OPEN` deduplication and concurrent
+resolution remain correct (Gate 7A-D). Day 7A changed no frontend source,
+no Playwright test, no CI workflow, and no `docker-compose.yml` — see
+README.md's "Current Day 7A scope".
 
-Application code is now allowed for **`frontend/`** in addition to the
-Day 3A–Day 6A backend capabilities listed below:
+Application code is allowed for **`frontend/`** (unchanged since Day 6D) in
+addition to the Day 3A–Day 7A backend capabilities listed below:
 
 - `src/api/client.ts` (`getJsonArray`, `postJson`, `ApiRequestError` with an
   optional `code`), `src/api/incidents.ts` (`fetchIncidents`),
@@ -242,29 +231,34 @@ developer's machine and in CI:
   (`if: failure()`, 7-day retention), and an always-run, project-scoped
   defense-in-depth cleanup step.
 
-Verified automated-test inventory as of Day 6D: **176** frontend Vitest
-tests (7 files), **19** Python orchestration-helper tests (1 file), **1**
-Playwright browser test (1 file — never counted as part of the Vitest file
-total), **470** backend `pytest` tests (360 non-PostgreSQL + 110
-PostgreSQL) — **666** automated tests combined.
+Verified automated-test inventory as of Day 7A: **176** frontend Vitest
+tests (7 files, unchanged from Day 6D), **19** Python orchestration-helper
+tests (1 file, unchanged), **1** Playwright browser test (1 file — never
+counted as part of the Vitest file total; still covers configuration
+submission and refresh only, does not resolve an incident), **571** backend
+`pytest` tests (431 non-PostgreSQL + 140 PostgreSQL) — **767** automated
+tests combined.
 
 **Still prohibited**: additional vendors, vendor autodetection, file upload,
 configuration history, device inventory, `GET /devices`, incident
-acknowledgment/resolution, incident mutations,
-filtering/pagination/client-side sorting, authentication/authorization,
-React Router, any global state library, TanStack Query, a component library,
-Tailwind, charts, telemetry, WebSockets/polling, a frontend Docker image or
-Compose service, production deployment, and cloud infrastructure. Within
-browser testing specifically, Firefox/WebKit projects, mobile/device-
-emulation projects, visual-regression snapshot testing, and accessibility-
-auditing libraries remain out of scope — Day 6D is Chromium-only, one
-worker, zero retries, no snapshot testing. All of these are Day 6E or
-later.
+acknowledgment (the enum member and DB constraint remain dormant
+compatibility state — no public transition into it exists), reopening,
+assignment, comments/notes, audit history, user identity, bulk resolution,
+status filtering/pagination/client-side sorting, authentication/
+authorization, React Router, any global state library, TanStack Query, a
+component library, Tailwind, charts, telemetry, WebSockets/polling, a
+frontend Docker image or Compose service, production deployment, and cloud
+infrastructure. A frontend resolve control does not exist yet — Day 7A is
+backend-only; a future frontend phase may add one. Within browser testing
+specifically, Firefox/WebKit projects, mobile/device-emulation projects,
+visual-regression snapshot testing, and accessibility-auditing libraries
+remain out of scope. All of these are later days.
 
 Application code is currently allowed **only** for the completed Day 3A,
 Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B,
-Day 6C, and Day 6D capabilities (Day 6D added no new backend capability —
-see the Day 6D bullet list above):
+Day 6C, Day 6D, and Day 7A capabilities (Day 6D added no new backend
+capability; Day 7A's own additions are listed after the Day 6D bullet list
+below):
 
 - explicit OpenAPI `operation_id`s (`health_check`,
   `submit_device_configuration`, `list_incidents`) and documented `409`/
@@ -343,6 +337,108 @@ see the Day 6D bullet list above):
   UnitOfWork contract tests, concurrency tests, and representative fixtures
 - documentation corrections explicitly approved for Day 3A/3B/4A/4B1/4B2/4B3
   (see below)
+
+- **`Incident.updated_at`/`resolved_at` and `Incident.resolve(at)`**
+  (`meta_rne.domain.incident`) — `updated_at: datetime` (required,
+  timezone-aware) and `resolved_at: datetime | None` (nullable, timezone-
+  aware when set) added to the persisted `Incident` dataclass. Invariants:
+  `created_at <= last_seen_at <= updated_at`; `resolved_at <= updated_at`
+  when present; `status == RESOLVED` iff `resolved_at is not None`.
+  `resolve(at)`: `OPEN -> RESOLVED`, requiring `at >= updated_at` (checked
+  against `updated_at`, not `last_seen_at`, since an OPEN incident may
+  legally already have `last_seen_at < updated_at` — a correctness patch
+  applied within Gate 7A-A after an initial `last_seen_at`-only check was
+  found insufficient); assigns the one captured value to both
+  `resolved_at` and `updated_at`; already-`RESOLVED` returns the incident
+  unchanged as a true no-op, before any timestamp validation; the dormant
+  `ACKNOWLEDGED` member raises rather than silently resolving — no public
+  transition into or out of it exists (Day 7A, Gate 7A-A)
+- **`IncidentRepository.resolve(incident_id, resolved_at) -> Incident | None`**
+  (`meta_rne.domain.ports`), added deliberately narrow rather than a
+  generic full-row `save()` — it only ever writes `status`/`resolved_at`/
+  `updated_at`, so it can never clobber a concurrent
+  `upsert_open_incident`'s writes to `occurrence_count`/`evidence`/
+  `last_seen_at`/`severity`. SQLAlchemy: one atomic conditional
+  `UPDATE ... WHERE incident_id = :id AND status = 'OPEN' AND updated_at <=
+  :resolved_at RETURNING ...` (never a read-before-write, same idiom as
+  `upsert_open_incident`); a naive/non-UTC `resolved_at` is rejected before
+  the statement is built; a zero-row result triggers one internal follow-up
+  `SELECT` (`populate_existing=True`, so a Session's earlier
+  identity-map-cached object can never be returned stale) distinguishing
+  missing (`None`), already-`RESOLVED` (returned unchanged), still-`OPEN`
+  with a stale supplied timestamp (`ValueError`), and any other persisted
+  status such as the dormant `ACKNOWLEDGED` (`ValueError`) — never an
+  apparent-success return for an unresolved conflict. In-memory: the same
+  operation under the existing `incidents_lock`, delegating to
+  `Incident.resolve()`. `upsert_open_incident` (both implementations) now
+  also sets `updated_at = observed_at` on both the create and dedup-update
+  branches, alongside `last_seen_at`, and never touches `resolved_at` (Day
+  7A, Gate 7A-A)
+- Alembic revision `0002_incident_resolution.py` (`down_revision =
+  "0001_slice1_persistence"`, revision 0001 itself unedited): adds
+  `incidents.updated_at` (nullable, backfilled from `last_seen_at`, then
+  tightened to `NOT NULL`) and `incidents.resolved_at` (nullable), plus
+  `ck_incidents_updated_at_after_last_seen_at`,
+  `ck_incidents_resolved_at_matches_status`, and
+  `ck_incidents_resolved_at_before_or_equal_updated_at`. No status-column
+  migration was needed — `incidents.status`'s existing CHECK constraint
+  (revision 0001) already permitted `'RESOLVED'`. The partial unique index
+  `ux_incidents_open_fingerprint` (`WHERE status = 'OPEN'`) is unchanged —
+  a `RESOLVED` row already falls outside it, which is what lets the same
+  fingerprint recur as a new `OPEN` row after resolution, with no index or
+  migration change required for that behavior (Day 7A, Gate 7A-A)
+- **`Clock` protocol and `ResolveIncidentService`**
+  (`meta_rne.application.incident_resolution`) — a minimal
+  `class Clock(Protocol): def now(self) -> datetime: ...`, never importing
+  `meta_rne.api.clock` or calling the system clock directly.
+  `ResolveIncidentService.resolve(incident_id) -> Incident`: loads the
+  incident; unknown id raises `IncidentNotFoundError`
+  (`meta_rne.application.errors`, preserving `.incident_id` as structured
+  data); already-`RESOLVED` returns it unchanged with **zero** `Clock`
+  calls, no repository write, and no `commit()`; an `OPEN` incident calls
+  `Clock.now()` **exactly once**, passes that single captured value to
+  `uow.incidents.resolve(...)`, commits once, and returns the repository's
+  persisted result (accepting, without a second `Clock` call, an
+  already-`RESOLVED` incident a concurrent request committed first). Every
+  path follows the same exception-preserving rollback/close-with-notes
+  `UnitOfWork` lifecycle as `ConfigIngestionService`/`ListIncidentsService`
+  (Day 7A, Gate 7A-B)
+- **`CallableClock`** (`meta_rne.api.clock`) — adapts `create_app`'s
+  existing `clock: Callable[[], datetime]` parameter to the application
+  layer's `Clock` protocol via `require_utc`, so `ResolveIncidentService`
+  reuses the identical injected time source `POST /devices/{id}/config`
+  already uses for `observed_at` — never a second clock. **`POST
+  /incidents/{incident_id}/resolve`** (`api/routes.py`, `operation_id =
+  "resolve_incident"`) — no request body; success is HTTP 200 with a
+  direct, complete `IncidentResponse` (the same schema `GET /incidents`
+  uses, now including `updated_at: datetime` and
+  `resolved_at: datetime | None`, `null` for `OPEN` incidents); the route
+  only calls `resolve_incident_service.resolve(incident_id)` and maps the
+  result — no transaction control and no direct field assignment in the
+  route. `IncidentNotFoundError` maps to HTTP 404 with the exact body
+  `{"code": "incident_not_found", "detail": "Incident '<incident_id>' was
+  not found."}` (`api/errors.py`), built from `exc.incident_id`, never
+  `str(exc)`. `GET /incidents` remains unfiltered — it returns both `OPEN`
+  and `RESOLVED` incidents, unchanged from prior days. No new route,
+  frontend control, CI job, or Docker Compose service was added (Day 7A,
+  Gate 7A-C)
+- Real-PostgreSQL-proven recurrence and concurrency behavior (Gate 7A-D,
+  tests only, no production-code change): resolving an incident and then
+  reingesting the identical still-invalid configuration creates a **new**
+  `OPEN` incident (same fingerprint, new `incident_id`,
+  `occurrence_count: 1`) while the original `RESOLVED` row is left
+  completely unchanged; the new `OPEN` incident then deduplicates further
+  reingestion exactly as before (`occurrence_count` increments, no third
+  row); two concurrent `resolve()` calls against one `OPEN` incident both
+  return a consistent, identical persisted `RESOLVED` result with no row
+  corruption and no duplicate `OPEN` row; a committed ingestion update
+  before a later resolution is honored (the resolution succeeds against
+  the advanced row, leaving `occurrence_count`/`last_seen_at` untouched);
+  a resolution timestamp stale relative to a since-advanced `updated_at` is
+  rejected rather than moving `updated_at` backward. No locks, retries,
+  queues, or isolation-level changes were introduced to achieve any of
+  this — the existing atomic conditional-UPDATE design (Gate 7A-A) was
+  already sufficient
 
 **Documentation corrections applied for Day 3A:**
 
@@ -639,19 +735,26 @@ see the Day 6D bullet list above):
    as deferred and Section 8 is already headed "not part of the first
    vertical slice"; neither claims to be current Day 5B behavior.
 
-**Still prohibited**: incident acknowledgment/resolution commands,
-authentication/authorization, filtering/pagination/sorting query
-parameters, drift detection, anomaly/telemetry ingestion, structured
-logging beyond FastAPI's own request logging, and new Alembic migrations.
-The React dashboard (`frontend/`), Vite, and Node/npm tooling are no longer
-prohibited — Day 6B implemented the first frontend vertical slice, Day 6C
-implemented the second (configuration submission), and Day 6D added a
-Chromium-only Playwright browser end-to-end test plus its isolated
-orchestration (see the "Current Phase" section above) — Playwright and
-browser end-to-end tests are therefore no longer prohibited, though
-Firefox/WebKit, mobile-device-emulation projects, visual-regression
+**Still prohibited**: incident acknowledgment (the dormant `ACKNOWLEDGED`
+enum member/DB constraint has no public transition), reopening, assignment,
+comments/notes, audit history, user identity, bulk resolution, status
+filtering, authentication/authorization, filtering/pagination/sorting query
+parameters, drift detection, anomaly/telemetry ingestion, and structured
+logging beyond FastAPI's own request logging. Explicit, single-purpose
+incident resolution (`POST /incidents/{incident_id}/resolve`, `OPEN ->
+RESOLVED` only) is no longer prohibited as of Day 7A — see the "Current
+Phase" section above; new Alembic migrations are likewise no longer
+categorically prohibited, since Day 7A added one (`0002_incident_
+resolution.py`) without editing revision 0001. The React dashboard
+(`frontend/`), Vite, and Node/npm tooling are no longer prohibited — Day 6B
+implemented the first frontend vertical slice, Day 6C implemented the
+second (configuration submission), and Day 6D added a Chromium-only
+Playwright browser end-to-end test plus its isolated orchestration —
+Playwright and browser end-to-end tests are therefore no longer prohibited,
+though Firefox/WebKit, mobile-device-emulation projects, visual-regression
 snapshot testing, accessibility-auditing libraries, a frontend Docker image
 or Compose service, production deployment, and cloud infrastructure remain
-so. All remaining items are Day 6E or later, against the domain model,
-architecture, and ports already documented, with tests written first per
-the Development Rules above.
+so. A frontend resolve control does not exist yet (Day 7A is backend-only).
+All remaining items are later days, against the domain model, architecture,
+and ports already documented, with tests written first per the Development
+Rules above.

@@ -99,6 +99,8 @@ def test_incidents_api__get_incidents__returns_created_incident() -> None:
         "created_at",
         "last_seen_at",
         "occurrence_count",
+        "updated_at",
+        "resolved_at",
     }
     assert incident["device_id"] == DEVICE_ID
     assert incident["source"] == "POLICY_VIOLATION"
@@ -143,6 +145,8 @@ def test_incidents_api__datetimes_serialize_as_iso8601() -> None:
 
     assert incident["created_at"] == "2026-07-18T10:00:00Z"
     assert incident["last_seen_at"] == "2026-07-18T10:00:00Z"
+    assert incident["updated_at"] == "2026-07-18T10:00:00Z"
+    assert incident["resolved_at"] is None
 
 
 def test_incidents_api__repository_ordering_preserved() -> None:

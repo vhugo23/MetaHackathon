@@ -325,6 +325,153 @@ def test_post_postgres__vendor_conflict__returns_409_and_rolls_back_staged_snaps
 # --- Lazy production engine composition --------------------------------------
 
 
+# --- POST /incidents/{incident_id}/resolve (Day 7A, Gate 7A-C) --------------
+
+
+def test_resolve_incident_postgres__open_incident__resolves_and_persists(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_slice1_policy_directly(sqlalchemy_session_factory)
+    clock_values = iter([T0, T1])
+    client = _app(sqlalchemy_session_factory, clock=lambda: next(clock_values))
+    create_response = client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    assert create_response.status_code == 201
+    open_incident = client.get("/incidents").json()[0]
+
+    response = client.post(f"/incidents/{open_incident['incident_id']}/resolve")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["incident_id"] == open_incident["incident_id"]
+    assert body["status"] == "RESOLVED"
+    assert body["resolved_at"] == "2026-07-18T11:00:00Z"
+    assert body["updated_at"] == "2026-07-18T11:00:00Z"
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    stored = verify_uow.incidents.get_by_id(open_incident["incident_id"])
+    assert stored is not None
+    assert stored.status.value == "RESOLVED"
+    assert stored.resolved_at == T1
+    assert stored.updated_at == T1
+    assert stored.occurrence_count == 1
+    verify_uow.close()
+
+
+def test_resolve_incident_postgres__get_incidents_after_resolve__reflects_persisted_state(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_slice1_policy_directly(sqlalchemy_session_factory)
+    clock_values = iter([T0, T1])
+    client = _app(sqlalchemy_session_factory, clock=lambda: next(clock_values))
+    client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    open_incident = client.get("/incidents").json()[0]
+    client.post(f"/incidents/{open_incident['incident_id']}/resolve")
+
+    incidents = client.get("/incidents").json()
+
+    assert len(incidents) == 1
+    fetched = incidents[0]
+    assert fetched["status"] == "RESOLVED"
+    assert fetched["resolved_at"] == "2026-07-18T11:00:00Z"
+    assert fetched["updated_at"] == "2026-07-18T11:00:00Z"
+
+
+def test_resolve_incident_postgres__repeated_resolution__is_idempotent(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_slice1_policy_directly(sqlalchemy_session_factory)
+    clock_values = iter([T0, T1, T0 + timedelta(hours=2)])
+    client = _app(sqlalchemy_session_factory, clock=lambda: next(clock_values))
+    client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    open_incident = client.get("/incidents").json()[0]
+    first = client.post(f"/incidents/{open_incident['incident_id']}/resolve").json()
+
+    second_response = client.post(f"/incidents/{open_incident['incident_id']}/resolve")
+
+    assert second_response.status_code == 200
+    second = second_response.json()
+    assert second["resolved_at"] == first["resolved_at"] == "2026-07-18T11:00:00Z"
+    assert second["updated_at"] == first["updated_at"] == "2026-07-18T11:00:00Z"
+
+
+def test_resolve_incident_postgres__unknown_id__returns_exact_404_body(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    client = _app(sqlalchemy_session_factory)
+
+    response = client.post("/incidents/does-not-exist/resolve")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "incident_not_found",
+        "detail": "Incident 'does-not-exist' was not found.",
+    }
+
+
+def test_resolve_incident_postgres__reingestion_after_resolve__creates_new_open_incident(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    """Real HTTP, end-to-end proof of Gate 7A-D's binding reingestion
+    scenario: ingest -> resolve -> reingest -> both incidents visible via
+    GET /incidents. Detailed field-level invariants (timestamps, fingerprint,
+    evidence) are already proven at the application/repository layer in
+    test_incident_resolution_reingestion_postgres.py — this test proves the
+    system wiring and HTTP response behavior instead."""
+    _seed_slice1_policy_directly(sqlalchemy_session_factory)
+    clock_values = iter([T0, T1, T0 + timedelta(hours=2), T0 + timedelta(hours=3)])
+    snapshot_ids = iter(["snap-1", "snap-2", "snap-3"])
+    client = _app(
+        sqlalchemy_session_factory,
+        clock=lambda: next(clock_values),
+        snapshot_id_factory=lambda: next(snapshot_ids),
+    )
+
+    first = client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    assert first.status_code == 201
+    incident_a = client.get("/incidents").json()[0]
+
+    resolve_response = client.post(f"/incidents/{incident_a['incident_id']}/resolve")
+    assert resolve_response.status_code == 200
+
+    second = client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    assert second.status_code == 201
+    second_body = second.json()
+    assert second_body["incidents_created"] == 1
+    assert second_body["incidents_updated"] == 0
+
+    incidents = client.get("/incidents").json()
+    assert len(incidents) == 2
+    by_id = {i["incident_id"]: i for i in incidents}
+    assert by_id[incident_a["incident_id"]]["status"] == "RESOLVED"
+    incident_b = next(i for i in incidents if i["incident_id"] != incident_a["incident_id"])
+    assert incident_b["status"] == "OPEN"
+    assert incident_b["fingerprint"] == incident_a["fingerprint"]
+
+    third = client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    assert third.status_code == 201
+    third_body = third.json()
+    assert third_body["incidents_created"] == 0
+    assert third_body["incidents_updated"] == 1
+
+
 def test_api_postgres__lazy_database_url_composition__creates_and_disposes_engine(
     _meta_rne_test_migrated: None,
     postgres_test_database_url: str,

@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from meta_rne.adapters.registry import AdapterRegistry
-from meta_rne.api.clock import utc_now
+from meta_rne.api.clock import CallableClock, utc_now
 from meta_rne.api.cors import cors_allowed_origins_from_environment
 from meta_rne.api.dependencies import (
     build_lazy_sqlalchemy_unit_of_work_factory,
@@ -36,6 +36,7 @@ from meta_rne.api.errors import register_exception_handlers
 from meta_rne.api.routes import build_router
 from meta_rne.application.config_ingestion import ConfigIngestionService
 from meta_rne.application.incident_queries import ListIncidentsService
+from meta_rne.application.incident_resolution import ResolveIncidentService
 from meta_rne.application.snapshot_id import default_snapshot_id_factory
 from meta_rne.domain.ports import UnitOfWork
 
@@ -65,6 +66,9 @@ def create_app(
         snapshot_id_factory=snapshot_id_factory,
     )
     list_incidents_service = ListIncidentsService(unit_of_work_factory=uow_factory)
+    resolve_incident_service = ResolveIncidentService(
+        unit_of_work_factory=uow_factory, clock=CallableClock(clock)
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -93,6 +97,7 @@ def create_app(
         build_router(
             config_ingestion_service=config_ingestion_service,
             list_incidents_service=list_incidents_service,
+            resolve_incident_service=resolve_incident_service,
             clock=clock,
         )
     )

@@ -82,6 +82,8 @@ class InMemoryIncidentRepository:
                     created_at=observed_at,
                     last_seen_at=observed_at,
                     occurrence_count=1,
+                    updated_at=observed_at,
+                    resolved_at=None,
                 )
                 self._store.incidents[incident_id] = incident
                 return IncidentUpsertResult(
@@ -101,6 +103,20 @@ class InMemoryIncidentRepository:
                 recommendation=candidate.recommendation,
                 last_seen_at=observed_at,
                 occurrence_count=existing.occurrence_count + 1,
+                updated_at=observed_at,
             )
             self._store.incidents[existing.incident_id] = updated
             return IncidentUpsertResult(incident=updated, outcome=IncidentUpsertOutcome.UPDATED)
+
+    def resolve(self, incident_id: str, resolved_at: datetime) -> Incident | None:
+        """Atomic (under the existing incidents_lock) OPEN -> RESOLVED
+        transition, delegating the actual transition/invariant enforcement
+        to Incident.resolve() (Day 7A) — no full-row save(), so a concurrent
+        upsert_open_incident on this same row can never be clobbered."""
+        with self._store.incidents_lock:
+            existing = self._store.incidents.get(incident_id)
+            if existing is None:
+                return None
+            resolved = existing.resolve(resolved_at)
+            self._store.incidents[incident_id] = resolved
+            return resolved

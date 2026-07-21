@@ -1161,6 +1161,64 @@ test count is unchanged at 470 (360 non-`postgres` + 110 `postgres`-marked)
 — Day 6D changed no backend code, no API schema, no domain/application/
 persistence/migration behavior, and no React application source.
 
+### Current Day 7A scope
+
+The backend gains its first incident-lifecycle mutation: an operator can
+explicitly resolve an existing `OPEN` incident.
+
+```
+POST /incidents/<incident-id>/resolve
+```
+
+- **No request body.** The path segment is the only input.
+- **Direct response object.** A successful call returns `200 OK` with the
+  complete, updated incident directly — the same shape `GET /incidents`
+  already returns, never a wrapper (`{"data": ...}`).
+- **`OPEN -> RESOLVED` only.** There is no acknowledgment, reopening,
+  assignment, or bulk-resolution endpoint. Resolving an unknown incident ID
+  returns a controlled `404`:
+
+  ```json
+  {"code": "incident_not_found", "detail": "Incident '<incident_id>' was not found."}
+  ```
+
+- **Idempotent.** Resolving an already-`RESOLVED` incident returns `200`
+  with the incident unchanged — the same `resolved_at`/`updated_at` as the
+  first call, not a new timestamp and not an error.
+
+**Timestamp meanings**, now that a fourth one exists:
+
+| Field | Meaning |
+|---|---|
+| `created_at` | When this incident was first created (never changes again) |
+| `last_seen_at` | The most recent violation *detection* — advances only when the same finding is re-ingested while the incident is still `OPEN` |
+| `updated_at` | The most recent *persisted mutation* to this row, of any kind — creation, a re-ingestion update, or an explicit resolution |
+| `resolved_at` | `null` while `OPEN`; the exact moment an operator resolved the incident, once `RESOLVED` |
+
+Resolving an incident leaves `last_seen_at` and `occurrence_count`
+completely untouched — those remain the detection-side story; only
+`status`, `resolved_at`, and `updated_at` change.
+
+**Recurrence.** If the same still-invalid configuration is submitted again
+*after* its incident has been resolved, the platform does not reopen the
+resolved incident — it creates a **new** `OPEN` incident (same fingerprint,
+new `incident_id`, `occurrence_count: 1`), and the original resolved
+incident is left exactly as it was. Ordinary `OPEN` deduplication (the same
+finding, still `OPEN`, updates in place rather than duplicating) is
+completely unchanged by this — see `docs/domain-model.md` Section 11.
+
+`GET /incidents` remains unfiltered: it returns both `OPEN` and `RESOLVED`
+incidents, with no new query parameter to hide either.
+
+**Backend-only.** The React dashboard does not have a resolve button or any
+other way to call this endpoint yet — Day 7A is a backend vertical slice
+only. A future frontend phase may add one against this same contract.
+
+Backend test count: **571** (`pytest`; 431 non-`postgres` + 140
+`postgres`-marked). Frontend (176 Vitest, 19 orchestration-helper, 1
+Playwright) is unchanged — Day 7A added no frontend, Playwright, or CI
+change. **767 automated tests combined.**
+
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 
 - `ConfigurationPolicy` and `RequiredAclRule` — a seeded, fixture-data
@@ -1397,3 +1455,39 @@ detection, telemetry, incident acknowledgment/resolution, authentication,
 Firefox/WebKit and mobile-emulation browser projects, visual-regression
 snapshot testing, a frontend Docker image or Compose service, and
 production/cloud deployment remain Day 6E and later.
+
+**Day 7A — Backend Incident-Resolution Vertical Slice.** Adds the first
+incident-lifecycle mutation: `POST /incidents/{incident_id}/resolve`
+(`OPEN -> RESOLVED` only, no request body, a direct `IncidentResponse`,
+idempotent repeated calls, an exact controlled `incident_not_found` `404`),
+backed by `Incident.updated_at`/`resolved_at` and `Incident.resolve(at)`
+domain invariants, a narrow atomic `IncidentRepository.resolve(...)` (both
+SQLAlchemy/PostgreSQL and in-memory), Alembic revision
+`0002_incident_resolution.py` (adds `updated_at`/`resolved_at`, backfills
+`updated_at` from `last_seen_at`; revision 0001 untouched; no status-column
+migration needed since `RESOLVED` was already a permitted value), an
+explicit application-layer `Clock` protocol and `ResolveIncidentService`
+(never importing `api/clock.py`), and a production `CallableClock` adapter
+reusing the exact same injected clock `POST /devices/{id}/config` already
+uses. Real-PostgreSQL tests prove the binding recurrence behavior:
+resolving an incident and then reingesting the identical still-invalid
+configuration creates a **new** `OPEN` incident rather than reopening the
+resolved one, existing `OPEN` deduplication is unweakened, and concurrent
+resolution attempts against one incident both return a consistent result
+with no row corruption — all without any lock, retry, queue, or
+isolation-level change, since the existing partial unique index
+(`ux_incidents_open_fingerprint`, `WHERE status = 'OPEN'`) already excludes
+a resolved row and therefore already permitted this. See "Current Day 7A
+scope" above for the full detail. Test totals as of Day 7A: 176 Vitest
+tests (7 files, unchanged), 19 Python orchestration-helper tests (1 file,
+unchanged), 1 Playwright browser test (1 file, unchanged — it still covers
+configuration submission/refresh only, not resolution), 571 backend
+`pytest` tests (431 non-`postgres` + 140 `postgres`-marked) — **767
+automated tests combined**. Day 7A is implemented across five reviewable
+gates (7A-A/7A-B/7A-C/7A-D/7A-E), all approved, and passes the full
+backend/frontend/browser verification matrix, but has not yet been
+committed — see CLAUDE.md's "Current Phase". No frontend resolve control,
+acknowledgment/reopening/assignment/comments, bulk resolution, status
+filtering, authentication, and every other Day 6D-era deferral remain
+later-day scope; the existing five CI jobs are unchanged, and no sixth job
+was added.

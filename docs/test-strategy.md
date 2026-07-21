@@ -352,16 +352,23 @@ project-scoped defense-in-depth cleanup step.
 no mobile/device-emulation project, no visual-regression snapshot testing.
 Deferred alongside Section 18's existing deferrals.
 
-**Verified counts, as of Day 6D** (each recorded separately — none of
+**Verified counts, as of Day 7A** (each recorded separately — none of
 these are interchangeable substitutes for another, see below):
 
 | Layer | Count | Location |
 |---|---|---|
-| Vitest (frontend) | 176 tests, 7 files | `frontend/src/**/*.test.{ts,tsx}` |
-| Python `unittest` (orchestration helpers) | 19 tests, 1 file | `scripts/test_browser_e2e.py` |
-| Playwright (browser) | 1 test, 1 file | `frontend/e2e/config-submission-refresh.spec.ts` |
-| pytest (backend) | 470 tests (360 non-`postgres` + 110 `postgres`) | `backend/tests/` |
-| **Combined** | **666 automated tests** | — |
+| Vitest (frontend) | 176 tests, 7 files (unchanged since Day 6D) | `frontend/src/**/*.test.{ts,tsx}` |
+| Python `unittest` (orchestration helpers) | 19 tests, 1 file (unchanged) | `scripts/test_browser_e2e.py` |
+| Playwright (browser) | 1 test, 1 file (unchanged — still config-submission/refresh only, does not resolve an incident) | `frontend/e2e/config-submission-refresh.spec.ts` |
+| pytest (backend) | 571 tests (431 non-`postgres` + 140 `postgres`) | `backend/tests/` |
+| **Combined** | **767 automated tests** | — |
+
+Day 7A's 101 new/extended backend tests (571 vs. Day 6D's 470) are covered
+in Section 20 below, by layer. Vitest, the orchestration helpers, and
+Playwright are all unchanged from Day 6D — Day 7A is a backend-only vertical
+slice, verified by re-running the existing frontend/browser suites
+unmodified against the migrated schema and expanded `IncidentResponse`
+(Section 20.13).
 
 **Why these layers are not interchangeable.** Each proves something the
 others structurally cannot: Vitest proves frontend units, components, and
@@ -899,3 +906,190 @@ test("should create and surface an incident for a missing required ACL", async (
 | AC-11 | #10, #19, Section 9's repository-level concurrency test |
 | AC-12 | #16, #17, #18, and the remaining rows of Section 14's error table |
 | AC-13 | CI gates, Section 15 |
+
+---
+
+## 20. Incident Resolution Testing (Day 7A)
+
+Day 7A's first incident-lifecycle mutation (`OPEN -> RESOLVED`,
+`POST /incidents/{incident_id}/resolve`) was built and verified across five
+reviewable gates (7A-A domain/persistence/migration, 7A-B application,
+7A-C API, 7A-D recurrence/concurrency, 7A-E this review/documentation
+pass), test-first at every gate. Coverage by layer:
+
+### 20.1 Domain (`tests/unit/domain/test_incident.py`)
+
+`Incident.resolve(at)`: `OPEN -> RESOLVED` sets `resolved_at`/`updated_at`
+to the exact supplied value; `at` must be UTC-aware; `at` must not precede
+the incident's *current* `updated_at` (not `last_seen_at` — a correctness
+patch applied within Gate 7A-A after an initial `last_seen_at`-only check
+was found to permit moving `updated_at` backward when `last_seen_at <
+updated_at`, which is otherwise a legal state); all unrelated fields
+unchanged; already-`RESOLVED` is a true no-op that returns before any
+timestamp validation; the dormant `ACKNOWLEDGED` status raises rather than
+resolving. Constructor invariants:
+`created_at <= last_seen_at <= updated_at`, `resolved_at <= updated_at`
+when present, and `status == RESOLVED` iff `resolved_at` is set.
+
+### 20.2 Application (`tests/unit/application/test_incident_resolution.py`)
+
+`ResolveIncidentService` against hand-written fakes/spies (no mocking
+library), mirroring `ConfigIngestionService`'s/`ListIncidentsService`'s
+existing lifecycle-test style: an `OPEN` incident calls the injected
+`Clock.now()` exactly once, calls `uow.incidents.resolve()` with the
+incident ID and that exact captured value, commits once, and returns the
+persisted result; an already-`RESOLVED` incident calls the `Clock` zero
+times (proven with a clock that raises if invoked at all), performs no
+repository write, and never commits; an unknown incident raises
+`IncidentNotFoundError` (preserving `.incident_id`) with no `Clock` call
+and no commit; a repository result of `None` after the initial read is
+also treated as not-found; a concurrently-already-resolved result from the
+repository is accepted and returned, still with only one `Clock` call;
+repository and commit failures both preserve the original exception through
+the existing rollback/close-with-notes convention, never a second commit.
+
+### 20.3 In-memory and SQL repository contract
+(`tests/contract/persistence/test_incident_repository_contract.py`,
+parameterized over both implementations)
+
+`IncidentRepository.resolve(incident_id, resolved_at)`: resolves an `OPEN`
+incident; returns an already-`RESOLVED` incident unchanged; returns `None`
+for an unknown ID; preserves every detection-owned/immutable field
+(`fingerprint`, `device_id`, `rule_ref`, `affected_resource`, `severity`,
+`evidence`, `created_at`, `last_seen_at`, `occurrence_count`); a naive
+timestamp is rejected without mutation; a timestamp earlier than the
+persisted `updated_at` is rejected without mutation; a timestamp exactly
+equal to `updated_at` is accepted (boundary case). Ordering B (a committed
+`upsert_open_incident` update, then a later `resolve()`) and its stale-clock
+variant (a `resolve()` attempt using a timestamp earlier than an
+already-ingestion-advanced `updated_at`) are both proven here, distinct
+from the fresh-incident stale-timestamp case, since the comparison baseline
+here was advanced by a separate ingestion call.
+
+### 20.4 Migration (`tests/integration/persistence/test_migrations.py`)
+
+Upgrade from revision `0001_slice1_persistence` to `0002_incident_
+resolution` adds `updated_at` (backfilled from `last_seen_at` for a
+pre-existing row, then non-null) and `resolved_at` (nullable); the new
+`ck_incidents_updated_at_after_last_seen_at`,
+`ck_incidents_resolved_at_matches_status`, and
+`ck_incidents_resolved_at_before_or_equal_updated_at` CHECK constraints are
+present and enforced; the partial unique index
+`ux_incidents_open_fingerprint` remains present and functional, unchanged;
+downgrade to `0001` drops the new columns/constraints cleanly, and
+upgrading to head again succeeds a second time.
+
+### 20.5 API/OpenAPI contract
+(`tests/contract/api/test_incident_resolution_api.py`,
+`tests/contract/api/test_openapi_contract.py`,
+`tests/unit/api/test_clock.py`)
+
+`POST /incidents/{incident_id}/resolve` returns `200` with a direct,
+complete `IncidentResponse` (no wrapper); requires no request body;
+repeated resolution returns `200` with unchanged `resolved_at`/`updated_at`
+and a `Clock` that is not called again; an unknown ID returns the exact
+`{"code": "incident_not_found", "detail": "Incident '<id>' was not
+found."}` body at `404`; `GET /incidents` remains unfiltered, showing both
+`OPEN` (`resolved_at: null`) and `RESOLVED` incidents. OpenAPI: the path
+exists with `operationId: "resolve_incident"`, documents `200`
+(`IncidentResponse`) and `404` (`ApiErrorResponse`), has no `requestBody`
+key, and `IncidentResponse`'s schema includes `updated_at`
+(required) and `resolved_at` (a required key whose value schema is
+nullable — `anyOf` including `type: null`, the standard Pydantic v2 shape
+for `datetime | None`). `CallableClock` (the production adapter reusing
+`create_app`'s existing `clock` parameter) has its own focused unit tests:
+delegates to the wrapped callable, and rejects a naive or non-UTC value via
+the existing `InvalidClockError`.
+
+### 20.6 Real PostgreSQL HTTP resolution
+(`tests/integration/api/test_api_postgres.py`)
+
+The same success/idempotent/404 behavior above, driven through the real
+FastAPI app, a real `SqlAlchemyUnitOfWork`, and a real database — plus the
+binding reingestion-after-resolution scenario (Section 20.7) at the HTTP
+level.
+
+### 20.7 Recurrence after resolution
+(`tests/integration/application/test_incident_resolution_reingestion_postgres.py`,
+`tests/integration/api/test_api_postgres.py`)
+
+Real PostgreSQL, through the supported `ConfigIngestionService`/
+`ResolveIncidentService` (and, separately, real HTTP) entry points — never
+raw SQL: ingest an incident at T0, resolve it at T1, reingest the identical
+still-invalid configuration at T2. Asserts the original incident is
+`RESOLVED`, unchanged (`resolved_at == updated_at == T1`, `created_at`/
+`last_seen_at`/`occurrence_count`/`fingerprint`/`evidence`/`severity` all
+as originally created), and that a **new** `OPEN` incident is created (new
+`incident_id`, same fingerprint, `occurrence_count: 1`, its own
+`created_at`/`last_seen_at`/`updated_at == T2`). This is the concrete proof
+that the partial unique index (`WHERE status = 'OPEN'`) already excludes a
+resolved row — no index or migration change was needed for this behavior.
+
+### 20.8 New OPEN deduplication (same test files as 20.7)
+
+After the new `OPEN` incident exists, a third reingestion at T3 increments
+its `occurrence_count` to 2, advances `last_seen_at`/`updated_at` to T3,
+creates no third row, and leaves the original `RESOLVED` incident
+completely untouched — proving Day 7A did not weaken the existing `OPEN`
+dedup invariant.
+
+### 20.9 Partial-index invariant (Section 20.7/20.8, plus Section 9's
+existing migration/index tests)
+
+The existing migration tests are the schema source of truth
+(`ux_incidents_open_fingerprint`, `UNIQUE (fingerprint) WHERE status =
+'OPEN'`, unchanged since Day 4B1). The Day 7A behavioral tests verify its
+*effect*: one `RESOLVED` and one `OPEN` row may share a fingerprint; two
+`OPEN` rows may never share one (enforced, unchanged, by the index itself);
+repeated ingestion always targets the single `OPEN` row for that
+fingerprint.
+
+### 20.10 Concurrent resolution
+(`tests/integration/persistence/test_incident_repository_concurrency.py`)
+
+Two worker threads, each with its own connection/Session/repository
+instance, synchronized with a `threading.Barrier` (never a sleep), both
+call `resolve()` on the same `OPEN` incident with the identical resolution
+timestamp and commit explicitly. No unhandled exception escapes either
+worker; both receive a `RESOLVED` incident with identical `resolved_at`/
+`updated_at`; the final database row is `RESOLVED`, with
+`resolved_at == updated_at`, `occurrence_count`/`last_seen_at` unchanged
+from before resolution, exactly one row for that `incident_id`/fingerprint,
+and zero remaining `OPEN` rows for that fingerprint. No lock, retry, queue,
+or isolation-level change was introduced — the existing atomic conditional
+`UPDATE` (Section 9's own precedent) was already sufficient.
+
+### 20.11 Committed ingestion/resolution orderings
+(`tests/contract/persistence/test_incident_repository_contract.py`)
+
+Ordering A (resolve commits first, then reingestion) is Section 20.7/20.8
+above. Ordering B (a committed `upsert_open_incident` update commits
+first, then a later `resolve()`): the resolution succeeds against the
+already-advanced row, leaving `occurrence_count`/`last_seen_at` exactly as
+ingestion left them, touching only `status`/`resolved_at`/`updated_at`.
+
+### 20.12 Stale-clock rejection (same test file as 20.11)
+
+A `resolve()` attempt using a timestamp earlier than an
+ingestion-since-advanced `updated_at` raises `ValueError`, leaves the
+incident `OPEN` and unmutated (`occurrence_count`/`updated_at`/
+`last_seen_at` retain their ingestion values), and creates no duplicate
+incident.
+
+### 20.13 Frontend and browser regression (unchanged suites)
+
+The existing 176 Vitest tests (7 files) and the existing runtime response
+validator (`isIncidentResponse`) were re-verified against the expanded
+`IncidentResponse` shape without any frontend source change: the validator
+checks required fields only and does not enumerate/reject unknown keys, so
+`updated_at`/`resolved_at` are silently accepted; `status` is validated as
+a non-empty string, not a closed enum, so `"RESOLVED"` is accepted like any
+other value. The existing Playwright test
+(`config-submission-refresh.spec.ts`) continues to pass unchanged — it
+still covers configuration submission and refresh only, and does not
+resolve an incident during Day 7A. `scripts/compose_smoke.py` and
+`scripts/browser_e2e.py` both continue to pass unmodified against the
+migrated schema (`0002_incident_resolution` reached at container startup
+via the existing `alembic upgrade head` step) and the expanded
+`IncidentResponse` — no separate migration or script was added for browser
+verification.

@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 from meta_rne.api.schemas import ApiErrorResponse
-from meta_rne.application.errors import ConfigurationParseError
+from meta_rne.application.errors import ConfigurationParseError, IncidentNotFoundError
 from meta_rne.domain.errors import UnsupportedVendorError
 from meta_rne.persistence.errors import (
     DeviceConflictError,
@@ -51,6 +51,14 @@ def register_exception_handlers(app: FastAPI) -> None:
             detail = f"{detail} (line {exc.parse_error.line_number})"
         return _error_response(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "configuration_parse_error", detail
+        )
+
+    @app.exception_handler(IncidentNotFoundError)
+    async def _incident_not_found(request: Request, exc: IncidentNotFoundError) -> JSONResponse:
+        return _error_response(
+            status.HTTP_404_NOT_FOUND,
+            "incident_not_found",
+            f"Incident '{exc.incident_id}' was not found.",
         )
 
     @app.exception_handler(DeviceConflictError)

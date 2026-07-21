@@ -211,6 +211,8 @@ def _incident(**overrides: object) -> Incident:
         "created_at": OBSERVED_AT,
         "last_seen_at": OBSERVED_AT,
         "occurrence_count": 1,
+        "updated_at": OBSERVED_AT,
+        "resolved_at": None,
     }
     defaults.update(overrides)
     return Incident(**defaults)  # type: ignore[arg-type]
@@ -257,6 +259,187 @@ def test_incident__last_seen_at_before_created_at__raises_value_error() -> None:
 def test_incident__naive_created_at__raises_value_error() -> None:
     with pytest.raises(ValueError, match="created_at"):
         _incident(created_at=datetime(2026, 7, 18, 10, 0, 0))
+
+
+def test_incident__updated_at_before_last_seen_at__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="updated_at"):
+        _incident(
+            created_at=OBSERVED_AT,
+            last_seen_at=OBSERVED_AT,
+            updated_at=OBSERVED_AT - timedelta(seconds=1),
+        )
+
+
+def test_incident__naive_updated_at__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="updated_at"):
+        _incident(updated_at=datetime(2026, 7, 18, 10, 0, 0))
+
+
+def test_incident__resolved_status_without_resolved_at__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="resolved_at"):
+        _incident(status=IncidentStatus.RESOLVED, resolved_at=None)
+
+
+def test_incident__open_status_with_resolved_at__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="resolved_at"):
+        _incident(status=IncidentStatus.OPEN, resolved_at=OBSERVED_AT)
+
+
+def test_incident__acknowledged_status_with_resolved_at__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="resolved_at"):
+        _incident(status=IncidentStatus.ACKNOWLEDGED, resolved_at=OBSERVED_AT)
+
+
+def test_incident__naive_resolved_at__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="resolved_at"):
+        _incident(
+            status=IncidentStatus.RESOLVED,
+            updated_at=OBSERVED_AT,
+            resolved_at=datetime(2026, 7, 18, 10, 0, 0),
+        )
+
+
+def test_incident__resolved_at_after_updated_at__raises_value_error() -> None:
+    with pytest.raises(ValueError, match="resolved_at"):
+        _incident(
+            status=IncidentStatus.RESOLVED,
+            updated_at=OBSERVED_AT,
+            resolved_at=OBSERVED_AT + timedelta(seconds=1),
+        )
+
+
+# --- Incident.resolve() (Day 7A) ---------------------------------------------
+
+RESOLVED_AT = OBSERVED_AT + timedelta(hours=1)
+
+
+def test_incident_resolve__open_incident__transitions_to_resolved() -> None:
+    incident = _incident(status=IncidentStatus.OPEN)
+
+    resolved = incident.resolve(RESOLVED_AT)
+
+    assert resolved.status is IncidentStatus.RESOLVED
+
+
+def test_incident_resolve__open_incident__sets_resolved_at_and_updated_at_to_supplied_value() -> (
+    None
+):
+    incident = _incident(status=IncidentStatus.OPEN)
+
+    resolved = incident.resolve(RESOLVED_AT)
+
+    assert resolved.resolved_at == RESOLVED_AT
+    assert resolved.updated_at == RESOLVED_AT
+
+
+def test_incident_resolve__naive_timestamp__raises_value_error() -> None:
+    incident = _incident(status=IncidentStatus.OPEN)
+
+    with pytest.raises(ValueError):
+        incident.resolve(datetime(2026, 7, 18, 11, 0, 0))
+
+
+def test_incident_resolve__timestamp_before_last_seen_at__raises_value_error() -> None:
+    incident = _incident(status=IncidentStatus.OPEN)
+
+    with pytest.raises(ValueError):
+        incident.resolve(OBSERVED_AT - timedelta(seconds=1))
+
+
+def test_incident_resolve__timestamp_between_last_seen_at_and_updated_at__raises_value_error() -> (
+    None
+):
+    # updated_at may legally be later than last_seen_at on an OPEN incident
+    # (e.g. a prior no-op resolve() attempt does not happen, but nothing else
+    # prevents this gap); resolving with a timestamp in that gap would move
+    # updated_at backward, so it must be rejected even though it is >=
+    # last_seen_at.
+    incident = _incident(
+        status=IncidentStatus.OPEN,
+        last_seen_at=OBSERVED_AT,
+        updated_at=OBSERVED_AT + timedelta(minutes=30),
+    )
+
+    with pytest.raises(ValueError):
+        incident.resolve(OBSERVED_AT + timedelta(minutes=15))
+
+
+def test_incident_resolve__timestamp_exactly_equal_to_updated_at__is_accepted() -> None:
+    incident = _incident(
+        status=IncidentStatus.OPEN,
+        last_seen_at=OBSERVED_AT,
+        updated_at=OBSERVED_AT + timedelta(minutes=30),
+    )
+
+    resolved = incident.resolve(OBSERVED_AT + timedelta(minutes=30))
+
+    assert resolved.status is IncidentStatus.RESOLVED
+    assert resolved.resolved_at == OBSERVED_AT + timedelta(minutes=30)
+    assert resolved.updated_at == OBSERVED_AT + timedelta(minutes=30)
+
+
+def test_incident_resolve__failed_resolution__leaves_original_incident_unchanged() -> None:
+    incident = _incident(
+        status=IncidentStatus.OPEN,
+        last_seen_at=OBSERVED_AT,
+        updated_at=OBSERVED_AT + timedelta(minutes=30),
+    )
+
+    with pytest.raises(ValueError):
+        incident.resolve(OBSERVED_AT + timedelta(minutes=15))
+
+    assert incident.status is IncidentStatus.OPEN
+    assert incident.resolved_at is None
+    assert incident.updated_at == OBSERVED_AT + timedelta(minutes=30)
+
+
+def test_incident_resolve__open_incident__preserves_immutable_fields() -> None:
+    incident = _incident(status=IncidentStatus.OPEN)
+
+    resolved = incident.resolve(RESOLVED_AT)
+
+    assert resolved.incident_id == incident.incident_id
+    assert resolved.fingerprint == incident.fingerprint
+    assert resolved.device_id == incident.device_id
+    assert resolved.rule_ref == incident.rule_ref
+    assert resolved.affected_resource == incident.affected_resource
+    assert resolved.severity == incident.severity
+    assert resolved.evidence == incident.evidence
+    assert resolved.recommendation == incident.recommendation
+    assert resolved.created_at == incident.created_at
+    assert resolved.last_seen_at == incident.last_seen_at
+    assert resolved.occurrence_count == incident.occurrence_count
+
+
+def test_incident_resolve__already_resolved__returns_unchanged() -> None:
+    incident = _incident(
+        status=IncidentStatus.RESOLVED, updated_at=RESOLVED_AT, resolved_at=RESOLVED_AT
+    )
+
+    result = incident.resolve(RESOLVED_AT + timedelta(hours=1))
+
+    assert result is incident
+
+
+def test_incident_resolve__already_resolved__is_a_true_no_op_before_timestamp_validation() -> None:
+    incident = _incident(
+        status=IncidentStatus.RESOLVED, updated_at=RESOLVED_AT, resolved_at=RESOLVED_AT
+    )
+
+    # A naive, clearly-invalid timestamp must not raise: an already-RESOLVED
+    # incident returns before any timestamp validation runs.
+    result = incident.resolve(datetime(2020, 1, 1))
+
+    assert result is incident
+    assert result.resolved_at == RESOLVED_AT
+    assert result.updated_at == RESOLVED_AT
+
+
+def test_incident_resolve__acknowledged_incident__raises_value_error() -> None:
+    incident = _incident(status=IncidentStatus.ACKNOWLEDGED, resolved_at=None)
+
+    with pytest.raises(ValueError):
+        incident.resolve(RESOLVED_AT)
 
 
 def test_incident_upsert_outcome__has_approved_members_only() -> None:

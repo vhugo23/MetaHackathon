@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import literal_column, select, text
+from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -79,6 +80,8 @@ def _build_domain_incident(
     created_at: datetime,
     last_seen_at: datetime,
     occurrence_count: int,
+    updated_at: datetime,
+    resolved_at: datetime | None,
 ) -> Incident:
     return Incident(
         incident_id=incident_id,
@@ -94,6 +97,8 @@ def _build_domain_incident(
         created_at=_to_utc(created_at),
         last_seen_at=_to_utc(last_seen_at),
         occurrence_count=occurrence_count,
+        updated_at=_to_utc(updated_at),
+        resolved_at=_to_utc(resolved_at) if resolved_at is not None else None,
     )
 
 
@@ -112,6 +117,8 @@ def _to_domain(model: _IncidentModel) -> Incident:
         created_at=model.created_at,
         last_seen_at=model.last_seen_at,
         occurrence_count=model.occurrence_count,
+        updated_at=model.updated_at,
+        resolved_at=model.resolved_at,
     )
 
 
@@ -130,6 +137,8 @@ def _to_domain_from_row(row: Any) -> Incident:
         created_at=row.created_at,
         last_seen_at=row.last_seen_at,
         occurrence_count=row.occurrence_count,
+        updated_at=row.updated_at,
+        resolved_at=row.resolved_at,
     )
 
 
@@ -186,6 +195,8 @@ class SqlAlchemyIncidentRepository:
             created_at=observed_at,
             last_seen_at=observed_at,
             occurrence_count=1,
+            updated_at=observed_at,
+            resolved_at=None,
         )
         stmt = insert_stmt.on_conflict_do_update(
             index_elements=[_IncidentModel.fingerprint],
@@ -196,6 +207,7 @@ class SqlAlchemyIncidentRepository:
                 "severity": insert_stmt.excluded.severity,
                 "evidence": insert_stmt.excluded.evidence,
                 "recommendation": insert_stmt.excluded.recommendation,
+                "updated_at": insert_stmt.excluded.updated_at,
             },
             where=(insert_stmt.excluded.last_seen_at >= _IncidentModel.last_seen_at),
         ).returning(
@@ -212,6 +224,8 @@ class SqlAlchemyIncidentRepository:
             _IncidentModel.created_at,
             _IncidentModel.last_seen_at,
             _IncidentModel.occurrence_count,
+            _IncidentModel.updated_at,
+            _IncidentModel.resolved_at,
             literal_column("(xmax = 0)").label("was_inserted"),
         )
 
@@ -241,6 +255,87 @@ class SqlAlchemyIncidentRepository:
         raise PersistenceError(
             "unexpected persistence failure: upsert_open_incident's conditional "
             "ON CONFLICT DO UPDATE affected no row"
+        )
+
+    def resolve(self, incident_id: str, resolved_at: datetime) -> Incident | None:
+        """One atomic conditional UPDATE, same idiom as upsert_open_incident:
+        never a read-before-write. Only status/resolved_at/updated_at are
+        ever written here, so a concurrent upsert_open_incident on this same
+        row (occurrence_count/evidence/last_seen_at/severity) can never be
+        clobbered by a resolve(), or vice versa. The WHERE clause's own
+        `updated_at <= resolved_at` guard (not `last_seen_at`) is what makes
+        this monotonic: an OPEN incident may legally already have
+        `last_seen_at < updated_at`, and checking only against last_seen_at
+        would let a resolve() move updated_at backward."""
+        resolved_at = _to_utc(resolved_at)
+
+        stmt = (
+            sa_update(_IncidentModel)
+            .where(
+                _IncidentModel.incident_id == incident_id,
+                _IncidentModel.status == IncidentStatus.OPEN.value,
+                _IncidentModel.updated_at <= resolved_at,
+            )
+            .values(
+                status=IncidentStatus.RESOLVED.value,
+                resolved_at=resolved_at,
+                updated_at=resolved_at,
+            )
+            .returning(
+                _IncidentModel.incident_id,
+                _IncidentModel.fingerprint,
+                _IncidentModel.device_id,
+                _IncidentModel.source,
+                _IncidentModel.rule_ref,
+                _IncidentModel.affected_resource,
+                _IncidentModel.severity,
+                _IncidentModel.status,
+                _IncidentModel.evidence,
+                _IncidentModel.recommendation,
+                _IncidentModel.created_at,
+                _IncidentModel.last_seen_at,
+                _IncidentModel.occurrence_count,
+                _IncidentModel.updated_at,
+                _IncidentModel.resolved_at,
+            )
+        )
+
+        with self._session.begin_nested():
+            row = self._session.execute(stmt).first()
+
+        if row is not None:
+            return _to_domain_from_row(row)
+
+        # The conditional UPDATE matched no row: either incident_id doesn't
+        # exist, the row's status isn't OPEN (already RESOLVED, or the
+        # dormant ACKNOWLEDGED), or it is still OPEN but its persisted
+        # updated_at is later than the supplied resolved_at. One internal
+        # follow-up SELECT only, never the primary write mechanism (same
+        # idiom as upsert_open_incident's stale-observation check).
+        # populate_existing=True guarantees this returns the row's true
+        # current persisted state rather than a stale identity-map-cached
+        # object from an earlier get_by_id() call on this same Session.
+        existing_stmt = (
+            select(_IncidentModel)
+            .where(_IncidentModel.incident_id == incident_id)
+            .execution_options(populate_existing=True)
+        )
+        existing_model = self._session.execute(existing_stmt).scalar_one_or_none()
+        if existing_model is None:
+            return None
+        if existing_model.status == IncidentStatus.RESOLVED.value:
+            return _to_domain(existing_model)
+        if existing_model.status == IncidentStatus.OPEN.value:
+            # Never return an unchanged OPEN incident as apparent success:
+            # the row is still OPEN only because the timestamp guard above
+            # rejected it, not because of a status mismatch.
+            raise ValueError(
+                f"cannot resolve incident {incident_id!r}: resolved_at {resolved_at!r} "
+                f"precedes the persisted updated_at {existing_model.updated_at!r}"
+            )
+        raise ValueError(
+            f"cannot resolve incident {incident_id!r}: persisted status is "
+            f"{existing_model.status!r}, not OPEN or RESOLVED"
         )
 
 

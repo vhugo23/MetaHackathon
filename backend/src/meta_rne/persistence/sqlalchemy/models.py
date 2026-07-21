@@ -114,6 +114,8 @@ class _IncidentModel(_Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -128,6 +130,18 @@ class _IncidentModel(_Base):
         CheckConstraint("occurrence_count >= 1", name="ck_incidents_occurrence_count_min"),
         CheckConstraint("fingerprint ~ '^[0-9a-f]{64}$'", name="ck_incidents_fingerprint_format"),
         CheckConstraint("last_seen_at >= created_at", name="ck_incidents_last_seen_after_created"),
+        CheckConstraint(
+            "updated_at >= last_seen_at", name="ck_incidents_updated_at_after_last_seen_at"
+        ),
+        CheckConstraint(
+            "(status = 'RESOLVED' AND resolved_at IS NOT NULL) "
+            "OR (status <> 'RESOLVED' AND resolved_at IS NULL)",
+            name="ck_incidents_resolved_at_matches_status",
+        ),
+        CheckConstraint(
+            "resolved_at IS NULL OR resolved_at <= updated_at",
+            name="ck_incidents_resolved_at_before_or_equal_updated_at",
+        ),
         Index("ix_incidents_device_id", "device_id"),
         Index(
             "ux_incidents_open_fingerprint",

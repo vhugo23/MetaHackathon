@@ -200,6 +200,8 @@ class IncidentResponse(BaseModel):
     created_at: datetime
     last_seen_at: datetime
     occurrence_count: int
+    updated_at: datetime
+    resolved_at: datetime | None
 
     @classmethod
     def from_domain(cls, incident: Incident) -> "IncidentResponse":
@@ -217,6 +219,8 @@ class IncidentResponse(BaseModel):
             created_at=incident.created_at,
             last_seen_at=incident.last_seen_at,
             occurrence_count=incident.occurrence_count,
+            updated_at=incident.updated_at,
+            resolved_at=incident.resolved_at,
         )
 
 

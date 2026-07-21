@@ -13,7 +13,7 @@ that repository will return.
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -114,6 +114,8 @@ class Incident:
     created_at: datetime
     last_seen_at: datetime
     occurrence_count: int
+    updated_at: datetime
+    resolved_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.incident_id, "Incident.incident_id")
@@ -123,6 +125,7 @@ class Incident:
         _require_non_empty(self.recommendation, "Incident.recommendation")
         _require_utc(self.created_at, "Incident.created_at")
         _require_utc(self.last_seen_at, "Incident.last_seen_at")
+        _require_utc(self.updated_at, "Incident.updated_at")
 
         if not _FINGERPRINT_PATTERN.fullmatch(self.fingerprint):
             raise ValueError(
@@ -133,6 +136,44 @@ class Incident:
             raise ValueError("Incident.occurrence_count must be >= 1")
         if self.last_seen_at < self.created_at:
             raise ValueError("Incident.last_seen_at must not precede Incident.created_at")
+        if self.updated_at < self.last_seen_at:
+            raise ValueError("Incident.updated_at must not precede Incident.last_seen_at")
+
+        if self.resolved_at is not None:
+            _require_utc(self.resolved_at, "Incident.resolved_at")
+            if self.resolved_at > self.updated_at:
+                raise ValueError("Incident.resolved_at must not be later than Incident.updated_at")
+
+        if self.status is IncidentStatus.RESOLVED and self.resolved_at is None:
+            raise ValueError("Incident.resolved_at must be set when Incident.status is RESOLVED")
+        if self.status is not IncidentStatus.RESOLVED and self.resolved_at is not None:
+            raise ValueError("Incident.resolved_at must be None unless Incident.status is RESOLVED")
+
+    def resolve(self, resolved_at: datetime) -> "Incident":
+        """OPEN -> RESOLVED, capturing one Clock value for both `resolved_at`
+        and `updated_at`. Already-RESOLVED is a true no-op: it returns
+        before `resolved_at` is validated at all (Day 7A binding decision).
+        ACKNOWLEDGED (dormant, no public transition into it yet) does not
+        silently resolve — it raises, since resolving it would bypass its
+        own (currently unused) transition entirely."""
+        if self.status is IncidentStatus.RESOLVED:
+            return self
+        if self.status is not IncidentStatus.OPEN:
+            raise ValueError(
+                f"Incident.resolve is only valid from OPEN (or a no-op from RESOLVED), "
+                f"not {self.status.value}"
+            )
+        _require_utc(resolved_at, "Incident.resolved_at")
+        # Checked against updated_at, not last_seen_at: the constructor
+        # invariant last_seen_at <= updated_at means this also protects
+        # last_seen_at chronology, and an OPEN incident may legally already
+        # have last_seen_at < updated_at — resolving with a timestamp in
+        # that gap would move updated_at backward.
+        if resolved_at < self.updated_at:
+            raise ValueError("Incident.resolve's resolved_at must not precede Incident.updated_at")
+        return replace(
+            self, status=IncidentStatus.RESOLVED, resolved_at=resolved_at, updated_at=resolved_at
+        )
 
 
 class IncidentUpsertOutcome(StrEnum):

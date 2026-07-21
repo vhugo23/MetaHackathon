@@ -90,6 +90,8 @@ def test_alembic_upgrade_head__creates_expected_tables_and_columns(
             "created_at",
             "last_seen_at",
             "occurrence_count",
+            "updated_at",
+            "resolved_at",
         }
     finally:
         engine.dispose()
@@ -147,7 +149,136 @@ def test_alembic_upgrade_head__creates_check_constraints(reset_migration_databas
             "ck_incidents_occurrence_count_min",
             "ck_incidents_fingerprint_format",
             "ck_incidents_last_seen_after_created",
+            "ck_incidents_updated_at_after_last_seen_at",
+            "ck_incidents_resolved_at_matches_status",
+            "ck_incidents_resolved_at_before_or_equal_updated_at",
         } <= incident_checks
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_head__updated_at_is_not_nullable(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    command.upgrade(_alembic_config(database_url), "head")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        columns = {col["name"]: col for col in inspector.get_columns("incidents")}
+        assert columns["updated_at"]["nullable"] is False
+        assert columns["resolved_at"]["nullable"] is True
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_head__backfills_updated_at_from_last_seen_at_for_pre_existing_rows(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    config = _alembic_config(database_url)
+    command.upgrade(config, "0001_slice1_persistence")
+
+    engine = create_engine(database_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO devices (device_id, vendor, created_at, updated_at) "
+                    "VALUES ('spine-01', 'cisco-ios-xe', '2026-07-18T10:00:00Z', "
+                    "'2026-07-18T10:00:00Z')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO incidents "
+                    "(incident_id, fingerprint, device_id, source, rule_ref, "
+                    " affected_resource, severity, status, evidence, recommendation, "
+                    " created_at, last_seen_at, occurrence_count) "
+                    "VALUES ('pre-existing-incident', "
+                    "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
+                    "'spine-01', 'POLICY_VIOLATION', 'policy-acl-external-in', "
+                    "'interface:GigabitEthernet0/1:acl_in', 'Medium', 'OPEN', "
+                    '\'{"source_snapshot_id": "snap-1", "violation_type": '
+                    '"MISSING_REQUIRED_ACL", "expected_acl_name": "ACL-EXTERNAL-IN", '
+                    '"actual_acl_name": null, "interface_name": "GigabitEthernet0/1", '
+                    '"direction": "in"}\', '
+                    "'Assign ACL-EXTERNAL-IN inbound to GigabitEthernet0/1', "
+                    "'2026-07-18T10:00:00Z', '2026-07-18T11:00:00Z', 1)"
+                )
+            )
+
+        command.upgrade(config, "head")
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT last_seen_at, updated_at, resolved_at, status FROM incidents "
+                    "WHERE incident_id = 'pre-existing-incident'"
+                )
+            ).one()
+        assert row.updated_at == row.last_seen_at
+        assert row.resolved_at is None
+        assert row.status == "OPEN"
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_head__partial_open_fingerprint_index_survives_unchanged(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    command.upgrade(_alembic_config(database_url), "head")
+
+    engine = create_engine(database_url)
+    try:
+        with engine.connect() as conn:
+            index_def = conn.execute(
+                text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"),
+                {"name": "ux_incidents_open_fingerprint"},
+            ).scalar_one()
+        assert "UNIQUE" in index_def
+        assert "(fingerprint)" in index_def
+        assert "WHERE" in index_def and "status = 'OPEN'" in index_def
+    finally:
+        engine.dispose()
+
+
+def test_alembic_downgrade_one_revision__drops_resolution_columns_and_constraints(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    config = _alembic_config(database_url)
+    command.upgrade(config, "head")
+
+    command.downgrade(config, "0001_slice1_persistence")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        incident_columns = {col["name"] for col in inspector.get_columns("incidents")}
+        assert "updated_at" not in incident_columns
+        assert "resolved_at" not in incident_columns
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_head__succeeds_again_after_downgrading_one_revision(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    config = _alembic_config(database_url)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0001_slice1_persistence")
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        incident_columns = {col["name"] for col in inspector.get_columns("incidents")}
+        assert {"updated_at", "resolved_at"} <= incident_columns
     finally:
         engine.dispose()
 

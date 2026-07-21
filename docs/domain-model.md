@@ -416,15 +416,42 @@ Incident
 │                                       # violations); copied verbatim from the triggering
 │                                       # finding, Section 7/17
 ├── severity: Severity                 # "Critical" | "High" | "Medium" | "Low"
-├── status: IncidentStatus             # "OPEN" (MVP's only reachable value)
+├── status: IncidentStatus             # "OPEN" | "RESOLVED" reachable as of Day 7A;
+│                                       # "ACKNOWLEDGED" remains a dormant compatibility
+│                                       # state with no public transition into it
 ├── evidence: object                   # finding-specific detail ONLY — see below
 ├── recommendation: string             # Section 13 — plain string, Day 4A; a richer
 │                                       # Recommendation{summary, details} object and
 │                                       # template generation are deferred
-├── created_at: timestamp              # first detection
-├── last_seen_at: timestamp            # most recent (re)detection
-├── occurrence_count: int              # starts at 1, increments on dedup match
+├── created_at: timestamp              # first detection; never changes again
+├── last_seen_at: timestamp            # most recent (re)detection; advances only while
+│                                       # OPEN, on a dedup match (Section 11) — resolution
+│                                       # (Section 10.1 below) never touches it
+├── occurrence_count: int              # starts at 1, increments on dedup match; resolution
+│                                       # never touches it
+├── updated_at: timestamp              # Day 7A — the most recent *persisted mutation* of
+│                                       # any kind to this row (creation, a dedup update, or
+│                                       # an explicit resolution); distinct from
+│                                       # last_seen_at, which is detection-only
+├── resolved_at: timestamp | null      # Day 7A — null while OPEN; set once, to the exact
+│                                       # Clock value captured at resolution, when RESOLVED
 ```
+
+**Timestamp invariants (Day 7A):**
+
+```
+created_at <= last_seen_at <= updated_at
+resolved_at <= updated_at   (when resolved_at is not null)
+```
+
+**State invariants (Day 7A):**
+
+- `status == "OPEN"` requires `resolved_at` is `null`.
+- `status == "RESOLVED"` requires `resolved_at` is populated.
+- `status == "ACKNOWLEDGED"` also requires `resolved_at` is `null` — it
+  remains a dormant compatibility state (the enum member and its database
+  CHECK constraint exist, unchanged since Day 4A/4B1) with no public
+  transition into or out of it in the Day 7A lifecycle.
 
 **`rule_ref` is the one consistent field name, used the same way in every
 document, for "which rule or policy caused this."** It is populated from:
@@ -457,12 +484,42 @@ the vertical slice (missing required ACL):
 Case, fixed set). A missing required ACL is `Medium`.
 
 **Status** is always one of `OPEN | ACKNOWLEDGED | RESOLVED`
-(SCREAMING_SNAKE_CASE, fixed set) — the MVP only ever produces `OPEN`,
-since no endpoint transitions status yet (Section 14).
+(SCREAMING_SNAKE_CASE, fixed set). Every finding starts `OPEN`; as of
+Day 7A, `RESOLVED` is reachable via `Incident.resolve(at)` below.
+`ACKNOWLEDGED` remains dormant — nothing transitions an incident into it
+(Section 14).
 
 **Timestamps** are ISO-8601 UTC with a `Z` suffix everywhere in this
 model and in the API (e.g. `"2026-07-18T10:00:00Z"`) — no other timestamp
 format appears in any document.
+
+**`Incident.resolve(at)` (Day 7A) — the one lifecycle transition.**
+
+```
+Incident.resolve(at: timestamp) -> Incident
+```
+
+- `OPEN -> RESOLVED`: `status` becomes `RESOLVED`; `resolved_at` and
+  `updated_at` both become exactly `at` — one captured value assigned to
+  both, never two separate reads. Every other field (`fingerprint`,
+  `device_id`, `rule_ref`, `affected_resource`, `severity`, `evidence`,
+  `recommendation`, `created_at`, `last_seen_at`, `occurrence_count`)
+  is unchanged.
+- `at` must be timezone-aware UTC and must not precede the incident's
+  current `updated_at` — checked against `updated_at`, not `last_seen_at`,
+  since an `OPEN` incident may legally already have
+  `last_seen_at < updated_at`; a `last_seen_at`-only check would let a
+  resolution move `updated_at` backward. A violation is rejected
+  (`ValueError`), and the incident is returned/left completely unchanged.
+- Already `RESOLVED` is a **true no-op**: the incident is returned
+  unchanged, before `at` is validated at all — an invalid or stale `at`
+  never raises for an already-resolved incident.
+- The dormant `ACKNOWLEDGED` status does not silently resolve — calling
+  `resolve(at)` on an `ACKNOWLEDGED` incident raises, since accepting it
+  would bypass `ACKNOWLEDGED`'s own (still nonexistent) transition
+  entirely.
+- No generic state-machine abstraction was introduced — this is the one
+  method for the one transition the MVP has.
 
 ---
 
@@ -552,10 +609,19 @@ implementations to prove this. There is deliberately no plain `save()` on
 write path, so no calling code can reintroduce a find-then-save race.
 
 Dedup is scoped to `OPEN` incidents (A-09): once an incident is resolved
-(post-MVP, Section 14), a recurrence of the same fingerprint starts a new
-incident rather than reopening the old one — there is no reopen workflow
-in the MVP yet, but the rule is stated now so it is unambiguous once one
-exists.
+(`Incident.resolve`, Section 10, implemented Day 7A), a recurrence of the
+same fingerprint starts a **new** incident rather than reopening the old
+one — there is still no reopen workflow, but this is no longer merely a
+stated-for-later rule: the partial unique index
+(`ux_incidents_open_fingerprint`, `WHERE status = 'OPEN'`) already excludes
+a `RESOLVED` row, so `upsert_open_incident`'s existing `ON CONFLICT` target
+simply doesn't see one, and a fresh `INSERT` proceeds — a new
+`incident_id`, `occurrence_count: 1`, and its own `created_at`/
+`last_seen_at`/`updated_at`. The historical `RESOLVED` row is left
+completely unchanged, and the new `OPEN` row then deduplicates further
+recurrence exactly as any other `OPEN` incident does (no third row). Proven
+by real-PostgreSQL tests (test-strategy.md Section 9) — no change to
+`upsert_open_incident` or the index itself was required for this.
 
 ---
 
@@ -704,7 +770,7 @@ been corrected to match the verbatim-copy contract actually built.
 | `ConfigurationPolicy` | No status field — a policy has no lifecycle states to be in. It is seeded at startup (idempotently, by `policy_id`, Section 12) and never created, edited, or deleted at runtime in the MVP; its existence in the repository is its only observable state. |
 | `ConfigurationViolation` | Transient: detected → immediately converted into an `Incident` finding within the same request. |
 | `Anomaly` | Same as `ConfigurationViolation`. |
-| `Incident` | Created `OPEN`, `occurrence_count = 1`. Each dedup match (Section 11) updates `last_seen_at`/`occurrence_count`/`evidence` in place. `status` transitions beyond `OPEN` (`ACKNOWLEDGED`, `RESOLVED`) have no triggering endpoint in the MVP — see Section 17 of architecture.md. Never deleted. |
+| `Incident` | Created `OPEN`, `occurrence_count = 1`, `updated_at = created_at`, `resolved_at = null`. Each dedup match (Section 11) updates `last_seen_at`/`occurrence_count`/`evidence`/`updated_at` in place, never `resolved_at`. `Incident.resolve(at)` (Day 7A) transitions `OPEN -> RESOLVED`, setting `resolved_at = updated_at = at`; already-`RESOLVED` is a no-op. `ACKNOWLEDGED` remains a dormant compatibility state with no triggering endpoint — see architecture.md Section 11.3. There is no reopen transition back to `OPEN`. Never deleted. |
 | `TelemetrySample` | Created once per submission; retained within the bounded recent-history window (Section 12), then aged out. |
 
 ---
@@ -989,8 +1055,11 @@ Named to prevent them being mistaken for oversights — genuinely post-MVP:
 - **Independent violation/anomaly history** — findings that never became
   an incident are not retained anywhere; only `Incident` is queryable.
 - **`ConfigurationPolicy` CRUD/versioning** — seeded only.
-- **Incident resolution/reopen workflow** — `ACKNOWLEDGED`/`RESOLVED`
-  exist in the enum but nothing transitions an incident into them.
+- **Incident reopen workflow, acknowledgment, assignment, comments/notes,
+  and bulk resolution** — Day 7A implemented `Incident.resolve(at)`
+  (`OPEN -> RESOLVED`, Section 10); `ACKNOWLEDGED` remains a dormant
+  compatibility state with no public transition into it, and there is no
+  path back from `RESOLVED` to `OPEN`.
 - **`ConfigurationSnapshot` replay/re-parse** — the raw/normalized split
   makes this possible later; no replay mechanism is built.
 - **Route/BgpNeighbor as top-level entities** — remain embedded

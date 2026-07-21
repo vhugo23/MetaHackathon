@@ -448,6 +448,228 @@ def test_incident_repository__list_all__uses_created_at_then_incident_id_orderin
     assert [i.incident_id for i in ordered] == [FIRST_ID, SECOND_ID]
 
 
+def test_incident_repository__created_incident__updated_at_equals_observed_at(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _candidate()
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    assert result.incident.updated_at == T0
+    assert result.incident.resolved_at is None
+
+
+def test_incident_repository__repeated_upsert__updates_updated_at_alongside_last_seen_at(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID, SECOND_ID]))
+    candidate = _candidate()
+    fingerprint = _fingerprint(candidate)
+    incidents.upsert_open_incident(candidate, fingerprint, T0)
+
+    result = incidents.upsert_open_incident(_candidate(observed_at=T1), fingerprint, T1)
+
+    assert result.incident.updated_at == T1
+    assert result.incident.last_seen_at == T1
+    assert result.incident.resolved_at is None
+
+
+# --- IncidentRepository.resolve() (Day 7A) -----------------------------------
+
+
+def test_incident_repository_resolve__unknown_id__returns_none(
+    repositories: SimpleNamespace,
+) -> None:
+    assert repositories.incidents.resolve("does-not-exist", T1) is None
+
+
+def test_incident_repository_resolve__open_incident__transitions_to_resolved(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _candidate()
+    created = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    resolved = incidents.resolve(created.incident.incident_id, T1)
+
+    assert resolved is not None
+    assert resolved.status == IncidentStatus.RESOLVED
+    assert resolved.resolved_at == T1
+    assert resolved.updated_at == T1
+
+
+def test_incident_repository_resolve__open_incident__preserves_dedup_owned_fields(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _candidate()
+    created = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    resolved = incidents.resolve(created.incident.incident_id, T1)
+
+    assert resolved is not None
+    assert resolved.fingerprint == created.incident.fingerprint
+    assert resolved.device_id == created.incident.device_id
+    assert resolved.rule_ref == created.incident.rule_ref
+    assert resolved.affected_resource == created.incident.affected_resource
+    assert resolved.severity == created.incident.severity
+    assert resolved.evidence == created.incident.evidence
+    assert resolved.created_at == created.incident.created_at
+    assert resolved.last_seen_at == created.incident.last_seen_at
+    assert resolved.occurrence_count == created.incident.occurrence_count
+
+
+def test_incident_repository_resolve__already_resolved__returns_unchanged(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _candidate()
+    created = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+    incidents.resolve(created.incident.incident_id, T1)
+
+    second = incidents.resolve(created.incident.incident_id, T1 + (T1 - T0))
+
+    assert second is not None
+    assert second.resolved_at == T1
+    assert second.updated_at == T1
+
+
+def test_incident_repository_resolve__round_trips_via_get_by_id(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _candidate()
+    created = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    incidents.resolve(created.incident.incident_id, T1)
+    fetched = incidents.get_by_id(created.incident.incident_id)
+
+    assert fetched is not None
+    assert fetched.status == IncidentStatus.RESOLVED
+    assert fetched.resolved_at == T1
+    assert fetched.updated_at == T1
+
+
+# --- Ordering B: a committed ingestion update, then resolve (Day 7A, ------
+# --- Gate 7A-D) -------------------------------------------------------------
+
+
+def test_incident_repository_resolve__after_ingestion_update__resolves_the_advanced_incident(
+    repositories: SimpleNamespace,
+) -> None:
+    """Ingestion (upsert_open_incident) commits first and advances
+    occurrence_count/last_seen_at/updated_at to T1; resolve() at T2 (>= T1)
+    must then succeed against that advanced row, leaving the
+    ingestion-owned fields alone and touching only status/resolved_at/
+    updated_at."""
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID, SECOND_ID]))
+    candidate = _candidate()
+    fingerprint = _fingerprint(candidate)
+    created = incidents.upsert_open_incident(candidate, fingerprint, T0)
+    incidents.upsert_open_incident(_candidate(observed_at=T1), fingerprint, T1)
+
+    resolved = incidents.resolve(created.incident.incident_id, T1 + (T1 - T0))
+
+    assert resolved is not None
+    assert resolved.incident_id == created.incident.incident_id
+    assert resolved.status == IncidentStatus.RESOLVED
+    assert resolved.occurrence_count == 2
+    assert resolved.last_seen_at == T1
+    assert resolved.resolved_at == resolved.updated_at == T1 + (T1 - T0)
+
+    all_for_fingerprint = [i for i in incidents.list_all() if i.fingerprint == fingerprint]
+    assert len(all_for_fingerprint) == 1
+    assert all(i.status != IncidentStatus.OPEN for i in all_for_fingerprint)
+
+
+def test_incident_repository_resolve__stale_relative_to_ingestion_update__is_rejected(
+    repositories: SimpleNamespace,
+) -> None:
+    """After ingestion has advanced updated_at to T1 (via the same repeated-
+    upsert path as the test above), a resolve() attempt using an earlier
+    timestamp must be rejected (the same monotonicity guarantee the
+    repository-contract stale-timestamp tests already prove for a fresh
+    incident, now proven against one already advanced by ingestion) — the
+    incident must remain OPEN, unmutated, and no duplicate row created."""
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID, SECOND_ID]))
+    candidate = _candidate()
+    fingerprint = _fingerprint(candidate)
+    created = incidents.upsert_open_incident(candidate, fingerprint, T0)
+    incidents.upsert_open_incident(_candidate(observed_at=T1), fingerprint, T1)
+
+    with pytest.raises(ValueError):
+        incidents.resolve(created.incident.incident_id, T0)
+
+    stored = incidents.get_by_id(created.incident.incident_id)
+    assert stored is not None
+    assert stored.status == IncidentStatus.OPEN
+    assert stored.resolved_at is None
+    assert stored.occurrence_count == 2
+    assert stored.last_seen_at == T1
+    assert stored.updated_at == T1
+    assert len([i for i in incidents.list_all() if i.fingerprint == fingerprint]) == 1
+
+
+def test_incident_repository_resolve__naive_timestamp__is_rejected_without_mutation(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _candidate()
+    created = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    with pytest.raises(ValueError):
+        incidents.resolve(created.incident.incident_id, datetime(2026, 7, 18, 11, 0, 0))
+
+    stored = incidents.get_by_id(created.incident.incident_id)
+    assert stored is not None
+    assert stored.status == IncidentStatus.OPEN
+    assert stored.resolved_at is None
+
+
+def test_incident_repository_resolve__timestamp_earlier_than_updated_at__is_rejected(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _candidate()
+    created = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    with pytest.raises(ValueError):
+        incidents.resolve(created.incident.incident_id, T0 - (T1 - T0))
+
+    stored = incidents.get_by_id(created.incident.incident_id)
+    assert stored is not None
+    assert stored.status == IncidentStatus.OPEN
+    assert stored.resolved_at is None
+    assert stored.updated_at == T0
+
+
+def test_incident_repository_resolve__timestamp_exactly_equal_to_persisted_updated_at__is_accepted(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _candidate()
+    created = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    resolved = incidents.resolve(created.incident.incident_id, T0)
+
+    assert resolved is not None
+    assert resolved.status == IncidentStatus.RESOLVED
+    assert resolved.resolved_at == T0
+    assert resolved.updated_at == T0
+
+
 def test_incident_repository__delimiter_quote_backslash_and_unicode_values__survive_persistence(
     repositories: SimpleNamespace,
 ) -> None:
