@@ -352,16 +352,20 @@ project-scoped defense-in-depth cleanup step.
 no mobile/device-emulation project, no visual-regression snapshot testing.
 Deferred alongside Section 18's existing deferrals.
 
-**Verified counts, as of Day 7B** (each recorded separately — none of
+**Verified counts, as of Day 7C** (each recorded separately — none of
 these are interchangeable substitutes for another, see below):
 
 | Layer | Count | Location |
 |---|---|---|
-| Vitest (frontend) | 276 tests, 7 files (176 as of Day 6D/7A; see Section 7.3 for the Day 7B additions) | `frontend/src/**/*.test.{ts,tsx}` |
+| Vitest (frontend) | 276 tests, 7 files (unchanged since Day 7B; see Section 7.3) | `frontend/src/**/*.test.{ts,tsx}` |
 | Python `unittest` (orchestration helpers) | 19 tests, 1 file (unchanged) | `scripts/test_browser_e2e.py` |
-| Playwright (browser) | 1 test, 1 file (unchanged — still config-submission/refresh only, does not resolve an incident) | `frontend/e2e/config-submission-refresh.spec.ts` |
+| Playwright (browser) | 2 tests, 2 files (Day 7C adds incident resolution — see Section 7.4) | `frontend/e2e/config-submission-refresh.spec.ts`, `frontend/e2e/incident-resolution.spec.ts` |
 | pytest (backend) | 571 tests (431 non-`postgres` + 140 `postgres`, unchanged since Day 7A) | `backend/tests/` |
-| **Combined** | **867 automated tests** | — |
+| **Combined** | **868 automated tests** | — |
+
+`frontend/e2e/helpers.ts` (Day 7C) is a shared Playwright-layer helper
+module, not a scenario file — it is never counted as a Playwright test or
+test file.
 
 Day 7A's 101 new/extended backend tests (571 vs. Day 6D's 470) are covered
 in Section 20 below, by layer. Vitest, the orchestration helpers, and
@@ -372,7 +376,10 @@ browser suites unmodified against the migrated schema and expanded
 It adds 100 new Vitest tests (276 vs. Day 7A's 176 — see Section 7.3) and
 changes no backend code, so the orchestration helpers and Playwright are
 verified unmodified, exactly as Day 7A verified the frontend/browser suites
-unmodified against its own backend-only change.
+unmodified against its own backend-only change. **Day 7C adds the second
+Playwright scenario** (Section 7.4) and changes no backend or frontend
+product code, so backend `pytest` and frontend Vitest are both verified
+unmodified — only the Playwright layer and this document change.
 
 **Why these layers are not interchangeable.** Each proves something the
 others structurally cannot: Vitest proves frontend units, components, and
@@ -390,9 +397,11 @@ something no amount of mocked-`fetch` Vitest coverage or in-memory-repository
 pytest coverage can demonstrate by construction. pytest proves backend
 domain/application/persistence/API correctness in depth (every branch,
 every error path, every repository conformance case) far more cheaply than
-a browser ever could, which is exactly why the browser suite stays at one
-test — it exists to prove wiring, not to re-prove business logic already
-covered exhaustively at the layers below it.
+a browser ever could, which is exactly why the browser suite stays at exactly
+two tests as of Day 7C (one per vertical slice proven end to end —
+configuration submission and incident resolution) — it exists to prove
+wiring, not to re-prove business logic already covered exhaustively at the
+layers below it.
 
 ---
 
@@ -491,6 +500,128 @@ Adds 100 new/extended Vitest tests (276 vs. Day 7A's 176) across the same
   incorrect by design, so the test was renamed and its expectation updated
   to assert both the incoming and the retained current-only incident are
   present — not a behavior regression, a corrected assumption.
+
+---
+
+### 7.4 Day 7C — Browser-Driven Incident Resolution
+
+Adds the second Playwright scenario, `frontend/e2e/incident-resolution.spec.ts`
+(`"resolves an OPEN incident through real HTTP and preserves the RESOLVED
+state after reload"`), proving the Day 7A/7B incident-resolution vertical
+slice through the same real-Chromium/real-`vite preview`/real-FastAPI/
+real-PostgreSQL path Section 7.2 already established. No backend or
+frontend product code changed — this is proof of already-approved
+behavior, not new construction.
+
+**Configuration scenario (`config-submission-refresh.spec.ts`), refactored
+onto shared helpers (`frontend/e2e/helpers.ts`), binding coverage
+unchanged in substance:**
+
+- A successful initial `GET /incidents` is required, with no assumption
+  that the returned list is empty — the shared disposable database may
+  already hold an incident (including a `RESOLVED` one) from the other
+  independently runnable scenario.
+- The configuration is submitted through the real, visible form; the real
+  `POST`/refresh-`GET` request-count assertions (1/0 → 2/1 → 3/1 across
+  initial load, post-submission, and reload) are unchanged.
+- The resulting incident is scoped by stable identity
+  (`device_id`/`rule_ref`/`affected_resource`) **plus exact visible status
+  `OPEN`** — never a bare/unscoped article locator, never a page-wide
+  article-count assumption.
+- `Occurrences` is asserted as a positive integer (`/^[1-9]\d*$/`), not the
+  literal `"1"` — the shared disposable database may already hold an
+  `OPEN` incident with the same fingerprint from the other independently
+  runnable scenario, so a repeated submission may dedupe as an update
+  rather than a fresh creation; this scenario's binding claim is that the
+  persisted incident has a *valid* occurrence count, not a specific one —
+  exact deduplication counts remain covered by Section 13's
+  integration-level tests.
+- Reload persistence (a third real `GET /incidents`, the same matching
+  card still present) is unchanged.
+- Every other existing assertion (submission-success fields, incident
+  device/resource/rule/severity/status/evidence fields) is unchanged.
+
+**Resolution scenario (`incident-resolution.spec.ts`), binding coverage:**
+
+- Begins through the real dashboard and configuration form (`openDashboard`/
+  `submitInvalidCiscoConfiguration` helpers, shared with the configuration
+  scenario) — never a direct API call, never `page.evaluate(fetch(...))`.
+- Independently establishes its own `OPEN` incident; the real `POST`
+  response's `incidents_created`/`incidents_updated` split is asserted to
+  be one of exactly `(1, 0)` or `(0, 1)` (both non-negative integers,
+  summing to `1`) — never a fixed pair, since the other scenario may have
+  already created the same `OPEN` fingerprint.
+- Locates exactly one matching `OPEN` card via stable identity plus exact
+  status `OPEN` (`locateIncidentCard`, shared helper), and confirms it
+  exposes the native "Resolve incident" button, an `Updated` timestamp,
+  and no `Resolved` timestamp yet.
+- Installs `page.waitForRequest`/`page.waitForResponse` observation
+  *before* clicking Resolve. The observed request is asserted: `POST`
+  method; pathname matching `/^\/incidents\/([^/]+)\/resolve$/` (the
+  incident ID is captured from the match, never hardcoded); `postData()
+  === null` (no body transmitted); no `Content-Type` header; `Accept:
+  application/json` (headers read via `allHeaders()`, normalized to
+  lowercase keys). The response is asserted `200`.
+- The response body is parsed and asserted to be a direct (unwrapped)
+  incident object: non-empty `incident_id`, `status === "RESOLVED"`,
+  non-empty `updated_at`/`resolved_at`. The request's captured, encoded
+  incident-ID path segment is `decodeURIComponent`-decoded (failing
+  clearly, via an attached `cause`, if decoding is invalid) and asserted
+  equal to the response's `incident_id`.
+- The same logical card is re-located via stable identity plus exact
+  status `RESOLVED` (never reusing the stale `OPEN`-filtered locator —
+  status changes invalidate it). Asserts: `"RESOLVED"` visible; the
+  "Resolve incident" button count is `0`; the `Updated`/`Resolved`
+  `<time>` elements' `datetime` attributes equal the response's
+  `updated_at`/`resolved_at` (never a locale-formatted string); the
+  dashboard's `Refresh`/`Submit configuration` controls remain visible.
+- Asserts the `GET /incidents` request count is identical immediately
+  before and after the resolution completes (measured only once the
+  `RESOLVED` UI state has already been awaited, never via a sleep) —
+  proving the UI applied the direct POST response rather than triggering
+  an automatic list refresh (Day 7B's existing `resolveIncident` contract,
+  proven here at the browser level for the first time).
+- Reloads the page, requires the following real `GET /incidents` to
+  succeed, re-locates the same card by identity plus exact status
+  `RESOLVED`, and re-asserts the same `Updated`/`Resolved` timestamps and
+  the continued absence of a "Resolve incident" button — proving the
+  resolution persisted in PostgreSQL, not merely in React state. No
+  article-order or page-wide-count assumption is made at any point. The
+  transient "Resolving…" state (already exhaustively covered by Vitest,
+  Section 7.3) is deliberately never asserted.
+
+**Shared helpers (`frontend/e2e/helpers.ts`).** Playwright-test-layer-only,
+no mutable module-level state: `openDashboard`, `submitInvalidCiscoConfiguration`,
+`locateIncidentCard(page, identity, status)` (proves exactly one match
+before returning; `locateOpenIncidentCard` is a thin wrapper for the
+exact-`OPEN` case), `fieldValue`/`fieldTime`, and
+`trackRequests`/`countMatching`/`waitForIncidentRefresh`/`waitForPost`. No
+generic E2E framework was created, and no production `data-testid` was
+added — every locator uses accessible roles/labels/text already present in
+`frontend/src/`.
+
+**Isolation verification.** Beyond the single-worker/serialized-discovery
+design (Section 7.2), isolation between the two scenarios was verified
+directly against the real orchestrated stack, in both possible execution
+directions plus the resolution scenario running alone:
+
+- The resolution scenario alone against a fresh database (1 test) — it
+  creates, resolves, and reload-verifies its own incident with no
+  configuration scenario present at all.
+- The resolution scenario discovered before the configuration scenario
+  (2 tests) — the configuration scenario's own submission then runs
+  against a database that already holds a historical `RESOLVED` incident
+  with the same identity, and correctly creates a new `OPEN` recurrence
+  (the same recurrence behavior already proven at the repository level by
+  Gate 7A-D's tests, Section 20) rather than colliding with the resolved
+  row.
+- The standard discovery order, configuration scenario first (2 tests) —
+  the resolution scenario's own submission dedupes against the
+  already-`OPEN` incident the configuration scenario left behind, then
+  resolves only that incident.
+
+All three runs passed with cleanup verified. No test ordering dependency
+exists in either direction, and no cleanup logic runs between scenarios.
 
 ---
 

@@ -45,12 +45,114 @@ For each task:
 
 ## Current Phase
 
-**Day 7B — Frontend incident-resolution vertical slice (implemented across
-gates 7B-A/7B-B/7B-C/7B-D/7B-E, all approved, awaiting commit/CI approval).**
+**Day 7C — Browser-driven incident-resolution vertical slice (implemented
+across gates 7C-A/7C-B, both approved, awaiting commit/CI approval).**
+
+Day 7C adds the second Playwright Chromium scenario, proving the
+incident-resolution vertical slice (Day 7A backend, Day 7B frontend) through
+a real browser: real Chromium -> the built React frontend served by `vite
+preview` -> cross-origin HTTP -> real FastAPI -> real PostgreSQL. No
+frontend or backend product code changed — this phase is Playwright-and-
+documentation-only.
+
+- **`frontend/e2e/incident-resolution.spec.ts`** — `"resolves an OPEN
+  incident through real HTTP and preserves the RESOLVED state after
+  reload"`. Loads the dashboard, establishes an `OPEN` incident by
+  submitting the known invalid `spine-01` Cisco IOS-XE configuration
+  through the real, visible configuration form (never a direct API call),
+  and asserts the real `201` POST response reports a valid
+  `incidents_created`/`incidents_updated` split — exactly `(1, 0)` or
+  `(0, 1)`, never a fixed pair, since the shared disposable database may
+  already hold an `OPEN` incident with the same fingerprint from the other
+  independently runnable scenario. Locates the resulting incident by
+  stable identity (`device_id`/`rule_ref`/`affected_resource`) **plus
+  exact visible status `OPEN`**, confirms it exposes the native "Resolve
+  incident" button, and clicks it. Installs `page.waitForRequest`/
+  `waitForResponse` observers *before* the click and asserts the real
+  request: `POST` method, pathname matching
+  `/incidents/{encoded-id}/resolve`, `request.postData() === null` (no
+  body), no `Content-Type` header, `Accept: application/json` — and the
+  real `200` response: a direct (unwrapped) incident object with
+  non-empty `incident_id`, `status === "RESOLVED"`, and non-empty
+  `updated_at`/`resolved_at`. The observed request's encoded incident-ID
+  path segment is `decodeURIComponent`-decoded and asserted equal to the
+  response's `incident_id` — the ID is never hardcoded, only observed.
+  Re-locates the same card by identity **plus exact status `RESOLVED`**
+  (never reusing the stale `OPEN`-filtered locator) and asserts the
+  "Resolve incident" button is gone, and that the card's `Updated`/
+  `Resolved` `<time>` elements' `datetime` attributes equal the response's
+  `updated_at`/`resolved_at` (never a locale-formatted string). Asserts
+  the `GET /incidents` request count is unchanged between the submission
+  refresh and the completed resolution — proving the UI rendered the
+  direct POST response rather than triggering an automatic list refresh.
+  Reloads the page, waits for the real `GET /incidents` that follows, and
+  re-asserts the same persisted `RESOLVED` card (same timestamps, no
+  "Resolve incident" button) — proving the resolution survived in
+  PostgreSQL, not merely in React state. The transient "Resolving…" label
+  (already covered by Vitest) is deliberately never asserted.
+- **`frontend/e2e/helpers.ts`** (new) — Playwright-test-layer-only shared
+  helpers used by both scenarios: `openDashboard` (real initial
+  `GET /incidents`, dashboard/form readiness — no empty-database
+  assumption), `submitInvalidCiscoConfiguration` (real form fill + submit,
+  real POST/refresh-GET observation), `locateIncidentCard(page, identity,
+  status)` (matches stable identity fields **and** an exact visible
+  status, asserting exactly one match before returning — never a bare
+  `getByRole("article")`, never `.first()` on an unproven locator, never a
+  production `data-testid`), `locateOpenIncidentCard` (a thin wrapper over
+  the above for the exact-`OPEN` case), `fieldValue`/`fieldTime` (semantic
+  `<dt>`/`<dd>`/`<time>` lookups), and `trackRequests`/`countMatching`/
+  `waitForIncidentRefresh`/`waitForPost` (pure network observation, never
+  interception or fulfillment). No mutable module-level state.
+- **`frontend/e2e/config-submission-refresh.spec.ts`** (refactored onto the
+  shared helpers above, behavior otherwise unchanged) — no longer asserts
+  the dashboard starts with `"No incidents detected."` (the shared
+  disposable database may already hold an incident, including a
+  `RESOLVED` one, left by the other independently runnable scenario) and
+  no longer assumes the page contains exactly one `<article>` (it now
+  locates its own incident via `locateOpenIncidentCard` — stable identity
+  plus exact status `OPEN`). `Occurrences` is now asserted as a positive
+  integer (`/^[1-9]\d*$/`) rather than the exact literal `"1"`, since both
+  independently runnable browser scenarios may submit against the same
+  `spine-01`/`policy-acl-external-in` fingerprint and dedupe against each
+  other's `OPEN` row — occurrence_count is not this scenario's binding
+  claim; exact deduplication counts remain covered by lower-level
+  unit/integration tests. Every other existing assertion (real POST/GET
+  observation and counts, submission-success fields, incident
+  device/resource/rule/severity/status/evidence fields, reload
+  persistence) is unchanged.
+- **Test isolation, verified directly across three real orchestrated
+  runs** (not merely inferred from `workers: 1`): the resolution scenario
+  alone against a fresh database (1 test, passed); the resolution
+  scenario running before the configuration scenario, so the
+  configuration scenario's own submission creates a new `OPEN` recurrence
+  against a database that already holds a historical `RESOLVED` incident
+  with the same identity (2 tests, passed); and the standard discovery
+  order, configuration scenario first (2 tests, passed). Both scenarios
+  independently establish their own `OPEN` incident through the UI and
+  select it by stable identity plus exact lifecycle status — a historical
+  `RESOLVED` row is always excluded when locating an `OPEN` target, and a
+  current `OPEN` row is always excluded when locating the persisted
+  `RESOLVED` target. No raw SQL, test-only endpoint, database truncation,
+  or hardcoded execution-order dependency was introduced.
+- **`scripts/browser_e2e.py`, `scripts/test_browser_e2e.py`,
+  `frontend/playwright.config.ts`, `docker-compose.yml`, and all five CI
+  jobs are unchanged.** `npm run test:e2e:direct` already discovers every
+  `*.spec.ts` file under `frontend/e2e/` with no file-path argument, and
+  `workers: 1`/`fullyParallel: false` already serialize both scenarios
+  against the one orchestrated stack — no orchestrator or configuration
+  change was needed to add the second scenario.
+
+Verified automated-test inventory as of Day 7C: **571** backend `pytest`
+tests (431 non-`postgres` + 140 `postgres`, unchanged since Day 7A/7B —
+Day 7C is browser-test-and-documentation-only), **276** frontend Vitest
+tests (7 files, unchanged since Day 7B), **19** Python orchestration-helper
+tests (1 file, unchanged), **2** Playwright browser tests (2 files —
+configuration-submission/refresh, and incident resolution) — **868**
+automated tests combined.
 
 Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, Day 4A, Day 4B1, Day 4B2,
-Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B, Day 6C, Day 6D, and Day 7A are
-complete and approved. Day 7A added the first incident-lifecycle mutation
+Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B, Day 6C, Day 6D, Day 7A, and Day 7B
+are complete and approved. Day 7A added the first incident-lifecycle mutation
 (`OPEN -> RESOLVED`) end to end through the backend only (domain
 invariants/`Incident.resolve(at)`, `ResolveIncidentService`,
 `POST /incidents/{incident_id}/resolve`, real-PostgreSQL recurrence/
@@ -319,7 +421,10 @@ counted as part of the Vitest file total; still covers configuration
 submission and refresh only, does not resolve an incident — a browser-driven
 resolution scenario is deferred to Day 7C), **571** backend `pytest` tests
 (431 non-PostgreSQL + 140 PostgreSQL, unchanged since Day 7A — Day 7B is
-frontend-only) — **867** automated tests combined.
+frontend-only) — **867** automated tests combined. **Day 7C adds the
+deferred browser-driven resolution scenario** — see "Current Phase" above
+for the current, superseding **868**-test inventory (Playwright now 2
+files/tests, everything else unchanged).
 
 **Still prohibited**: additional vendors, vendor autodetection, file upload,
 configuration history, device inventory, `GET /devices`, incident
@@ -333,9 +438,10 @@ telemetry, WebSockets/polling, a frontend Docker image or Compose service,
 production deployment, and cloud infrastructure. **A frontend resolve
 control now exists as of Day 7B** — a "Resolve incident" button on every
 exact-`OPEN` incident card, calling the same Day 7A endpoint; see "Current
-Phase" above for the full detail. A browser (Playwright) resolution
-scenario does not exist yet — Day 7B is Vitest-only; a future Day 7C may add
-one. Within browser testing specifically, Firefox/WebKit projects,
+Phase" above for the full detail. **A browser (Playwright) resolution
+scenario now exists as of Day 7C** — see "Current Phase" above for the full
+detail; it is no longer deferred. Within browser testing specifically,
+Firefox/WebKit projects,
 mobile/device-emulation projects, visual-regression snapshot testing, and
 accessibility-auditing libraries remain out of scope. All of these are
 later days.
@@ -842,8 +948,9 @@ snapshot testing, accessibility-auditing libraries, a frontend Docker image
 or Compose service, production deployment, and cloud infrastructure remain
 so. **A frontend resolve control exists as of Day 7B** — the third frontend
 vertical slice (Day 6B: incident list; Day 6C: configuration submission;
-Day 7B: incident resolution) — see "Current Phase" above. A browser
-(Playwright) resolution scenario remains deferred to a future Day 7C.
+Day 7B: incident resolution) — see "Current Phase" above. **A browser
+(Playwright) resolution scenario now exists as of Day 7C** — see "Current
+Phase" above for the full detail; it is no longer deferred.
 All remaining items are later days, against the domain model, architecture,
 and ports already documented, with tests written first per the Development
 Rules above.

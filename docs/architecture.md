@@ -1276,8 +1276,11 @@ scripts/browser_e2e.py
   → release the frontend-port reservation, start `vite preview` directly
     through node (never npm)
   → wait for GET / to return 200
-  → run the one Playwright test, PLAYWRIGHT_BASE_URL == the frontend
-    origin, META_RNE_CORS_ALLOWED_ORIGINS == the same origin
+  → run the Playwright suite (Section 15.3, Day 7C: two scenarios,
+    discovered from frontend/e2e/*.spec.ts with no file-path argument —
+    adding the second scenario required no change here),
+    PLAYWRIGHT_BASE_URL == the frontend origin,
+    META_RNE_CORS_ALLOWED_ORIGINS == the same origin
   → terminate the preview process (bounded, cross-platform)
   → docker compose down --volumes --remove-orphans (always, in `finally`)
   → verify no project-scoped container or volume remains
@@ -1290,25 +1293,110 @@ reuses it; only `db` and `api` run under Docker, while the frontend runs as
 a plain `vite preview` Node process on the host, matching how a developer
 would actually run it locally.
 
-**Observation, never fulfillment.** The Playwright spec
-(`frontend/e2e/config-submission-refresh.spec.ts`) counts and asserts on
-real requests/responses (`page.on("request")`, `page.waitForResponse()`) —
-it never calls `page.route()` to intercept or fulfill an API response. Every
-assertion (the `201` POST body, the refreshed incident list, the reload
-persistence) reflects what the real backend and real database actually
-returned.
+**Observation, never fulfillment.** Both Playwright specs
+(`frontend/e2e/config-submission-refresh.spec.ts`, and, as of Day 7C,
+`frontend/e2e/incident-resolution.spec.ts`, Section 15.3) count and assert
+on real requests/responses (`page.on("request")`,
+`page.waitForRequest()`/`page.waitForResponse()`) — neither ever calls
+`page.route()` to intercept or fulfill an API response. Every assertion
+(POST/response bodies, refreshed incident lists, reload persistence)
+reflects what the real backend and real database actually returned.
 
 **One worker, by design.** The suite runs with exactly one Playwright
 worker against exactly one disposable database populated by exactly one
-idempotently-seeded policy (Section 11.2) — there is no proof in Day 6D
-that two workers could safely share one fresh database concurrently, so no
-such claim is made or relied upon.
+idempotently-seeded policy (Section 11.2) — there is no proof that two
+workers could safely share one fresh database concurrently, so no such
+claim is made or relied upon. As of Day 7C, this single-worker execution
+is **not** the sole isolation mechanism between the suite's two scenarios
+— see Section 15.3's "Isolation" subsection for the actual guarantee
+(stable-identity-plus-exact-lifecycle-status card selection), which holds
+regardless of worker count or discovery order, and was verified directly
+under both possible execution orders, not merely inferred from
+`workers: 1`.
 
 **Scope, explicitly bounded.** Day 6D is Chromium only (no Firefox/WebKit
 project), no mobile/device-emulation project, and no visual-regression
 snapshot testing. It is distinct from, and does not anticipate the design
 of, any future multi-browser suite, visual-regression suite, or production-
 deployment pipeline — none of those are designed here.
+
+### 15.3 Second Browser Scenario: Incident Resolution (Day 7C, binding)
+
+Day 7C adds a second Playwright scenario
+(`frontend/e2e/incident-resolution.spec.ts`) against the **same**
+orchestrated stack Section 15.2 already builds — no new Compose service,
+no second orchestration invocation, no change to
+`scripts/browser_e2e.py`/`scripts/test_browser_e2e.py`/
+`frontend/playwright.config.ts`. `npm run test:e2e:direct` (`playwright
+test`, no file-path argument) already discovers every `*.spec.ts` file
+under `frontend/e2e/`, and `workers: 1`/`fullyParallel: false` already
+serialize whatever it discovers — adding a second file changed the number
+of tests the existing invocation runs, not the invocation itself.
+
+```
+UI submission (ConfigurationSubmissionForm)
+  → real POST /devices/spine-01/config → establishes/updates one OPEN
+    incident (Section 9's existing dedup contract — no new behavior)
+   │
+   ▼
+UI resolution (IncidentCard's "Resolve incident" button)
+  → real POST /incidents/{incident_id}/resolve (Section 10.2/11.3 —
+    unchanged endpoint) → no request body, Accept: application/json
+   │
+   ▼
+frontend applies the POST response directly (useIncidents.resolveIncident,
+Day 7B) — the returned IncidentResponse replaces the matching array
+element; no GET /incidents is issued as a consequence of resolving
+   │
+   ▼
+page.reload() → real GET /incidents → confirms the RESOLVED state was
+persisted in PostgreSQL, not merely held in React state
+```
+
+Every step above reuses existing, unchanged product behavior (Day 7A
+backend, Day 7B frontend) — Day 7C adds no new endpoint, no new frontend
+state, and no new database write path; it is proof, not construction.
+
+**Isolation.** The two scenarios share one disposable PostgreSQL database
+for the lifetime of one `playwright test` invocation (Section 15.2's
+single orchestrated run). Neither scenario relies on the other's absence
+or on running in a particular order:
+
+- Each scenario independently establishes its own `OPEN` incident by
+  submitting through the real UI form — never a direct API call, never
+  raw SQL, never a test-only backend endpoint, never database truncation.
+- Incident cards are selected through **stable identity fields
+  (`device_id`/`rule_ref`/`affected_resource`) plus an exact visible
+  lifecycle status** (`OPEN` or `RESOLVED`), never a bare/unscoped article
+  locator and never a page-wide article count. A historical `RESOLVED`
+  row is therefore always excluded when a scenario is locating its `OPEN`
+  target, and a current `OPEN` row (e.g. one the other scenario is
+  mid-flow with) is always excluded when locating a persisted `RESOLVED`
+  target.
+- Because `ux_incidents_open_fingerprint` (Section 9/11.3) excludes any
+  `RESOLVED` row, a scenario that finds the shared `spine-01`/
+  `policy-acl-external-in` fingerprint already `RESOLVED` creates a
+  **new** `OPEN` recurrence when it submits (the same recurrence behavior
+  Section 11.3's Gate 7A-D tests already proved at the repository level)
+  rather than colliding with the historical row — this is what makes
+  "historical RESOLVED incident" a safe, handled case rather than an edge
+  case requiring cleanup.
+- No cleanup logic runs between scenarios, and no scenario's assertions
+  depend on the other scenario having run, having not run, or having run
+  in a particular order.
+
+This was verified directly against the real stack, not merely reasoned
+about: the resolution scenario alone against a fresh database; the
+resolution scenario discovered before the configuration scenario (so the
+configuration scenario's own submission runs against a database that
+already holds a historical `RESOLVED` incident with the same identity);
+and the standard discovery order (configuration scenario first). All
+three real orchestrated runs passed with cleanup verified.
+
+**No production or contract change.** Day 7C changes no
+`frontend/src/`/`backend/` file and no API contract
+(`docs/frontend-api-contract.md` is unchanged) — every request/response
+shape Section 15.3 exercises was already established by Day 7A/7B.
 
 ---
 

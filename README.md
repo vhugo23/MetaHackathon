@@ -1274,9 +1274,8 @@ appended after the incoming response's own incidents, in its prior order.
 one incident refresh, independent of any pending resolution. There is no
 confirmation modal, no bulk resolution, no acknowledgment/reopening/
 assignment control, and no `GET /incidents` call anywhere in the resolution
-path itself. The existing Playwright browser test still covers only
-configuration submission and refresh — it does not exercise resolution;
-that remains a future Day 7C scenario.
+path itself. **The Day 7B-era note that the browser test doesn't exercise
+resolution is superseded by Day 7C below.**
 
 Frontend verification, from `frontend/`:
 
@@ -1293,7 +1292,86 @@ Verified totals as of Day 7B: **571** backend `pytest` tests (431
 non-`postgres` + 140 `postgres`-marked, unchanged since Day 7A), **276**
 frontend Vitest tests across 7 files, **19** Python orchestration-helper
 tests, **1** Playwright browser test (still configuration-submission/
-refresh only) — **867 automated tests combined**.
+refresh only) — **867 automated tests combined**. **Superseded by Day 7C
+below.**
+
+### Current Day 7C scope
+
+Adds the second Playwright Chromium scenario, proving the incident-
+resolution vertical slice (Day 7A backend, Day 7B frontend) through a real
+browser end to end. No frontend or backend product code changed — this
+phase is Playwright-and-documentation-only.
+
+**Real browser path exercised:**
+
+1. Load the dashboard through Chromium.
+2. Submit the invalid Cisco IOS-XE configuration (the same `spine-01`
+   fixture the configuration-submission scenario uses) through the real,
+   visible configuration form.
+3. Locate the matching `OPEN` incident by stable identity
+   (`device_id`/`rule_ref`/`affected_resource`) plus exact visible status
+   `OPEN`.
+4. Click "Resolve incident".
+5. Observe the real, no-body `POST /incidents/{incident_id}/resolve`
+   request (`Accept: application/json`, no `Content-Type`, `postData() ===
+   null`).
+6. Render the direct persisted `RESOLVED` response locally — no
+   `GET /incidents` refresh occurs as a result of resolving.
+7. Reload the page and confirm the `RESOLVED` state, with its `Updated`/
+   `Resolved` timestamps, survived in PostgreSQL.
+
+**Both Playwright scenarios, after Day 7C:**
+
+- `frontend/e2e/config-submission-refresh.spec.ts` — configuration
+  submission -> incident refresh -> reload persistence (unchanged
+  binding behavior; see Day 6D above).
+- `frontend/e2e/incident-resolution.spec.ts` (new) — establishes an `OPEN`
+  incident through the UI, resolves it through the real "Resolve incident"
+  control, and confirms the persisted `RESOLVED` state survives a reload.
+
+**Isolation.** The two scenarios share one disposable PostgreSQL database
+for the whole `playwright test` invocation (one Compose stack, one
+orchestrated run — see Day 6D's `scripts/browser_e2e.py`, unchanged).
+Neither scenario assumes execution order or the other's absence:
+
+- The dashboard's initial state is never assumed empty — only that the
+  initial `GET /incidents` succeeds.
+- Neither scenario assumes the page contains exactly one `<article>`.
+- Every incident card is located by stable identity fields **plus an
+  exact visible lifecycle status** (`OPEN` or `RESOLVED`), so a historical
+  `RESOLVED` row is always excluded when locating an `OPEN` target, and a
+  current `OPEN` row is always excluded when locating a persisted
+  `RESOLVED` target.
+- `Occurrences` (configuration-submission scenario) is asserted as a
+  positive integer, not a fixed literal, since both scenarios may submit
+  against the same `spine-01`/`policy-acl-external-in` fingerprint and
+  dedupe against each other's `OPEN` row.
+
+This isolation was verified directly (not merely inferred from
+`workers: 1`) across three real orchestrated runs: the resolution scenario
+alone against a fresh database; the resolution scenario running before the
+configuration scenario (so the configuration scenario's own submission
+creates a new `OPEN` recurrence against an already-`RESOLVED` historical
+incident); and the standard discovery order. All three passed with cleanup
+verified.
+
+Frontend verification, from `frontend/`:
+
+```bash
+npm ci
+npm run format:check
+npm run lint
+npm run typecheck
+npm test -- --run
+npm run build
+```
+
+Verified totals as of Day 7C: **571** backend `pytest` tests (431
+non-`postgres` + 140 `postgres`-marked, unchanged since Day 7A/7B), **276**
+frontend Vitest tests across 7 files (unchanged since Day 7B), **19** Python
+orchestration-helper tests (unchanged), **2** Playwright browser tests (2
+files: configuration-submission/refresh, and incident resolution) — **868
+automated tests combined**. No third Playwright scenario exists.
 
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 
@@ -1602,3 +1680,44 @@ committed — see CLAUDE.md's "Current Phase". A Playwright resolution
 scenario, incident acknowledgment/reopening/assignment/comments, bulk
 resolution, status filtering, and authentication remain later-day scope;
 the existing five CI jobs are unchanged, and no sixth job was added.
+
+**Day 7C — Browser-Driven Incident-Resolution Vertical Slice.** Adds the
+second Playwright Chromium scenario
+(`frontend/e2e/incident-resolution.spec.ts`), proving the Day 7A/7B
+incident-resolution vertical slice through a real Chromium browser, a real
+production `vite preview` build, real cross-origin HTTP, a real FastAPI
+process, and a real, disposable PostgreSQL database — establishing an
+`OPEN` incident through the real configuration-submission form, resolving
+it through the real "Resolve incident" control, observing the real
+no-body `POST /incidents/{incident_id}/resolve` request and its direct
+`RESOLVED` response, and confirming that state survives a page reload,
+all without ever mocking, intercepting, or fulfilling a network response.
+A small shared Playwright-layer helper module
+(`frontend/e2e/helpers.ts`) was extracted so both scenarios share
+identical dashboard-loading/submission/card-location logic; the existing
+configuration-submission scenario was refactored onto it with two
+behavior-preserving relaxations forced by the two scenarios now sharing
+one disposable database across a single orchestrated run — it no longer
+assumes the dashboard starts empty, and it now locates its own incident by
+stable identity plus exact status `OPEN` instead of assuming the page
+contains exactly one `<article>` (its `Occurrences` assertion is
+correspondingly a positive-integer check, not a fixed literal). This
+isolation was verified directly, not merely inferred from `workers: 1`:
+the resolution scenario alone against a fresh database, the resolution
+scenario running before the configuration scenario (exercising a
+historical-`RESOLVED`-then-new-`OPEN`-recurrence path), and the standard
+discovery order — all three real orchestrated runs passed with cleanup
+verified. No frontend or backend product code, API contract, browser
+orchestrator, Playwright configuration, Docker Compose, or CI workflow
+changed. See "Current Day 7C scope" above for the full detail. Test
+totals as of Day 7C: 276 Vitest tests (7 files, unchanged), 19 Python
+orchestration-helper tests (1 file, unchanged), 2 Playwright browser tests
+(2 files — configuration-submission/refresh, and incident resolution),
+571 backend `pytest` tests (431 non-`postgres` + 140 `postgres`-marked,
+unchanged since Day 7A/7B) — **868 automated tests combined**. Day 7C is
+implemented across two reviewable gates (7C-A/7C-B), both approved, and
+passes the full backend/frontend/browser verification matrix, but has not
+yet been committed — see CLAUDE.md's "Current Phase". Incident
+acknowledgment/reopening/assignment/comments, bulk resolution, status
+filtering, and authentication remain later-day scope; the existing five
+CI jobs are unchanged, and no sixth job was added.
