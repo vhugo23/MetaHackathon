@@ -9,11 +9,15 @@ from typing import Any
 
 import pytest
 
+from meta_rne.adapters.arista import AristaAdapter
+from meta_rne.adapters.cisco import CiscoAdapter
 from meta_rne.api.clock import InvalidClockError
 from meta_rne.api.dependencies import (
     build_lazy_sqlalchemy_unit_of_work_factory,
+    build_production_adapter_registry,
     seed_slice1_policies,
 )
+from meta_rne.domain.errors import UnsupportedVendorError
 from meta_rne.persistence.errors import PolicySeedConflictError
 from meta_rne.persistence.memory.store import InMemoryStore
 from meta_rne.persistence.memory.unit_of_work import InMemoryUnitOfWork
@@ -265,3 +269,33 @@ def test_lazy_sqlalchemy_unit_of_work_factory__no_database_url__raises_runtime_e
 
     with pytest.raises(RuntimeError, match="DATABASE_URL"):
         factory()
+
+
+# --- build_production_adapter_registry (Gate 8A-C) -------------------------
+
+
+def test_build_production_adapter_registry__resolves_cisco() -> None:
+    registry = build_production_adapter_registry()
+
+    adapter = registry.resolve("cisco-ios-xe")
+
+    assert isinstance(adapter, CiscoAdapter)
+    assert adapter.vendor_id == "cisco-ios-xe"
+
+
+def test_build_production_adapter_registry__resolves_arista() -> None:
+    registry = build_production_adapter_registry()
+
+    adapter = registry.resolve("arista-eos")
+
+    assert isinstance(adapter, AristaAdapter)
+    assert adapter.vendor_id == "arista-eos"
+
+
+def test_build_production_adapter_registry__rejects_unknown_vendor() -> None:
+    registry = build_production_adapter_registry()
+
+    with pytest.raises(UnsupportedVendorError) as exc_info:
+        registry.resolve("juniper-junos")
+
+    assert exc_info.value.vendor == "juniper-junos"

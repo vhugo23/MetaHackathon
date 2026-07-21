@@ -1721,3 +1721,73 @@ yet been committed — see CLAUDE.md's "Current Phase". Incident
 acknowledgment/reopening/assignment/comments, bulk resolution, status
 filtering, and authentication remain later-day scope; the existing five
 CI jobs are unchanged, and no sixth job was added.
+
+**Day 8A — Multi-Vendor Configuration Support (Arista EOS).** Adds the
+platform's second vendor end to end, across six reviewable gates
+(8A-A through 8A-F, all approved). **Supported vendors are now Cisco
+IOS-XE and Arista EOS** — selectable from the same, single, vendor-neutral
+configuration-submission form; no second form, page, or route was added.
+
+**Architecture overview (unchanged shape, one more adapter):** vendor
+adapter (`CiscoAdapter` or `AristaAdapter`) → vendor-neutral
+`NormalizedConfiguration` → `PolicyEvaluator` (exact `applies_to ==
+device_id` matching, no wildcard) → `IncidentFactory` + atomic
+deduplicated upsert → the same incident dashboard and `GET /incidents`
+API. `AristaAdapter` (`backend/src/meta_rne/adapters/arista.py`) is a
+self-contained line-oriented parser — no import from or delegation to
+`CiscoAdapter` — implementing a narrow, explicitly-scoped EOS subset
+(hostname; interface/description/CIDR IP address/shutdown/`ip
+access-group`; named-only `ip access-list` with optional-or-implicit ACL
+sequence numbers; `router bgp`/`neighbor ... remote-as`), reusing the
+existing `ParseErrorCode` contract with no new member. The production
+`AdapterRegistry` now registers both adapters; `ConfigIngestionService`,
+`api/routes.py`, and `api/schemas.py` gained no vendor branch and no
+schema change.
+
+**Demo workflows:**
+
+- *Cisco*: submit a Cisco IOS-XE configuration for `spine-01` missing
+  `ACL-EXTERNAL-IN` inbound on `GigabitEthernet0/1` — the existing
+  `policy-acl-external-in` policy fires, producing one `OPEN` incident.
+- *Arista*: select "Arista EOS" in the same form, submit an EOS
+  configuration for `leaf-02` missing `ACL-EXTERNAL-IN` inbound on
+  `Ethernet1` — a second, independent, exact-match seeded policy,
+  `policy-acl-external-in-leaf-02` (`applies_to="leaf-02"`), fires through
+  the identical detection pipeline, producing its own `OPEN` incident.
+
+**Two device-specific policy rows, not one shared policy.** Both express
+the same logical required-ACL requirement and equivalent required-ACL
+semantics (`ACL-EXTERNAL-IN` inbound, `Medium` severity) — evaluated
+through the same, unmodified, vendor-neutral `PolicyEvaluator` — but
+remain two genuinely separate rows with their own `policy_id`/`applies_to`
+values. No wildcard (`"*"`) applicability was introduced.
+
+**Frontend.** `SupportedVendor` (`frontend/src/api/types.ts`) is now
+`"cisco-ios-xe" | "arista-eos"`; the vendor `<select>` renders both
+options with Cisco IOS-XE as the default; a real `useState`-backed
+handler replaces the previous no-op vendor-change handler; the selected
+vendor and the entered raw configuration text are both forwarded
+unchanged. `frontend/src/api/configurations.ts` and
+`frontend/src/hooks/useConfigurationSubmission.ts` required no code
+change — both were already generic over the request type.
+
+**Browser proof.** A third, focused Playwright Chromium scenario
+(`frontend/e2e/arista-configuration-submission.spec.ts`) proves the
+complete new wiring — real vendor selection, a real (never
+mocked/intercepted) `POST /devices/leaf-02/config` request and response,
+the resulting `OPEN` incident located by stable identity, and its
+survival across a real page reload against real PostgreSQL. The two
+existing Cisco scenarios (configuration submission, incident resolution)
+are unchanged. `frontend/e2e/helpers.ts`, `frontend/playwright.config.ts`,
+`scripts/browser_e2e.py`, `docker-compose.yml`, and all five CI jobs are
+unchanged.
+
+Verified totals as of Day 8A: **628** backend `pytest` tests (486
+non-`postgres` + 142 `postgres`-marked), **281** frontend Vitest tests (7
+files), **19** Python orchestration-helper tests (1 file, unchanged), **3**
+Playwright browser tests (3 files) — **931 automated tests combined**. All
+five existing CI-equivalent jobs (`ci`, `postgres-tests`, `compose-smoke`,
+`frontend`, `browser-e2e`) pass; none were added, removed, or modified.
+Policy CRUD, wildcard applicability, a third vendor, universal device
+applicability, authentication, and telemetry remain later-day scope, and
+complete EOS syntax coverage is not claimed.

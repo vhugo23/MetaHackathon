@@ -17,6 +17,7 @@ from typing import cast
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
+from meta_rne.adapters.arista import AristaAdapter
 from meta_rne.adapters.cisco import CiscoAdapter
 from meta_rne.adapters.registry import AdapterRegistry
 from meta_rne.domain.ports import UnitOfWork
@@ -25,7 +26,7 @@ from meta_rne.persistence.sqlalchemy.unit_of_work import SqlAlchemyUnitOfWork
 
 
 def build_production_adapter_registry() -> AdapterRegistry:
-    return AdapterRegistry([CiscoAdapter()])
+    return AdapterRegistry([CiscoAdapter(), AristaAdapter()])
 
 
 class _LazySqlAlchemyUnitOfWorkFactory:

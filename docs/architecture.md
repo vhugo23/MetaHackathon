@@ -260,7 +260,12 @@ interface VendorConfigAdapter:
   `ParseError` (resolving the vendor and parsing its content are two
   separate failure modes); the `api` layer translates it to HTTP 422 with
   `code: "unsupported_vendor"` (Section 12, Day 5B) — never 400.
-- First vertical slice: Cisco only. Arista is a later slice.
+- First vertical slice: Cisco only. **Arista EOS is now implemented as of
+  Day 8A** (`AristaAdapter`, `meta_rne.adapters.arista`) — a second,
+  independent adapter registered alongside `CiscoAdapter` in the
+  production `AdapterRegistry`, implementing the narrow EOS subset
+  documented in `CLAUDE.md`'s "Current Phase" — never sharing code with
+  `CiscoAdapter`. A third vendor remains unimplemented.
 
 ### 5.1 Cisco IOS-XE Parser Contract (representative, binding)
 
@@ -403,7 +408,11 @@ expected.
 No matching policy → zero violations. **Day 3B matches `applies_to`
 against `device_id` by exact string equality only** — `"*"` wildcard
 resolution (this section's opening diagram) is not implemented this
-phase; the Slice 1 policy applies only to `spine-01`. Violations are
+phase; the Slice 1 policy applies only to `spine-01`. **Day 8A adds a
+second, independent, exact-match policy scoped to `leaf-02`** (see Section
+18 below) — this remains unchanged exact-match evaluation, never a
+shared or wildcard-applicable policy; the diagram's `"*"` case is still
+unimplemented. Violations are
 returned in a deterministic order: `policies` tuple order, then each
 policy's `required_acls` tuple order — never re-sorted or
 set-deduplicated. `PolicyEvaluator` is pure domain/detection logic: plain
@@ -1454,7 +1463,11 @@ needs:
   below) — see `docs/frontend-api-contract.md` Section 7 and README.md's
   "Current Day 7B scope". No new infrastructure, Docker Compose service, or
   CI job was added for either Day 7A or Day 7B.
-- **Arista adapter** (Section 5) — Cisco only for Slice 1.
+- **Arista adapter** (Section 5) — Cisco only for Slice 1; **implemented as
+  of Day 8A** (see CLAUDE.md's "Current Phase"), registered in the
+  production `AdapterRegistry` alongside `CiscoAdapter` with no change to
+  `ConfigIngestionService`, `api/routes.py`, or `api/schemas.py`. A third
+  vendor remains later-slice scope.
 - **Configuration drift detection** (Section 8) and **telemetry/anomaly
   detection** (FR-05/FR-06) — wired in the next slice, using the same
   `UnitOfWork` and post-commit logging rule already established here.
@@ -1702,3 +1715,75 @@ Operator sees the incident with evidence + recommendation
 Drift (Section 8), telemetry/anomaly (not in this document's scope until
 a later slice), Arista, and the React dashboard are explicitly **not**
 part of this slice.
+
+---
+
+## 18. Multi-Vendor Configuration Support (Day 8A)
+
+Adds the platform's second vendor, Arista EOS, without changing the
+architecture established above — this section documents what changed and,
+more importantly, what deliberately did not.
+
+**Two adapters, one registry, no vendor branch downstream.**
+`CiscoAdapter` (Section 5.1) and `AristaAdapter`
+(`meta_rne.adapters.arista`) are both concrete `VendorConfigAdapter`
+implementations (Section 5) — independent modules, no shared code, no
+import from one into the other. The production `AdapterRegistry`
+(`build_production_adapter_registry`, `api/dependencies.py`) registers
+both:
+
+```python
+AdapterRegistry([CiscoAdapter(), AristaAdapter()])
+```
+
+`ConfigIngestionService`, `api/routes.py`, and `api/schemas.py` are
+**unchanged** — none contains a vendor-specific branch. Vendor resolution
+still flows entirely through the one existing `AdapterRegistry.resolve`
+call (Section 5); an unregistered vendor string still raises
+`UnsupportedVendorError` → HTTP 422 `unsupported_vendor`, unchanged.
+
+**Vendor-specific syntax terminates at the adapter boundary.** Both
+adapters parse their own vendor's raw CLI text into the identical
+`NormalizedConfiguration` shape (Section 6) — the same type, not a
+vendor-tagged variant. `AristaAdapter` implements a narrow, explicitly
+bounded EOS subset (hostname; `interface`/`description`/CIDR `ip
+address`/`shutdown`/`no shutdown`/`ip access-group ... in|out`; named-only
+`ip access-list` with optional-or-implicit ACL sequence numbers; `router
+bgp`/`neighbor ... remote-as`), reusing every existing `ParseErrorCode`
+value with no new member added — it makes no claim of complete Arista EOS
+coverage. Once normalized, `domain`, `detection`, `persistence`, and the
+REST API operate on the same vendor-neutral model regardless of which
+adapter produced it — nothing downstream of the adapter boundary can tell
+which vendor a given `NormalizedConfiguration` came from, by construction.
+
+**`Device.vendor` remains immutable.** `SqlAlchemyDeviceRepository`'s
+existing `_validate_transition` (unchanged) still rejects any attempt to
+change a stored device's vendor with `DeviceConflictError` — submitting a
+different vendor against an already-registered `device_id` is, and
+remains, a hard conflict, never a supported "vendor migration" path. The
+two demo devices (`spine-01`/Cisco, `leaf-02`/Arista) are therefore
+necessarily distinct devices, never the same `device_id` under two
+vendors.
+
+**Two exact-match, device-specific policies — not one shared policy.**
+`build_slice1_policies` (Section 11.2, name kept as accepted Day 4B2
+technical debt) now returns two `ConfigurationPolicy` rows: the original
+`policy-acl-external-in` (`applies_to="spine-01"`, `GigabitEthernet0/1`)
+and a new `policy-acl-external-in-leaf-02` (`applies_to="leaf-02"`,
+`Ethernet1`). Both express the same logical required-ACL requirement —
+`ACL-EXTERNAL-IN` inbound, `Medium` severity — but remain two genuinely
+separate rows, each seeded and retrieved independently. `PolicyEvaluator`
+(Section 7) is **unchanged**: still plain `applies_to == device_id`
+string equality, no wildcard, no shared-applicability mechanism. A
+missing-required-ACL condition on `leaf-02` therefore produces a real
+`OPEN` incident through the identical Section 9 pipeline Cisco already
+used — proven equivalent only at the semantic level (violation type, ACL
+name, direction, severity), never as full incident-object equality, since
+`device_id`/`rule_ref`/`affected_resource`/`incident_id`/`fingerprint`
+legitimately differ between the two policy rows.
+
+**No migration, no schema, no CI change.** The `devices`/
+`configuration_snapshots` vendor `CHECK` constraints already permitted
+`'arista-eos'` since migration `0001` (Day 1) — confirmed, not assumed,
+before this phase began. No new migration was written; no CI job was
+added, removed, or modified.

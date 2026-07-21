@@ -151,6 +151,20 @@ test("sends exactly {vendor, raw_config_text} in the body, preserved byte-for-by
   expect(Object.keys(body).sort()).toEqual(["raw_config_text", "vendor"]);
 });
 
+test("sends the widened arista-eos vendor value unchanged (Gate 8A-E)", async () => {
+  const fetchMock = stubResponse(validSubmissionResponse);
+  const rawConfigText = "hostname leaf-02\n!\ninterface Ethernet1\n   ip address 10.0.1.1/30\n!\n";
+
+  await submitDeviceConfiguration("leaf-02", {
+    vendor: "arista-eos",
+    raw_config_text: rawConfigText,
+  });
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  const body = JSON.parse(init.body as string) as Record<string, unknown>;
+  expect(body).toEqual({ vendor: "arista-eos", raw_config_text: rawConfigText });
+});
+
 // ---------------------------------------------------------------------------
 // no device_id or observed_at in the body
 // ---------------------------------------------------------------------------

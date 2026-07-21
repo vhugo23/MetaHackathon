@@ -1,6 +1,8 @@
 import { useState, type ChangeEvent, type FormEvent } from "react";
 import { useConfigurationSubmission } from "../hooks/useConfigurationSubmission";
-import type { ConfigurationSubmissionResponse } from "../api/types";
+import type { ConfigurationSubmissionResponse, SupportedVendor } from "../api/types";
+
+const DEFAULT_VENDOR: SupportedVendor = "cisco-ios-xe";
 
 const DEVICE_ID_ERROR_MESSAGE = "Enter a device ID.";
 const RAW_CONFIG_ERROR_MESSAGE = "Enter configuration text.";
@@ -15,6 +17,7 @@ export function ConfigurationSubmissionForm({
   const { state, submit } = useConfigurationSubmission({ onSuccess: onSubmissionSuccess });
 
   const [deviceId, setDeviceId] = useState("");
+  const [vendor, setVendor] = useState<SupportedVendor>(DEFAULT_VENDOR);
   const [rawConfigText, setRawConfigText] = useState("");
   const [deviceIdError, setDeviceIdError] = useState<string | null>(null);
   const [rawConfigError, setRawConfigError] = useState<string | null>(null);
@@ -38,10 +41,7 @@ export function ConfigurationSubmissionForm({
   }
 
   function handleVendorChange(event: ChangeEvent<HTMLSelectElement>) {
-    // Only one vendor is currently supported — this select exists to make
-    // that explicit, not to offer a real choice, so there is nothing to
-    // store beyond the fixed value already rendered.
-    void event;
+    setVendor(event.target.value as SupportedVendor);
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -64,7 +64,7 @@ export function ConfigurationSubmissionForm({
       return;
     }
 
-    submit(deviceId, { vendor: "cisco-ios-xe", raw_config_text: rawConfigText });
+    submit(deviceId, { vendor, raw_config_text: rawConfigText });
   }
 
   return (
@@ -96,8 +96,9 @@ export function ConfigurationSubmissionForm({
 
         <div className="form-field">
           <label htmlFor="configuration-vendor">Vendor</label>
-          <select id="configuration-vendor" value="cisco-ios-xe" onChange={handleVendorChange}>
+          <select id="configuration-vendor" value={vendor} onChange={handleVendorChange}>
             <option value="cisco-ios-xe">Cisco IOS-XE</option>
+            <option value="arista-eos">Arista EOS</option>
           </select>
         </div>
 

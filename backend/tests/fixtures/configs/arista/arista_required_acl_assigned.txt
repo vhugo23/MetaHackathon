@@ -1,0 +1,23 @@
+hostname leaf-02
+!
+interface Ethernet1
+   description Uplink to spine-01
+   ip address 10.0.1.1/30
+   ip access-group ACL-EXTERNAL-IN in
+   ip access-group ACL-EXTERNAL-OUT out
+   no shutdown
+!
+interface Ethernet2
+   description Downlink to leaf-03
+   shutdown
+!
+ip access-list ACL-EXTERNAL-IN
+   10 permit ip any any
+   deny ip any any
+!
+ip access-list ACL-EXTERNAL-OUT
+   permit ip any any
+!
+router bgp 65002
+   neighbor 10.0.1.2 remote-as 65001
+!

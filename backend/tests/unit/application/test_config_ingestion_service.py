@@ -12,10 +12,12 @@ genuine red-green-refactor, not retrofitted tests.
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from meta_rne.adapters.arista import AristaAdapter
 from meta_rne.adapters.cisco import CiscoAdapter
 from meta_rne.adapters.registry import AdapterRegistry
 from meta_rne.application.config_ingestion import ConfigIngestionService
@@ -29,13 +31,21 @@ from meta_rne.domain.config import (
     VendorType,
 )
 from meta_rne.domain.errors import ParseErrorCode, UnsupportedVendorError
-from meta_rne.domain.incident import IncidentSource
-from meta_rne.domain.policy import ConfigurationPolicy, RequiredAclRule, Severity
+from meta_rne.domain.incident import IncidentSource, IncidentStatus
+from meta_rne.domain.policy import ConfigurationPolicy, RequiredAclRule, Severity, ViolationType
 from meta_rne.domain.snapshot import compute_raw_text_hash
 from meta_rne.persistence.errors import DeviceConflictError, SnapshotAlreadyExistsError
 from meta_rne.persistence.memory.policy_repository import InMemoryConfigurationPolicyRepository
 from meta_rne.persistence.memory.store import InMemoryStore
 from meta_rne.persistence.memory.unit_of_work import InMemoryUnitOfWork
+from meta_rne.persistence.seeds import build_slice1_policies
+
+_ARISTA_FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "configs" / "arista"
+
+
+def _load_arista_fixture(name: str) -> str:
+    return (_ARISTA_FIXTURES_DIR / name).read_text()
+
 
 DEVICE_ID = "spine-01"
 T0 = datetime(2026, 7, 18, 10, 0, 0, tzinfo=UTC)
@@ -772,3 +782,68 @@ def test_failure__close_is_attempted_exactly_once_after_failure() -> None:
     assert counts.close == 1
     assert counts.commit == 0
     assert counts.rollback == 1
+
+
+# --- Cross-vendor detection semantics (Gate 8A-D) ---------------------------
+
+
+def test_cross_vendor__cisco_and_arista_devices__produce_equivalent_missing_acl_incidents() -> None:
+    """Proves spine-01 (Cisco) and leaf-02 (Arista) each traverse the exact
+    same ``ConfigIngestionService`` — no vendor branch — through two
+    distinct, exact-match device-specific policy rows
+    (``build_slice1_policies``) expressing the same logical required-ACL
+    requirement. Two distinct device IDs are used; no vendor is ever
+    submitted twice against one existing device. Only legitimately
+    equivalent semantic fields are compared for equality — device/policy/
+    resource/incident/fingerprint identity fields are proven DISTINCT
+    instead, since the two policy rows remain genuinely separate."""
+    store = InMemoryStore()
+    _seed_policies(store, *build_slice1_policies(created_at=T0))
+    registry = AdapterRegistry([CiscoAdapter(), AristaAdapter()])
+    ids = iter(["snap-spine-01", "snap-leaf-02"])
+    service = _make_service(store, registry=registry, snapshot_id_factory=lambda: next(ids))
+
+    cisco_result = service.ingest(
+        _command(
+            device_id="spine-01",
+            vendor="cisco-ios-xe",
+            raw_config_text=_MISSING_ACL_RAW_CONFIG,
+            observed_at=T0,
+        )
+    )
+    arista_result = service.ingest(
+        _command(
+            device_id="leaf-02",
+            vendor="arista-eos",
+            raw_config_text=_load_arista_fixture("arista_missing_required_acl.txt"),
+            observed_at=T0,
+        )
+    )
+
+    for result in (cisco_result, arista_result):
+        assert result.violations_detected == 1
+        assert result.incidents_created == 1
+        assert result.incidents_updated == 0
+
+    all_incidents = InMemoryUnitOfWork(store).incidents.list_all()
+    cisco_incident = next(i for i in all_incidents if i.device_id == "spine-01")
+    arista_incident = next(i for i in all_incidents if i.device_id == "leaf-02")
+
+    # Legitimately equivalent semantic fields.
+    for incident in (cisco_incident, arista_incident):
+        assert incident.source is IncidentSource.POLICY_VIOLATION
+        assert incident.status is IncidentStatus.OPEN
+        assert incident.severity == Severity.MEDIUM
+        assert incident.evidence.violation_type == ViolationType.MISSING_REQUIRED_ACL
+        assert incident.evidence.expected_acl_name == "ACL-EXTERNAL-IN"
+        assert incident.evidence.direction == AclDirection.IN
+        assert "ACL-EXTERNAL-IN" in incident.recommendation
+        assert "inbound" in incident.recommendation.lower()
+        assert incident.occurrence_count == 1
+
+    # Identity-bound fields are proven DISTINCT, never equal.
+    assert cisco_incident.device_id != arista_incident.device_id
+    assert cisco_incident.rule_ref != arista_incident.rule_ref
+    assert cisco_incident.affected_resource != arista_incident.affected_resource
+    assert cisco_incident.incident_id != arista_incident.incident_id
+    assert cisco_incident.fingerprint != arista_incident.fingerprint

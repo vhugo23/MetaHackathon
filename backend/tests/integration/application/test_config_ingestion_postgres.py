@@ -11,24 +11,28 @@ late application-layer failure.
 
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 from sqlalchemy.orm import Session
 
+from meta_rne.adapters.arista import AristaAdapter
 from meta_rne.adapters.cisco import CiscoAdapter
 from meta_rne.adapters.registry import AdapterRegistry
 from meta_rne.application.config_ingestion import ConfigIngestionService
 from meta_rne.application.models import IngestConfigurationCommand
 from meta_rne.detection.incident_factory import IncidentFactory
-from meta_rne.domain.config import AclDirection, VendorType
+from meta_rne.domain.config import AclDirection, NormalizedBgpNeighbor, VendorType
 from meta_rne.domain.incident import IncidentStatus
 from meta_rne.domain.policy import ConfigurationPolicy, RequiredAclRule, Severity
+from meta_rne.persistence.seeds import build_slice1_policies
 from meta_rne.persistence.sqlalchemy.unit_of_work import SqlAlchemyUnitOfWork
 
 pytestmark = pytest.mark.postgres
 
 DEVICE_ID = "spine-01"
+LEAF_DEVICE_ID = "leaf-02"
 T0 = datetime(2026, 7, 18, 10, 0, 0, tzinfo=UTC)
 T1 = T0 + timedelta(hours=1)
 
@@ -37,6 +41,12 @@ _MISSING_ACL_RAW_CONFIG = "hostname spine-01\n!\ninterface GigabitEthernet0/1\n!
 _MULTI_VIOLATION_RAW_CONFIG = (
     "hostname spine-01\n!\ninterface GigabitEthernet0/1\n!\ninterface GigabitEthernet0/2\n!\n"
 )
+
+_ARISTA_FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "configs" / "arista"
+
+
+def _load_arista_fixture(name: str) -> str:
+    return (_ARISTA_FIXTURES_DIR / name).read_text()
 
 
 def _policy_a() -> ConfigurationPolicy:
@@ -192,4 +202,86 @@ def test_config_ingestion_postgres__repeated_ingestion__advances_snapshot_and_up
     assert incidents[0].incident_id == first_incident.incident_id
     assert incidents[0].occurrence_count == 2
     assert incidents[0].status is IncidentStatus.OPEN
+    verify_uow.close()
+
+
+# --- Multi-vendor: Arista (Gate 8A-D) ----------------------------------------
+
+
+def test_config_ingestion_postgres__arista_vendor__persists_real_eos_derived_values(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    """Proves ``arista-eos`` persists through real PostgreSQL via the real
+    ``AristaAdapter`` — no seeded policy here, since this test proves
+    normalization/persistence only, not detection (that is the next test)."""
+    service = ConfigIngestionService(
+        unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(sqlalchemy_session_factory),
+        adapter_registry=AdapterRegistry([CiscoAdapter(), AristaAdapter()]),
+        snapshot_id_factory=lambda: "snap-leaf-02",
+    )
+
+    result = service.ingest(
+        IngestConfigurationCommand(
+            device_id=LEAF_DEVICE_ID,
+            vendor="arista-eos",
+            raw_config_text=_load_arista_fixture("arista_required_acl_assigned.txt"),
+            observed_at=T0,
+        )
+    )
+
+    assert result.normalized_config.hostname == "leaf-02"
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    device = verify_uow.devices.get_by_id(LEAF_DEVICE_ID)
+    assert device is not None
+    assert device.vendor == VendorType.ARISTA_EOS
+
+    snapshot = verify_uow.configuration_snapshots.get_by_id("snap-leaf-02")
+    assert snapshot is not None
+    assert snapshot.vendor == VendorType.ARISTA_EOS
+    assert snapshot.normalized_config.hostname == "leaf-02"
+    eth1 = next(i for i in snapshot.normalized_config.interfaces if i.name == "Ethernet1")
+    assert eth1.ip_address == "10.0.1.1/30"
+    assert eth1.acl_in == "ACL-EXTERNAL-IN"
+    assert snapshot.normalized_config.routing.bgp_neighbors == (
+        NormalizedBgpNeighbor(neighbor_ip="10.0.1.2", remote_as=65001),
+    )
+    verify_uow.close()
+
+
+def test_config_ingestion_postgres__arista_leaf02_policy__creates_real_open_incident(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    """Seeds both Gate 8A-D policies, then proves the exact-match leaf-02
+    policy fires against a real PostgreSQL-backed missing-ACL Arista
+    submission, producing a real, persisted OPEN incident."""
+    _seed_policies(sqlalchemy_session_factory, *build_slice1_policies(created_at=T0))
+    service = ConfigIngestionService(
+        unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(sqlalchemy_session_factory),
+        adapter_registry=AdapterRegistry([CiscoAdapter(), AristaAdapter()]),
+        snapshot_id_factory=lambda: "snap-leaf-02",
+    )
+
+    result = service.ingest(
+        IngestConfigurationCommand(
+            device_id=LEAF_DEVICE_ID,
+            vendor="arista-eos",
+            raw_config_text=_load_arista_fixture("arista_missing_required_acl.txt"),
+            observed_at=T0,
+        )
+    )
+
+    assert result.violations_detected == 1
+    assert result.incidents_created == 1
+    assert result.incidents_updated == 0
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    incidents = verify_uow.incidents.list_all()
+    leaf_incident = next(i for i in incidents if i.device_id == LEAF_DEVICE_ID)
+    assert leaf_incident.status is IncidentStatus.OPEN
+    assert "Ethernet1" in leaf_incident.affected_resource
+    assert leaf_incident.rule_ref == "policy-acl-external-in-leaf-02"
+    assert leaf_incident.severity == Severity.MEDIUM
+    assert leaf_incident.evidence.expected_acl_name == "ACL-EXTERNAL-IN"
+    assert leaf_incident.evidence.direction == AclDirection.IN
     verify_uow.close()

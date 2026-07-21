@@ -12,6 +12,7 @@ producing a real ``ImportError`` — genuine red-green-refactor.
 """
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -19,6 +20,7 @@ from fastapi.testclient import TestClient
 from meta_rne.adapters.cisco import CiscoAdapter
 from meta_rne.adapters.registry import AdapterRegistry
 from meta_rne.api.app import create_app
+from meta_rne.api.dependencies import build_production_adapter_registry
 from meta_rne.domain.config import (
     AclDirection,
     NormalizedConfiguration,
@@ -39,6 +41,13 @@ from meta_rne.persistence.serialization import SerializationError
 
 DEVICE_ID = "spine-01"
 T0 = datetime(2026, 7, 18, 10, 0, 0, tzinfo=UTC)
+
+_ARISTA_FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "configs" / "arista"
+
+
+def _load_arista_fixture(name: str) -> str:
+    return (_ARISTA_FIXTURES_DIR / name).read_text()
+
 
 _SATISFIED_RAW_CONFIG = (
     "hostname spine-01\n"
@@ -179,7 +188,11 @@ def _test_app(
         unit_of_work_factory=uow_factory,
         clock=clock,
         snapshot_id_factory=snapshot_id_factory,
-        adapter_registry=adapter_registry or AdapterRegistry([CiscoAdapter()]),
+        # Defaults to the real production composition (Gate 8A-C) rather
+        # than a hand-duplicated registry literal, so a test that submits a
+        # vendor without passing its own adapter_registry exercises exactly
+        # what production actually resolves.
+        adapter_registry=adapter_registry or build_production_adapter_registry(),
         seed_on_startup=seed_on_startup,
     )
     return TestClient(app)
@@ -404,6 +417,68 @@ def test_submit_configuration__tuple_ordering_is_preserved() -> None:
         "10.0.0.1",
         "10.0.0.2",
     ]
+
+
+# --- Multi-vendor ingestion (Gate 8A-C) ------------------------------------
+
+
+def test_submit_configuration__arista_vendor__traverses_pipeline_with_zero_incidents() -> None:
+    """Proves ``arista-eos`` traverses the exact same HTTP ingestion
+    contract as Cisco, through the real production adapter registry (no
+    explicit ``adapter_registry`` override — this exercises exactly what
+    ``build_production_adapter_registry`` resolves): same success status,
+    same response shape, real EOS-derived normalized values. No seeded
+    policy applies to "leaf-02" yet (that is Gate 8A-D's scope), so this
+    asserts the current, correct zero-incident outcome — it does not claim
+    to prove Arista incident creation."""
+    client = _test_app()
+
+    response = client.post(
+        "/devices/leaf-02/config",
+        json={
+            "vendor": "arista-eos",
+            "raw_config_text": _load_arista_fixture("arista_required_acl_assigned.txt"),
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["device_id"] == "leaf-02"
+
+    normalized = body["normalized_config"]
+    assert normalized["hostname"] == "leaf-02"
+
+    eth1 = next(i for i in normalized["interfaces"] if i["name"] == "Ethernet1")
+    assert eth1["ip_address"] == "10.0.1.1/30"
+    assert eth1["admin_state"] == "up"
+    assert eth1["acl_in"] == "ACL-EXTERNAL-IN"
+    assert eth1["acl_out"] == "ACL-EXTERNAL-OUT"
+
+    acl_in = next(a for a in normalized["acls"] if a["name"] == "ACL-EXTERNAL-IN")
+    assert acl_in["entries"] == [
+        {
+            "sequence": 10,
+            "action": "permit",
+            "protocol": "ip",
+            "source": "any",
+            "destination": "any",
+        },
+        {
+            "sequence": 20,
+            "action": "deny",
+            "protocol": "ip",
+            "source": "any",
+            "destination": "any",
+        },
+    ]
+
+    assert normalized["routing"]["bgp_neighbors"] == [
+        {"neighbor_ip": "10.0.1.2", "remote_as": 65001},
+    ]
+
+    assert body["violations_detected"] == 0
+    assert body["incidents_created"] == 0
+    assert body["incidents_updated"] == 0
 
 
 # --- Request validation ------------------------------------------------------

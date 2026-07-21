@@ -58,16 +58,48 @@ test("renders explicit labels for device ID, vendor, and raw configuration", () 
 // 2. Vendor select
 // ---------------------------------------------------------------------------
 
-test("the vendor select is enabled and contains exactly one option: cisco-ios-xe / Cisco IOS-XE", () => {
+test("the vendor select is enabled and contains exactly two options: cisco-ios-xe / Cisco IOS-XE and arista-eos / Arista EOS", () => {
   render(<ConfigurationSubmissionForm />);
 
   const select = screen.getByLabelText(/vendor/i);
   expect(select).toBeEnabled();
 
   const options = within(select).getAllByRole("option");
-  expect(options).toHaveLength(1);
+  expect(options).toHaveLength(2);
   expect(options[0]).toHaveValue("cisco-ios-xe");
   expect(options[0]).toHaveTextContent("Cisco IOS-XE");
+  expect(options[1]).toHaveValue("arista-eos");
+  expect(options[1]).toHaveTextContent("Arista EOS");
+});
+
+test("Cisco IOS-XE remains the default selected vendor", () => {
+  render(<ConfigurationSubmissionForm />);
+
+  expect(screen.getByLabelText(/vendor/i)).toHaveValue("cisco-ios-xe");
+});
+
+// ---------------------------------------------------------------------------
+// 2a. Arista selection (Gate 8A-E)
+// ---------------------------------------------------------------------------
+
+test("selecting Arista EOS updates the select's value to arista-eos", () => {
+  render(<ConfigurationSubmissionForm />);
+
+  fireEvent.change(screen.getByLabelText(/vendor/i), { target: { value: "arista-eos" } });
+
+  expect(screen.getByLabelText(/vendor/i)).toHaveValue("arista-eos");
+});
+
+test("selecting Arista EOS then editing an unrelated field does not reset the selected vendor", () => {
+  render(<ConfigurationSubmissionForm />);
+
+  fireEvent.change(screen.getByLabelText(/vendor/i), { target: { value: "arista-eos" } });
+  fireEvent.change(screen.getByLabelText(/device id/i), { target: { value: "leaf-02" } });
+  fireEvent.change(screen.getByLabelText(/raw configuration/i), {
+    target: { value: "hostname leaf-02\n" },
+  });
+
+  expect(screen.getByLabelText(/vendor/i)).toHaveValue("arista-eos");
 });
 
 // ---------------------------------------------------------------------------
@@ -184,6 +216,27 @@ test("a valid submission calls submitDeviceConfiguration exactly once with the o
   const [deviceId, request, options] = submitDeviceConfigurationMock.mock.calls[0]!;
   expect(deviceId).toBe("spine-01");
   expect(request).toEqual({ vendor: "cisco-ios-xe", raw_config_text: "hostname spine-01\n" });
+  expect(options?.signal).toBeInstanceOf(AbortSignal);
+});
+
+test("selecting Arista EOS and submitting sends vendor arista-eos with the entered EOS configuration unchanged", () => {
+  submitDeviceConfigurationMock.mockReturnValue(new Promise(() => {}));
+  render(<ConfigurationSubmissionForm />);
+  const rawEosConfigText =
+    "hostname leaf-02\n!\ninterface Ethernet1\n   ip address 10.0.1.1/30\n   no shutdown\n!\n";
+
+  fireEvent.change(screen.getByLabelText(/vendor/i), { target: { value: "arista-eos" } });
+  fireEvent.change(screen.getByLabelText(/device id/i), { target: { value: "leaf-02" } });
+  fireEvent.change(screen.getByLabelText(/raw configuration/i), {
+    target: { value: rawEosConfigText },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /submit configuration/i }));
+
+  expect(submitDeviceConfigurationMock).toHaveBeenCalledTimes(1);
+  const [deviceId, request, options] = submitDeviceConfigurationMock.mock.calls[0]!;
+  expect(deviceId).toBe("leaf-02");
+  expect(request).toEqual({ vendor: "arista-eos", raw_config_text: rawEosConfigText });
+  expect(request.raw_config_text).toBe(rawEosConfigText);
   expect(options?.signal).toBeInstanceOf(AbortSignal);
 });
 

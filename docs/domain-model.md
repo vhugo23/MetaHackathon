@@ -827,6 +827,34 @@ the schema (architecture.md Section 12, Day 5B — both paths happen to
 share the same HTTP status now, but only one carries the distinguishing
 `unsupported_vendor` code).
 
+**Both `VendorType` values are now backed by real adapters as of Day 8A.**
+`"cisco-ios-xe"` and `"arista-eos"` both resolve to a registered
+`VendorConfigAdapter` in the production `AdapterRegistry`
+(architecture.md Section 18) — `arista-eos` is no longer merely a
+documented-but-unimplemented enum member. No Arista-specific type was
+added anywhere downstream of the adapter boundary: `NormalizedConfiguration`
+(Section 5) is exactly as vendor-neutral as it was before Day 8A —
+`AristaAdapter.parse` returns the identical type `CiscoAdapter.parse`
+does, and nothing in `domain`, `detection`, or `persistence` branches on
+`VendorType`. `spine-01`'s `GigabitEthernet0/1` and `leaf-02`'s
+`Ethernet1` are legitimately different interface-name strings (real,
+vendor-authentic naming conventions, not an artificial distinction) —
+this model does not, and should not, try to unify them into one canonical
+interface-naming scheme; only the `NormalizedInterface` *shape* is
+shared, never the vendor's own naming convention. Cross-vendor
+equivalence between a Cisco and an Arista incident for the "same" logical
+condition is therefore always a **semantic** claim (same `violation_type`,
+same `expected_acl_name`, same `direction`, same `severity`) — never a
+claim that the two `Incident`/`NormalizedConfiguration` objects are equal,
+since `device_id`, interface names, `rule_ref`, `affected_resource`,
+`incident_id`, and `fingerprint` all legitimately differ. **`Device`
+vendor-identity immutability (Section 2) is unaffected**: a `Device`'s
+`vendor` still cannot change after creation — the repository layer still
+raises `DeviceConflictError` for any attempted change (architecture.md
+Section 18), so the two demo devices remain necessarily distinct
+`device_id`s under two different vendors, never one device migrated
+between vendors.
+
 **Identity formats are not uniform** — each identity type has a specific,
 binding rule:
 

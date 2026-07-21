@@ -40,8 +40,12 @@ export interface ApiErrorResponse {
 // POST /devices/{device_id}/config
 // ---------------------------------------------------------------------------
 
+// The frontend supports exactly the two currently registered production
+// vendors (Gate 8A-E) — never an arbitrary string.
+export type SupportedVendor = "cisco-ios-xe" | "arista-eos";
+
 export interface ConfigurationSubmissionRequest {
-  vendor: "cisco-ios-xe";
+  vendor: SupportedVendor;
   raw_config_text: string;
 }
 

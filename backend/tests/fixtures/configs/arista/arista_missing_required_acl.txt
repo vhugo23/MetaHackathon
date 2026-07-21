@@ -1,0 +1,10 @@
+hostname leaf-02
+!
+interface Ethernet1
+   description Uplink to spine-01
+   ip address 10.0.1.1/30
+   no shutdown
+!
+router bgp 65002
+   neighbor 10.0.1.2 remote-as 65001
+!

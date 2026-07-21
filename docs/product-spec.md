@@ -326,4 +326,43 @@ model (`NormalizedRouting`) carries no such field yet.
 
 **Explicitly excluded from this slice:** telemetry (FR-05), anomaly detection (FR-06), drift detection (FR-04 — the **next** vertical slice), the Arista adapter, and the React dashboard (FR-10).
 
+---
+
+## 12. Multi-Vendor Vertical Slice (Day 8A)
+
+Extends FR-02 (Configuration Normalization) with the platform's second
+vendor, Arista EOS, without reopening Section 11's Slice 1 definition
+above (which remains a historically accurate description of the
+single-vendor, single-submission slice as first implemented).
+
+**Operator story:**
+
+1. Submit a Cisco IOS-XE configuration for `spine-01`.
+2. Submit an Arista EOS configuration for `leaf-02`.
+3. Both are normalized through their own vendor adapter into the same
+   vendor-neutral `NormalizedConfiguration` model.
+4. Each device's own exact device-specific policy detects the equivalent
+   missing-inbound-ACL condition — `policy-acl-external-in` for
+   `spine-01`, `policy-acl-external-in-leaf-02` for `leaf-02` — expressing
+   the same logical policy requirement and equivalent required-ACL
+   semantics, evaluated through the same, unmodified, vendor-neutral
+   `PolicyEvaluator` (exact `applies_to == device_id` matching only, no
+   wildcard).
+5. Both incidents render through the same incident dashboard, using
+   vendor-neutral evaluation behavior throughout — nothing in the
+   dashboard, `GET /incidents`, or the incident schema is vendor-specific.
+6. A page reload confirms both incidents' persisted state (real
+   PostgreSQL, real `GET /incidents`), not merely in-memory/React state.
+7. Incident resolution (`POST /incidents/{id}/resolve`, Section 10.2 of
+   architecture.md) remains vendor-neutral — the same endpoint, unchanged,
+   resolves either device's incident identically.
+
+**Not claimed:** the two policy rows are never described as "the same
+policy" — they are two independent, exact-match, device-specific rows
+that happen to express equivalent required-ACL semantics. No wildcard
+(`"*"`) applicability, no policy CRUD/authoring endpoint, no universal
+device applicability, and no third vendor were introduced. Complete
+Arista EOS syntax coverage is not claimed — `AristaAdapter` implements
+only the narrow subset documented in architecture.md Section 18.
+
 **Definition of done:** AC-01, AC-03, AC-04, AC-10, AC-11, AC-12 (for this slice's error paths), AC-13 pass. `GET /incidents` returns the incident with all required fields. No application code exists that is not covered by at least one named test (see [test-strategy.md](./test-strategy.md) Section 19).

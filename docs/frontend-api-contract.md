@@ -114,7 +114,7 @@ authoritative — never read from the request body.
 
 | Field | Type | Notes |
 |---|---|---|
-| `vendor` | `string` | Non-empty, non-whitespace-only. Currently only `"cisco-ios-xe"` resolves to a registered adapter. |
+| `vendor` | `string` | Non-empty, non-whitespace-only. As of Day 8A, both `"cisco-ios-xe"` and `"arista-eos"` resolve to a registered adapter; any other value (well-formed or not) still returns the existing `unsupported_vendor` 422 contract (Section 8) — a third vendor is not a frontend concern to guard against, since the backend already rejects it deterministically. |
 | `raw_config_text` | `string` | Non-empty. The literal device configuration text. |
 
 `device_id` and `observed_at` in the body are **rejected** (422) —
@@ -169,6 +169,24 @@ only (not closed enums), matching this document's Section 3 guidance to
 treat enum-like values defensively. A structurally malformed `2xx` body is
 rejected into the same controlled error path a network failure would use —
 never partially rendered.
+
+**Frontend consumption notes (Day 8A).** `ConfigurationSubmissionRequest.
+vendor` (`src/api/types.ts`) is now `SupportedVendor = "cisco-ios-xe" |
+"arista-eos"` — the frontend supports exactly the two currently
+registered production vendors, never an arbitrary string, and no third
+value was widened in. The configuration-submission form's vendor
+`<select>` renders both options (`cisco-ios-xe`/"Cisco IOS-XE",
+`arista-eos`/"Arista EOS"), with Cisco IOS-XE as the default/initial
+selection; a real component-state vendor-change handler replaces the
+previous no-op. Both the selected vendor and the entered raw
+configuration text are forwarded to `submitDeviceConfiguration` unchanged
+— `src/api/configurations.ts` and `src/hooks/useConfigurationSubmission.ts`
+required no code change, since both were already generic over
+`ConfigurationSubmissionRequest`. No vendor-specific client-side syntax
+validator exists — a malformed-but-syntactically-plausible EOS or IOS-XE
+submission is still validated only by the backend adapter, surfaced
+through the existing `configuration_parse_error` contract (Section 8)
+unchanged.
 
 ## 6. `GET /incidents`
 
@@ -394,7 +412,9 @@ Do not build frontend features assuming any of the following exist:
   dashboard's "Resolve incident" control for exact `OPEN` incidents only
 - `GET /devices`, `GET /devices/{id}`, `GET /incidents/{id}`
 - Drift detection, telemetry ingestion, or anomaly rules
-- Any vendor besides `cisco-ios-xe`
+- Any vendor besides `cisco-ios-xe`/`arista-eos` (both now supported as of
+  Day 8A — see Section 5's `vendor` row and CLAUDE.md's "Current Phase")
+- Wildcard or shared policy applicability, and policy authoring/CRUD
 
 See `docs/product-spec.md` Section 6/7 and `CLAUDE.md`'s "Current Phase"
 for the authoritative, current scope.

@@ -45,6 +45,78 @@ For each task:
 
 ## Current Phase
 
+**Day 8A — Multi-vendor configuration support: Arista EOS as the platform's
+second vendor (implemented across gates 8A-A through 8A-F, all approved,
+awaiting commit/tag).**
+
+The platform now supports two vendors through the same, unmodified
+ingestion pipeline: **Cisco IOS-XE** (Slice 1) and **Arista EOS** (Day 8A).
+`AristaAdapter` (`meta_rne.adapters.arista`) is a fully independent,
+self-contained line-oriented parser (no import from or delegation to
+`CiscoAdapter`) implementing a narrow, explicitly-scoped EOS subset
+(hostname; `interface`/`description`/CIDR `ip address`/`shutdown`/`no
+shutdown`/`ip access-group ... in|out`; named-only `ip access-list`
+declarations with optional-or-implicit sequence numbers; `router bgp`/
+`neighbor ... remote-as`) — it makes no claim of complete EOS coverage.
+The production `AdapterRegistry` (`build_production_adapter_registry`,
+`api/dependencies.py`) now registers **both** `CiscoAdapter()` and
+`AristaAdapter()` — `ConfigIngestionService`, `api/routes.py`, and
+`api/schemas.py` are all unchanged and contain no vendor branch; vendor
+resolution still flows entirely through the one existing
+`AdapterRegistry.resolve` call.
+
+**Two exact-match, device-specific seeded policies** now exist
+(`build_slice1_policies`, `persistence/seeds.py`, name kept as accepted
+Day 4B2 technical debt): the original `policy-acl-external-in`
+(`applies_to="spine-01"`, `GigabitEthernet0/1`) and a new
+`policy-acl-external-in-leaf-02` (`applies_to="leaf-02"`, `Ethernet1`) —
+both express the same logical required-ACL requirement
+(`ACL-EXTERNAL-IN` inbound, `Medium` severity) but remain two genuinely
+separate rows. **`PolicyEvaluator` is unchanged**: exact, case-sensitive
+`applies_to == device_id` matching only — no wildcard, no shared
+applicability mechanism was introduced. A missing-required-ACL condition
+on `leaf-02` now produces a real `OPEN` incident through the identical
+detection/incident-factory/deduplication/persistence pipeline Cisco
+already used, proven at the unit (in-memory), API-contract, and real
+PostgreSQL levels — semantic-equivalence only (violation type, ACL name,
+direction, severity), never full incident-object equality, since
+`device_id`/`rule_ref`/`affected_resource`/`incident_id`/`fingerprint`
+legitimately and deliberately differ between the two policy rows.
+
+**The frontend configuration-submission form remains one vendor-neutral
+form** — no second form, page, route, or Arista-specific workflow.
+`SupportedVendor` (`frontend/src/api/types.ts`) is now
+`"cisco-ios-xe" | "arista-eos"`; the vendor `<select>` renders both
+options (Cisco IOS-XE remains the default/initial selection), a real
+`useState`-backed vendor-change handler replaces the previous no-op, and
+`handleSubmit` forwards the selected vendor unchanged — `configurations.ts`
+and `useConfigurationSubmission.ts` needed no code change, since both were
+already generic over `ConfigurationSubmissionRequest`.
+
+**A third, focused Playwright Chromium scenario**
+(`frontend/e2e/arista-configuration-submission.spec.ts`) proves the
+complete new wiring through a real browser: selecting Arista EOS in the
+real form, submitting a real EOS configuration for `leaf-02`, observing
+the real (never mocked/intercepted) `POST /devices/leaf-02/config`
+request and response, locating the resulting `OPEN` incident by stable
+identity (never by list position or emptiness assumption), and confirming
+it survives a real page reload against real PostgreSQL. It shares
+`frontend/e2e/helpers.ts` with the two existing scenarios unmodified — no
+existing helper, spec, `playwright.config.ts`, or CI job changed. The
+existing Cisco configuration-submission and incident-resolution scenarios
+pass unchanged.
+
+Verified automated-test inventory as of Day 8A: **628** backend `pytest`
+tests (486 non-`postgres` + 142 `postgres`), **281** frontend Vitest tests
+(7 files), **19** Python orchestration-helper tests (1 file, unchanged),
+**3** Playwright browser tests (3 files — configuration submission/refresh,
+incident resolution, and the new Arista configuration submission) — **931**
+automated tests combined. All five existing CI-equivalent jobs
+(`ci`, `postgres-tests`, `compose-smoke`, `frontend`, `browser-e2e`) pass;
+none were added, removed, or modified.
+
+---
+
 **Day 7C — Browser-driven incident-resolution vertical slice (implemented
 across gates 7C-A/7C-B, both approved, awaiting commit/CI approval).**
 
@@ -426,7 +498,7 @@ deferred browser-driven resolution scenario** — see "Current Phase" above
 for the current, superseding **868**-test inventory (Playwright now 2
 files/tests, everything else unchanged).
 
-**Still prohibited**: additional vendors, vendor autodetection, file upload,
+**Still prohibited**: a third vendor, vendor autodetection, file upload,
 configuration history, device inventory, `GET /devices`, incident
 acknowledgment (the enum member and DB constraint remain dormant
 compatibility state — no public transition into it exists, and no frontend
@@ -440,7 +512,9 @@ control now exists as of Day 7B** — a "Resolve incident" button on every
 exact-`OPEN` incident card, calling the same Day 7A endpoint; see "Current
 Phase" above for the full detail. **A browser (Playwright) resolution
 scenario now exists as of Day 7C** — see "Current Phase" above for the full
-detail; it is no longer deferred. Within browser testing specifically,
+detail; it is no longer deferred. **A second production vendor adapter
+(Arista EOS) and its own Playwright scenario now exist as of Day 8A** — see
+"Current Phase" above; a third vendor remains prohibited. Within browser testing specifically,
 Firefox/WebKit projects,
 mobile/device-emulation projects, visual-regression snapshot testing, and
 accessibility-auditing libraries remain out of scope. All of these are

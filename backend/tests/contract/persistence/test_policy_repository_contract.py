@@ -48,11 +48,20 @@ def test_policy_repository__no_match__returns_empty_tuple(repositories: SimpleNa
 
 
 def test_policy_repository__slice1_seed__inserts(repositories: SimpleNamespace) -> None:
+    """Day 8A-D: ``build_slice1_policies`` now returns two device-specific
+    policies (spine-01, leaf-02) — each device retrieves only its own
+    policy, never the other device's, and never the full un-scoped tuple."""
     policies = build_slice1_policies(created_at=T0)
 
     repositories.policies.seed_if_missing(policies)
 
-    assert repositories.policies.get_applicable_to_device("spine-01") == policies
+    spine_policies = repositories.policies.get_applicable_to_device("spine-01")
+    leaf_policies = repositories.policies.get_applicable_to_device("leaf-02")
+
+    assert spine_policies == (policies[0],)
+    assert leaf_policies == (policies[1],)
+    assert policies[0].policy_id == "policy-acl-external-in"
+    assert policies[1].policy_id == "policy-acl-external-in-leaf-02"
 
 
 def test_policy_repository__exact_spine01_applicability(repositories: SimpleNamespace) -> None:

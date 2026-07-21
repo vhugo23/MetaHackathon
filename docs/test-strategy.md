@@ -625,6 +625,83 @@ exists in either direction, and no cleanup logic runs between scenarios.
 
 ---
 
+### 7.5 Day 8A — Multi-Vendor Browser Scenario
+
+Adds the third Playwright Chromium scenario,
+`frontend/e2e/arista-configuration-submission.spec.ts` (`"Arista
+configuration submission creates an incident that persists after
+reload"`), proving the Day 8A multi-vendor vertical slice through the
+same real-Chromium/real-`vite preview`/real-FastAPI/real-PostgreSQL path
+Sections 7.2–7.4 already established. No production frontend or backend
+code changed as part of adding this scenario itself (the frontend vendor
+selector was Gate 8A-E's own, separately-verified change) — this is proof
+of already-approved multi-vendor behavior.
+
+**Binding coverage:** loads the dashboard (`openDashboard`, shared with
+the other two scenarios); confirms Cisco IOS-XE remains the default
+selected vendor in a real browser; selects "Arista EOS" and confirms the
+select's value actually becomes `arista-eos`; fills `leaf-02` as the
+device ID and a representative EOS configuration (hostname, `Ethernet1`
+with CIDR addressing, a BGP neighbor, intentionally omitting `ip
+access-group ACL-EXTERNAL-IN in`) as the raw configuration; submits
+through the real, visible form. Installs `page.waitForRequest`/
+`waitForResponse` observers *before* clicking, and asserts the real,
+never-mocked-or-intercepted request: `POST` method, pathname
+`/devices/leaf-02/config`, and a request body containing exactly `vendor:
+"arista-eos"` and `raw_config_text` equal to the entered multiline string
+byte-for-byte. Asserts the real `201` response (`violations_detected: 1`,
+`incidents_created + incidents_updated == 1` — the exact split is not
+fixed, since the shared disposable database may already hold this
+fingerprint from an earlier independent run). Locates the resulting
+`leaf-02` incident by stable identity (`device_id`/`rule_ref`/
+`affected_resource`) plus exact visible status `OPEN` — never a bare/
+unscoped article locator, never an emptiness or list-order assumption,
+never dependent on the two Cisco-scoped scenarios running before or after
+it (structurally impossible to collide: `leaf-02`/
+`policy-acl-external-in-leaf-02`/`Ethernet1` share no identity component
+with either Cisco scenario's `spine-01`-scoped fingerprint). Asserts the
+operator-visible fields the dashboard already renders: `OPEN` status,
+`Medium` severity, `Device` = `leaf-02`, `Affected resource` containing
+`Ethernet1`, `Rule` = `policy-acl-external-in-leaf-02`, the recommendation
+text ("Assign ACL-EXTERNAL-IN inbound to Ethernet1"), and — after
+expanding the Evidence `<details>` — `Expected ACL` = `ACL-EXTERNAL-IN`,
+`Interface` = `Ethernet1`, `Direction` = `Inbound`. Reloads the page,
+requires the following real `GET /incidents` to succeed, and re-locates
+the same card by identity plus exact status `OPEN`, re-asserting its
+`Ethernet1` affected-resource text — proving the incident persisted in
+PostgreSQL, not merely in React state. The incident is deliberately never
+resolved in this scenario — resolution remains the dedicated Section 7.4
+scenario's responsibility.
+
+**Isolation.** The scenario is self-contained in `frontend/e2e/
+arista-configuration-submission.spec.ts` and reuses `openDashboard`,
+`locateIncidentCard`, `fieldValue`, `waitForIncidentRefresh`, and
+`waitForPost` from the existing shared `helpers.ts` (unmodified — no new
+helper was added, since the interaction sequence was short enough to keep
+self-contained per Gate 8A-F's own review). All three scenarios were run
+together through the existing `scripts/browser_e2e.py` orchestration
+(unmodified) in one pass — Playwright's alphabetical discovery order runs
+this new scenario *first*, ahead of both Cisco-scoped scenarios,
+incidentally already exercising "new scenario before the existing ones"
+against a genuinely fresh database. Full N-direction reruns (as performed
+for Section 7.4's two Cisco-identity-sharing scenarios) were not repeated
+for this scenario: unlike the Cisco-vs-resolution pair, `leaf-02`'s
+fingerprint shares no identity component with `spine-01`'s, making
+cross-scenario interference structurally impossible rather than merely
+empirically unobserved — the isolation risk Section 7.4's repeated-run
+verification exists to catch does not apply here by construction.
+
+**Test totals as of Day 8A** (see Section 21 below for the full backend
++ frontend + browser inventory): 3 Playwright browser tests (3 files —
+configuration-submission/refresh, incident resolution, and Arista
+configuration submission), unchanged 19 Python orchestration-helper
+tests, unchanged Chromium-only scope (no Firefox/WebKit/mobile project),
+unchanged five CI jobs (`browser-e2e` discovers the new spec file with no
+configuration change, exactly as it already did for the second scenario
+in Day 7C).
+
+---
+
 ## 8. Test Data and Fixture Strategy
 
 - **Vendor config fixtures** — at least two valid Cisco IOS-XE fixtures
@@ -1326,3 +1403,106 @@ migrated schema (`0002_incident_resolution` reached at container startup
 via the existing `alembic upgrade head` step) and the expanded
 `IncidentResponse` — no separate migration or script was added for browser
 verification.
+
+---
+
+## 21. Multi-Vendor Testing (Day 8A)
+
+Summarizes the test coverage added for the platform's second vendor
+(Arista EOS), across backend, frontend, and browser layers. Historical
+per-day counts elsewhere in this document (e.g. Section 7.2's "as of Day
+7C" table) remain as recorded at those checkpoints and are not restated
+here.
+
+**Arista adapter-unit coverage** (`backend/tests/unit/adapters/
+test_arista_adapter.py`) — 39 tests: identity/successful normalization
+(golden-file assigned/missing-ACL fixtures, determinism, non-mutation),
+interface behavior (CIDR addressing, admin state, ACL assignment,
+duplicate-interface merge), ACL behavior (declaration/entries, explicit/
+implicit sequence assignment — including the binding "a later explicit
+sequence must never be shadowed, and a high explicit sequence must never
+raise a later implicit candidate" case — duplicate-ACL merge, forward
+reference), BGP behavior, ignored-syntax/unknown-command/MTU-is-ignored
+cases, and one named test per reused `ParseErrorCode` (empty/whitespace
+input, missing/malformed hostname, malformed interface, invalid CIDR
+address/prefix, invalid ACL direction, undeclared ACL reference, invalid
+BGP neighbor IP/remote-AS) — no new `ParseErrorCode` member was added.
+
+**Production-registry and API contract coverage**
+(`backend/tests/unit/api/test_dependencies.py`,
+`backend/tests/contract/api/test_config_ingestion_api.py`) — the
+production `AdapterRegistry` is proven to resolve both `cisco-ios-xe` and
+`arista-eos` (and still reject `juniper-junos` with the unchanged
+`UnsupportedVendorError` contract); one HTTP contract test proves
+`POST /devices/leaf-02/config` with `vendor: "arista-eos"` returns `201`
+with real EOS-derived normalized values and the correct, current
+zero-incident outcome (no policy applies to `leaf-02` until the seed
+change below).
+
+**Cross-vendor service semantic test**
+(`backend/tests/unit/application/test_config_ingestion_service.py`) —
+one focused test ingests a Cisco `spine-01` and an Arista `leaf-02`
+submission through one shared `ConfigIngestionService`/`AdapterRegistry`/
+`UnitOfWork`, asserting only legitimately equivalent semantic fields
+(source, status, severity, violation type, expected ACL name, direction,
+recommendation content, occurrence count) and asserting
+device/rule/resource/incident-ID/fingerprint fields are *distinct* —
+never full incident-object equality.
+
+**PostgreSQL vendor and incident proofs**
+(`backend/tests/integration/application/test_config_ingestion_postgres.py`) —
+two focused tests: real `arista-eos` persistence through `Device`/
+`ConfigurationSnapshot` with real EOS-derived normalized values, and a
+real, persisted `OPEN` incident for `leaf-02` once the second seeded
+policy applies. Startup-seeding coverage
+(`backend/tests/contract/api/test_startup_seeding_api.py`) proves both
+policies persist idempotently from an empty store, each device receives
+exactly its own policy (never the other's — no wildcard), and a full
+`POST` → `GET /incidents` round trip against a startup-seeded app
+produces the expected `leaf-02`/`Ethernet1`/`OPEN` incident. The seed
+contract itself (`backend/tests/unit/persistence/test_seeds.py`,
+`backend/tests/contract/persistence/test_policy_repository_contract.py`)
+proves determinism, uniqueness, exact per-device scoping, idempotency,
+and unchanged semantic-conflict behavior for the now-two-policy tuple.
+
+**Frontend two-option coverage**
+(`frontend/src/components/ConfigurationSubmissionForm.test.tsx`) — the
+vendor select renders exactly two options with the exact value/label
+pairs, Cisco IOS-XE remains the default, selecting Arista EOS updates
+real component state and survives unrelated field edits, and submission
+sends the selected vendor (`cisco-ios-xe` by default, `arista-eos` when
+selected) with the raw configuration text forwarded byte-for-byte
+unchanged. One small addition to `frontend/src/api/configurations.test.ts`
+proves the widened `arista-eos` value serializes unchanged through the
+existing request-building logic — not duplicated at the hook layer, since
+`useConfigurationSubmission` required no code change to accept the
+widened type.
+
+**Third focused Playwright scenario** — Section 7.5 above.
+
+**Current final test counts (Day 8A, all verified):**
+
+| Layer | Count | Location |
+|---|---|---|
+| Backend `pytest` | 628 (486 non-`postgres` + 142 `postgres`) | `backend/tests/` |
+| Frontend Vitest | 281, 7 files | `frontend/src/**/*.test.{ts,tsx}` |
+| Python `unittest` (orchestration helpers) | 19, 1 file (unchanged) | `scripts/test_browser_e2e.py` |
+| Playwright (browser) | 3, 3 files | `frontend/e2e/` |
+| **Combined** | **931** | — |
+
+**Current isolation strategy with three scenarios.** All three Playwright
+scenarios run together, serialized (`workers: 1`, `fullyParallel: false`,
+unchanged), against one shared disposable database per orchestrated run.
+The two Cisco-identity-sharing scenarios (configuration submission,
+resolution) retain their existing three-direction isolation proof
+(Section 7.4); the new Arista scenario's isolation is structural
+(distinct `device_id`/`rule_ref`/`affected_resource`, no shared
+fingerprint with either Cisco scenario is possible), verified by one full
+orchestrated run in which Playwright's alphabetical discovery order
+happened to place it first — see Section 7.5 for the full reasoning.
+
+**Five CI jobs, unchanged.** `ci`, `postgres-tests`, `compose-smoke`,
+`frontend`, and `browser-e2e` are exactly as they were before Day 8A — no
+job was added, removed, or reconfigured; `browser-e2e` discovers the new
+third spec file with no configuration change, exactly as it already
+discovered the second in Day 7C.
