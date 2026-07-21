@@ -1134,14 +1134,94 @@ needs:
   defined (Sections 1, 2, 10, 15); the SPA itself is a later vertical
   slice, not a cut feature. **Day 6B built the first slice of it**
   (`frontend/`): a read-only dashboard consuming `GET /incidents` only,
-  with loading/empty/error/populated states. Configuration-submission UI,
-  incident mutations, filtering/pagination, and authentication remain
-  deferred — see `docs/frontend-api-contract.md` and README.md's "Current
-  Day 6B scope".
+  with loading/empty/error/populated states. **Day 6C built the second
+  slice**: a configuration-submission form integrated into that same
+  dashboard, POSTing to the already-existing
+  `POST /devices/{device_id}/config` endpoint (Section 4, Section 10.1) and
+  triggering exactly one incident refresh on success (Section 17.1.1
+  below). Incident mutations, filtering/pagination, and authentication
+  remain deferred — see `docs/frontend-api-contract.md` and README.md's
+  "Current Day 6C scope".
 - **Arista adapter** (Section 5) — Cisco only for Slice 1.
 - **Configuration drift detection** (Section 8) and **telemetry/anomaly
   detection** (FR-05/FR-06) — wired in the next slice, using the same
   `UnitOfWork` and post-commit logging rule already established here.
+
+### 17.1.1 Frontend ownership and data flow (Day 6C)
+
+The frontend consumes both Slice 1 endpoints now, each behind its own
+narrow ownership chain — neither shares state with the other, by design
+(below):
+
+```
+IncidentDashboard
+├── ConfigurationSubmissionForm
+│   └── useConfigurationSubmission
+│       └── submitDeviceConfiguration
+│           └── postJson
+└── useIncidents
+    └── fetchIncidents
+```
+
+`IncidentDashboard` is the only component that calls `useIncidents()` — it
+renders `ConfigurationSubmissionForm` as a child, but the form never reaches
+into incident state, and `IncidentDashboard` never reaches into submission
+state. The two branches meet at exactly one point: a callback prop.
+
+**Successful submission flow:**
+
+1. The user fills the controlled form (device ID, the single supported
+   vendor, raw configuration text) and submits.
+2. Local validation passes (non-blank device ID, non-empty configuration
+   text) — no network call is made until this succeeds.
+3. `useConfigurationSubmission` starts one `POST` with a fresh
+   `AbortController`'s signal, transitioning to `submitting`.
+4. `submitDeviceConfiguration` → `postJson` performs the request; on a `2xx`
+   response, the API layer's runtime structural validators
+   (`isConfigurationSubmissionResponse` and its nested per-field checks,
+   `frontend-api-contract.md` Section 5) validate the complete body,
+   including every field of `normalized_config` — never a bare cast.
+5. The hook transitions to `success`, carrying the validated response.
+6. The *latest committed* `onSuccess` callback (Section 17.1.1 below
+   explains why "latest") is invoked exactly once — `IncidentDashboard`
+   supplies `() => { refresh(); }`, the same `refresh` function already
+   used by the dashboard's own Refresh/Retry controls.
+7. `useIncidents` owns everything from here: it performs exactly one new
+   `GET /incidents`, using its own existing abort-and-supersede request
+   lifecycle (below) — nothing about that lifecycle is submission-aware.
+
+**Why submission and incident state are intentionally separate.** A failed
+`GET /incidents` refresh that happens to follow a successful `POST` is a
+second, independent outcome — `useIncidents` transitions to its own `error`
+state exactly as it would after a failed manual Refresh click, while
+`useConfigurationSubmission`'s state remains `success`, untouched. Merging
+the two into one state machine would make a refresh failure look like a
+submission failure, which is not what happened. There is deliberately no
+effect watching submission state to trigger a refresh — the `onSuccess`
+callback is the only integration point, so it is straightforward to reason
+about exactly when (and how many times) a refresh can occur.
+
+**Concurrency guarantees, precisely scoped.** Both `useIncidents` and
+`useConfigurationSubmission` pair one `AbortController` with a monotonically
+increasing request ID per operation, checked alongside a mounted-ref before
+any state update: a stale completion (superseded by a newer call, or
+arriving after unmount) can never overwrite newer state, and a superseded
+request's own `AbortError` never surfaces as a visible error. This guarantee
+is scoped to *each hook's own* request sequence — `useConfigurationSubmission`
+does not know about, and does not participate in, `useIncidents`'s request
+ID or vice versa; the only thing crossing that boundary is the single
+`refresh()` call made from `onSuccess`, which `useIncidents` then handles
+exactly like any other externally-triggered refresh (aborting a pending
+manual refresh if one happens to be in flight, per its own existing rules).
+`useConfigurationSubmission` additionally holds its `onSuccess` callback in
+a ref synced via `useLayoutEffect` (not a plain `useEffect`) so that a
+callback-identity change committed just before a POST resolves is always
+observed — a passive effect can still be pending when an already-in-flight
+POST's promise settles, which would risk invoking a stale callback instead
+of the latest one. This does not mean callback identity is watched or
+compared to restart anything: `submit()` itself has no dependency on
+`onSuccess` and never restarts or duplicates a POST because the callback
+prop changed.
 
 ### 17.2 Deferred beyond the final MVP (non-goals)
 

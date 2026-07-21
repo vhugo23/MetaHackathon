@@ -222,11 +222,62 @@ separate `frontend/tests/` directory):
 
 Fetch is stubbed directly (`vi.stubGlobal("fetch", ...)`) — no mocking
 library beyond what Vitest/RTL already provide. Run via `npm test -- --run`
-(CI) or `npm test` (watch, local). Only `GET /incidents` is exercised — no
-mutation endpoint is called from the frontend yet.
+(CI) or `npm test` (watch, local).
 
-Playwright browser E2E for the dashboard remains deferred (Section 7)
-— HTTP-mode Playwright is unaffected and untouched by Day 6B.
+**Day 6C**: adds the second frontend vertical slice (configuration
+submission), bringing the suite to **176 tests across 7 files** (verified by
+an actual clean-install `npm ci` + `npm test -- --run`, not carried forward
+from an earlier count). Three new files
+(`src/api/configurations.test.ts`, `src/hooks/useConfigurationSubmission.test.ts`,
+`src/components/ConfigurationSubmissionForm.test.tsx`) and additions to two
+existing files (`src/api/client.test.ts`, `src/pages/IncidentDashboard.test.tsx`)
+cover, by responsibility rather than as an exhaustive per-test list:
+
+- **HTTP client and safe errors** (`client.test.ts` additions) — the new
+  `postJson` request shape (method/headers/credentials/body/`AbortSignal`),
+  and the new narrow recognition of FastAPI's `{"detail": [...]}`
+  validation-error body, mapped to one stable safe message without
+  rendering the array's contents.
+- **Configuration request/response contract** (`configurations.test.ts`) —
+  path-segment encoding (including reserved characters, and a proof that
+  the device ID is never trimmed), the exact two-key request body (with a
+  dedicated regression test proving a caller-supplied object carrying extra
+  `device_id`/`observed_at`/other properties is never forwarded as-is), and
+  complete structural validation of a `201` response including every nested
+  `normalized_config` field — mirroring the rigor `incidents.test.ts`
+  already applies to `GET /incidents`.
+- **Submission hook lifecycle/concurrency** (`useConfigurationSubmission.test.ts`)
+  — idle/submitting/success/error transitions, the same
+  abort-and-supersede/stale-result-guard pattern proven for
+  `useIncidents.test.ts` above, plus submission-specific guarantees:
+  `onSuccess` invoked exactly once for a current successful POST, never for
+  a failed/aborted/superseded one, always using the *latest committed*
+  callback even when its identity changes mid-flight, and never turned into
+  a submission failure by a synchronous callback exception or a rejected
+  callback Promise.
+- **Standalone form behavior/accessibility** (`ConfigurationSubmissionForm.test.tsx`)
+  — rendered independently of the dashboard: explicit labels, the
+  single-option enabled vendor select, local validation (blank device ID,
+  empty configuration text) and its clearing on edit, byte-exact
+  preservation of entered values through to the exact POST call, native
+  submit-button disabling plus a defensive `onSubmit` guard, controlled
+  `role="alert"`/`role="status"` presentation of errors/pending/success,
+  and `normalized_config` rendered as escaped text inside a semantic
+  `<details>`/`<summary>`.
+- **Dashboard refresh integration** (`IncidentDashboard.test.tsx` additions)
+  — cross-component behavior only, deliberately not repeating what the
+  standalone hook/form suites above already prove: the form renders above
+  and remains usable across every incident-section state, a successful
+  submission triggers exactly one additional `GET /incidents` and never a
+  second one, a failed POST or local validation rejection triggers zero,
+  a refresh failure following a successful submission produces the
+  incident section's own independent controlled error without ever
+  rewriting the already-successful submission result, and a submission
+  arriving while an unrelated manual refresh is still pending supersedes it
+  under `useIncidents`'s existing rules.
+
+Playwright browser E2E for the dashboard remains deferred (Section 7) —
+HTTP-mode Playwright is unaffected and untouched by Day 6B or Day 6C.
 
 ---
 

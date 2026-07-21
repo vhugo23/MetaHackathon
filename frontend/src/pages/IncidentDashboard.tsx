@@ -1,3 +1,4 @@
+import { ConfigurationSubmissionForm } from "../components/ConfigurationSubmissionForm";
 import { IncidentCard } from "../components/IncidentCard";
 import { IncidentEmptyState } from "../components/IncidentEmptyState";
 import { IncidentErrorState } from "../components/IncidentErrorState";
@@ -17,6 +18,12 @@ export function IncidentDashboard() {
       <p className="page-description">
         Configuration policy violations detected across managed devices.
       </p>
+
+      <ConfigurationSubmissionForm
+        onSubmissionSuccess={() => {
+          refresh();
+        }}
+      />
 
       {state.status === "loading" && <LoadingState />}
 

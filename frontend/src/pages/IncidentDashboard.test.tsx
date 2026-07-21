@@ -1,8 +1,16 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { test, expect, vi, beforeEach } from "vitest";
 import { IncidentDashboard } from "./IncidentDashboard";
-import type { IncidentResponse } from "../api/types";
+import { ApiRequestError } from "../api/client";
+import * as configurationsModule from "../api/configurations";
+import type { ConfigurationSubmissionResponse, IncidentResponse } from "../api/types";
+
+vi.mock("../api/configurations", () => ({
+  submitDeviceConfiguration: vi.fn(),
+}));
+
+const submitDeviceConfigurationMock = vi.mocked(configurationsModule.submitDeviceConfiguration);
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -10,6 +18,27 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
+
+function fillConfigurationForm(deviceId = "spine-01", rawConfigText = "hostname spine-01\n"): void {
+  fireEvent.change(screen.getByLabelText(/device id/i), { target: { value: deviceId } });
+  fireEvent.change(screen.getByLabelText(/raw configuration/i), {
+    target: { value: rawConfigText },
+  });
+}
+
+const validSubmissionResponse: ConfigurationSubmissionResponse = {
+  device_id: "spine-01",
+  snapshot_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  normalized_config: {
+    hostname: "spine-01",
+    interfaces: [],
+    routing: { bgp_neighbors: [] },
+    acls: [],
+  },
+  violations_detected: 1,
+  incidents_created: 1,
+  incidents_updated: 0,
+};
 
 const incidentA: IncidentResponse = {
   incident_id: "8f14e45f-ceea-4c1d-8f1e-1234567890ab",
@@ -45,6 +74,7 @@ const incidentB: IncidentResponse = {
 
 beforeEach(() => {
   vi.unstubAllGlobals();
+  submitDeviceConfigurationMock.mockReset();
 });
 
 test("renders an empty incident state when the API returns no incidents", async () => {
@@ -439,4 +469,185 @@ test("unmounting during the initial load aborts the active request", () => {
   expect(capturedSignal?.aborted).toBe(false);
   unmount();
   expect(capturedSignal?.aborted).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+// Gate D — ConfigurationSubmissionForm integration
+//
+// The form's own request shape, local validation, native disabling, and
+// success-field rendering are already proven in
+// ConfigurationSubmissionForm.test.tsx — these tests focus only on
+// cross-component integration: POST outcome, callback invocation, GET
+// refresh count, and the independence of submission and incident state.
+// ---------------------------------------------------------------------------
+
+test("the configuration submission form renders above the incident section", () => {
+  vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise(() => {})));
+
+  render(<IncidentDashboard />);
+
+  const formHeading = screen.getByRole("heading", { name: /submit device configuration/i });
+  const loadingStatus = screen.getByRole("status");
+  expect(
+    formHeading.compareDocumentPosition(loadingStatus) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+
+test("the configuration submission form remains present while the initial incident request is pending", () => {
+  vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise(() => {})));
+
+  render(<IncidentDashboard />);
+
+  expect(screen.getByRole("button", { name: /submit configuration/i })).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent(/loading incidents/i);
+});
+
+test("the configuration submission form remains present when the initial incident request fails", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(jsonResponse({ code: "persistence_error", detail: "DB down" }, 500)),
+  );
+
+  render(<IncidentDashboard />);
+
+  await screen.findByText("DB down");
+  expect(screen.getByRole("button", { name: /submit configuration/i })).toBeInTheDocument();
+});
+
+test("a successful submission triggers exactly one additional GET, leaves the submission success visible, and renders the refreshed incident data", async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(jsonResponse([incidentA]))
+    .mockResolvedValueOnce(jsonResponse([incidentA, incidentB]));
+  vi.stubGlobal("fetch", fetchMock);
+  submitDeviceConfigurationMock.mockResolvedValue(validSubmissionResponse);
+
+  render(<IncidentDashboard />);
+  await screen.findByRole("article");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+
+  fillConfigurationForm();
+  fireEvent.click(screen.getByRole("button", { name: /submit configuration/i }));
+
+  await screen.findByText(/configuration submitted successfully/i);
+  expect(submitDeviceConfigurationMock).toHaveBeenCalledTimes(1);
+
+  await waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  await screen.findByText("leaf-02");
+  expect(screen.getByText(/configuration submitted successfully/i)).toBeInTheDocument();
+});
+
+test("one successful submission never triggers two refresh GETs", async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(jsonResponse([incidentA]))
+    .mockResolvedValueOnce(jsonResponse([incidentA]));
+  vi.stubGlobal("fetch", fetchMock);
+  submitDeviceConfigurationMock.mockResolvedValue(validSubmissionResponse);
+
+  render(<IncidentDashboard />);
+  await screen.findByRole("article");
+
+  fillConfigurationForm();
+  fireEvent.click(screen.getByRole("button", { name: /submit configuration/i }));
+
+  await waitFor(() => {
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  // Give any errant extra effect/timer a chance to fire before asserting the
+  // count stays put.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+test("a failed POST displays the controlled submission error, triggers zero additional GET calls, and preserves existing incident data", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse([incidentA]));
+  vi.stubGlobal("fetch", fetchMock);
+  submitDeviceConfigurationMock.mockRejectedValue(
+    new ApiRequestError("vendor not recognized", "unsupported_vendor"),
+  );
+
+  render(<IncidentDashboard />);
+  await screen.findByRole("article");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+
+  fillConfigurationForm();
+  fireEvent.click(screen.getByRole("button", { name: /submit configuration/i }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("vendor not recognized");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(screen.getByText("spine-01")).toBeInTheDocument();
+});
+
+test("a local validation failure triggers zero POSTs, zero additional GET calls, and preserves existing incident data", async () => {
+  const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse([incidentA]));
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<IncidentDashboard />);
+  await screen.findByRole("article");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+
+  fireEvent.click(screen.getByRole("button", { name: /submit configuration/i }));
+
+  expect(await screen.findByText("Enter a device ID.")).toBeInTheDocument();
+  expect(submitDeviceConfigurationMock).not.toHaveBeenCalled();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(screen.getByText("spine-01")).toBeInTheDocument();
+});
+
+test("a successful POST followed by a failed refresh GET keeps the submission success visible and shows the incident section's own controlled error, without touching the POST result", async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(jsonResponse([incidentA]))
+    .mockResolvedValueOnce(jsonResponse({ code: "persistence_error", detail: "DB down" }, 500));
+  vi.stubGlobal("fetch", fetchMock);
+  submitDeviceConfigurationMock.mockResolvedValue(validSubmissionResponse);
+
+  render(<IncidentDashboard />);
+  await screen.findByRole("article");
+
+  fillConfigurationForm();
+  fireEvent.click(screen.getByRole("button", { name: /submit configuration/i }));
+
+  await screen.findByText(/configuration submitted successfully/i);
+  await screen.findByText("DB down");
+
+  // Submission success remains its own outcome, untouched by the refresh
+  // failure — never reported as a failed submission.
+  expect(screen.getByText(/configuration submitted successfully/i)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(submitDeviceConfigurationMock).toHaveBeenCalledTimes(1);
+});
+
+test("a successful submission while a manual refresh is pending supersedes it, rendering only the latest GET result", async () => {
+  const user = userEvent.setup();
+  const pendingManualRefresh = new Promise<Response>(() => {});
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(jsonResponse([incidentA]))
+    .mockImplementationOnce(() => pendingManualRefresh)
+    .mockResolvedValueOnce(jsonResponse([incidentA, incidentB]));
+  vi.stubGlobal("fetch", fetchMock);
+  submitDeviceConfigurationMock.mockResolvedValue(validSubmissionResponse);
+
+  render(<IncidentDashboard />);
+  await screen.findByRole("article");
+
+  // Kick off a manual refresh that never resolves on its own.
+  await user.click(screen.getByRole("button", { name: /refresh/i }));
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+
+  fillConfigurationForm();
+  fireEvent.click(screen.getByRole("button", { name: /submit configuration/i }));
+
+  await screen.findByText(/configuration submitted successfully/i);
+  expect(submitDeviceConfigurationMock).toHaveBeenCalledTimes(1);
+
+  await screen.findByText("leaf-02");
+  expect(fetchMock).toHaveBeenCalledTimes(3);
 });

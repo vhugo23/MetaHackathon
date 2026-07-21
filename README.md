@@ -181,11 +181,13 @@ the API — `docker-compose.yml` already defaults it to
 development. See [docs/frontend-api-contract.md](./docs/frontend-api-contract.md)
 for the full frontend-facing contract.
 
-### Frontend (Day 6B)
+### Frontend (Day 6C)
 
-A React/TypeScript/Vite dashboard lives at `frontend/`, consuming
-`GET /incidents` — the only frontend business operation implemented so far.
-Requires Node.js (verified locally against **Node v24.11.1, npm 11.6.2**).
+A React/TypeScript/Vite dashboard lives at `frontend/`. It now supports two
+frontend business operations: viewing the current incidents list
+(`GET /incidents`, Day 6B) and submitting one Cisco IOS-XE device
+configuration (`POST /devices/{device_id}/config`, Day 6C). Requires
+Node.js (verified locally against **Node v24.11.1, npm 11.6.2**).
 
 ```bash
 cd frontend
@@ -206,16 +208,87 @@ default (`http://localhost:5173`) already matches Vite's default dev port,
 so `docker compose up -d` (backend) + `npm run dev` (frontend) work together
 with no extra configuration.
 
-The dashboard (`IncidentDashboard`) renders four states — loading, empty
-(`GET /incidents` returns `[]`), a controlled error state (with a Retry
-action) on request failure, and the populated incident list, in the exact
-order the backend returns them, each incident exposing its policy-violation
-evidence (including `fingerprint`) in a keyboard-accessible `<details>`
-region. No incident mutation, filtering, pagination, sorting, authentication,
-or routing is implemented — `GET /incidents` remains the only frontend
-business operation. Configuration submission, incident acknowledgment/
-resolution, and the Playwright/browser E2E suite remain deferred to a later
+The dashboard (`IncidentDashboard`) renders four incident-section states —
+loading, empty (`GET /incidents` returns `[]`), a controlled error state
+(with a Retry action) on request failure, and the populated incident list, in
+the exact order the backend returns them, each incident exposing its
+policy-violation evidence (including `fingerprint`) in a keyboard-accessible
+`<details>` region. No incident mutation, filtering, pagination, sorting,
+authentication, or routing is implemented. Incident acknowledgment/
+resolution and the Playwright/browser E2E suite remain deferred to a later
 day.
+
+### Current Day 6C scope
+
+`ConfigurationSubmissionForm` is now rendered inside `IncidentDashboard`,
+above the incident-list content, and remains visible and usable regardless
+of the incident section's own state (loading/empty/populated/error/
+refreshing).
+
+**Form.** Three controlled inputs: a Device ID text input (treated as an
+opaque string — checked for blankness via `deviceId.trim().length === 0`,
+but the value actually sent is never trimmed or otherwise rewritten), a
+Vendor `<select>` that is enabled but has exactly one option (`cisco-ios-xe`
+/ "Cisco IOS-XE" — the only vendor currently registered on the backend, with
+no placeholder or future-vendor value implied), and a Raw configuration
+`<textarea>` (rejected locally only when `rawConfigText.length === 0`;
+whitespace-only text is allowed, and the value is never trimmed, normalized,
+or line-ending-rewritten).
+
+**Request.** On valid local submission, exactly one
+`POST /devices/{encodeURIComponent(deviceId)}/config` is issued with a body
+containing exactly `{"vendor": "cisco-ios-xe", "raw_config_text": <exact
+textarea value>}` — never `device_id` (the path segment is authoritative)
+and never `observed_at` (always server-generated). `device_id` is
+URL-encoded as a single path segment, never parsed or trimmed.
+
+**Lifecycle.** idle → submitting → success/error, mirroring the pattern
+`useIncidents` already established: one `AbortController` per submission
+paired with a monotonically increasing request ID, so a superseded or
+stale-resolving request can never overwrite newer state, `AbortError` never
+becomes a visible error, and unmounting aborts the active request. While
+submitting, the submit button is natively `disabled` (plus a defensive
+`onSubmit` guard, and `aria-busy` on the `<form>`) so a second click cannot
+create a duplicate POST; a visible `role="status"` "Submitting
+configuration…" message communicates the pending state accessibly.
+
+**Errors.** A malformed 2xx response is rejected the same way a malformed
+`GET /incidents` response is — via `isConfigurationSubmissionResponse`'s
+full structural validation of the response, including every nested
+`normalized_config` field (`interfaces[]`, `routing.bgp_neighbors[]`,
+`acls[].entries[]`) — never a bare type cast. Failure responses render only
+controlled, safe text inside a `role="alert"` region: `ApiErrorResponse`'s
+`detail`/`code`, or — for FastAPI's own `{"detail": [...]}` request-
+validation body — one stable safe message (the array, field locations, and
+rejected input are never rendered), or — for a malformed/non-JSON/HTML body
+or a network failure — the same kind of stable fallback message
+`GET /incidents` already uses. No raw HTML, stack trace, or server body is
+ever rendered, and `dangerouslySetInnerHTML` is never used.
+
+**Success.** On a validated `201`, the form displays `device_id`,
+`snapshot_id`, `violations_detected`, `incidents_created`, and
+`incidents_updated` as visible text inside a `role="status"` region, plus
+the complete `normalized_config` inside a semantic `<details>`/`<summary>`,
+rendered as indented JSON text (`JSON.stringify`, relying on React's default
+text escaping — never `dangerouslySetInnerHTML`). Entered form values remain
+present after success or error, so another submission can be made without
+retyping.
+
+**Incident refresh.** A successful submission triggers the dashboard's
+existing incident refresh exactly once — `IncidentDashboard` is still the
+sole owner of `useIncidents()`; `ConfigurationSubmissionForm` never touches
+incident state directly, and no polling or second data-fetching hook was
+added. The triggered refresh inherits every existing `useIncidents`
+guarantee unchanged (previous cards stay visible, the Refresh button is
+natively disabled, stale results can't overwrite newer ones, abort works the
+same way). A failed submission or a local validation rejection triggers zero
+refreshes. If the triggered refresh itself fails, the incident section shows
+its own controlled error state completely independently — the already-
+successful submission result is never rewritten into a failure, never
+retried, and never followed by a second automatic `GET`.
+
+The backend contract itself is unchanged by Day 6C — see
+[docs/frontend-api-contract.md](./docs/frontend-api-contract.md).
 
 **Response validation.** `GET /incidents`'s parsed JSON is never trusted via
 a bare type cast: `src/api/types.ts`'s `isIncidentResponse`/
@@ -861,6 +934,139 @@ end-to-end tests, a frontend Docker image or Compose service.
 Backend test count: unchanged at **470** (360 non-`postgres` + 110
 `postgres`-marked) — Day 6B changed no backend code.
 
+### Current Day 6C scope
+
+Builds the second frontend vertical slice: a configuration-submission form
+(`ConfigurationSubmissionForm`) integrated into the existing
+`IncidentDashboard`, POSTing to the already-existing
+`POST /devices/{device_id}/config` endpoint (Day 5B/6A) and triggering
+exactly one existing incident refresh on success. No backend code, API
+schema, or domain/application/persistence behavior changed.
+
+Day 6C adds, built in four reviewable gates:
+
+- **`src/api/client.ts`** — `postJson(path, body, options)`, a POST sibling
+  to `getJsonArray`, reusing the same `parseErrorDetail`/`ApiRequestError`
+  machinery. A new `isFastApiValidationErrorBody` check (matched only by
+  `detail` being an array, never by inspecting its contents) maps FastAPI's
+  own `{"detail": [...]}` request-validation body to one new stable message
+  (`VALIDATION_ERROR_MESSAGE`), so a validation-error array is never
+  rendered to the user.
+- **`src/api/types.ts`** — `ConfigurationSubmissionRequest`
+  (`vendor: "cisco-ios-xe"` literal, `raw_config_text: string`),
+  `ConfigurationSubmissionResponse` and its nested
+  `NormalizedConfigurationResponse`/`NormalizedInterfaceResponse`/
+  `NormalizedRoutingResponse`/`NormalizedBgpNeighborResponse`/
+  `NormalizedAclResponse`/`NormalizedAclEntryResponse` types, matching
+  `docs/frontend-api-contract.md` exactly (no `static_routes`, no invented
+  field). A matching family of `is*` runtime structural guards
+  (`isConfigurationSubmissionResponse` and its nested per-field guards)
+  validates every field of a parsed `201` response — never a bare type
+  cast — rejecting the whole response into a controlled error on any
+  mismatch.
+- **`src/api/configurations.ts`** — `submitDeviceConfiguration(deviceId,
+  request, options)`: builds `/devices/${encodeURIComponent(deviceId)}/config`
+  (one opaque path segment, never trimmed), constructs a **fresh** request
+  body containing exactly `{vendor, raw_config_text}` (never forwarding a
+  caller-supplied object directly — TypeScript's structural typing doesn't
+  guarantee a runtime object has only the declared keys, so a stray
+  `device_id`/`observed_at`/other property on the input can never leak into
+  the serialized body), and rejects a structurally malformed `201` via
+  `isConfigurationSubmissionResponse`.
+- **`src/hooks/useConfigurationSubmission.ts`** — the
+  idle/submitting/success(`response`)/error(`message`, optional `code`)
+  submission lifecycle, following `useIncidents`'s own
+  `AbortController`/monotonically-increasing-request-ID/mounted-ref pattern:
+  a new `submit()` call aborts any in-flight submission and starts exactly
+  one new POST; a stale completion (by request ID or unmount) can never
+  update state; `AbortError` never surfaces as a visible error. An optional
+  `onSuccess` callback is held in a ref synced via `useLayoutEffect` (keyed
+  on the callback itself, never assigned during render, which React
+  disallows for refs) so the *latest committed* callback runs — not one a
+  passive effect might not have caught up to yet before an already-in-flight
+  POST resolves. The callback fires exactly once per current successful
+  POST, is never awaited, and neither a synchronous exception nor a rejected
+  Promise it returns can turn a successful submission into an error.
+- **`src/components/ConfigurationSubmissionForm.tsx`** — a standalone
+  component owning only local form-input/validation state (no duplicated
+  submission state), built on `useConfigurationSubmission`. Device ID and
+  raw-configuration text are preserved exactly as typed (device ID blankness
+  checked via `.trim().length === 0` without trimming the sent value; raw
+  configuration rejected locally only when `.length === 0`, so whitespace-
+  only text is allowed and never rewritten). The Vendor `<select>` is
+  enabled with exactly one option (`cisco-ios-xe` / "Cisco IOS-XE"). Submit
+  is natively `disabled` while submitting, backed by a defensive `onSubmit`
+  guard; local validation messages use `aria-invalid`/`aria-describedby`/
+  `role="alert"`; pending state uses `role="status"` text plus `aria-busy`
+  on the `<form>`; the hook's error state renders only its controlled
+  `message`/optional `code` (`role="alert"`, no raw JSON/HTML/stack trace,
+  no `dangerouslySetInnerHTML`); the success state (`role="status"`) shows
+  `device_id`/`snapshot_id`/`violations_detected`/`incidents_created`/
+  `incidents_updated` plus `normalized_config` inside a semantic
+  `<details>`/`<summary>` rendered as `JSON.stringify`-formatted text (React
+  text escaping, never raw HTML). Entered values remain present after
+  success or error.
+- **`src/pages/IncidentDashboard.tsx`** — unconditionally renders
+  `ConfigurationSubmissionForm` inside the existing `<main>`, above the
+  incident-list content, passing `onSubmissionSuccess={() => { refresh();
+  }}` — the *only* integration trigger (no effect watches submission state).
+  `IncidentDashboard` remains the sole owner of `useIncidents()`; no second
+  `useIncidents` instance, duplicated incident state, context/store,
+  polling, or new API request function was introduced. The triggered
+  refresh reuses `useIncidents`'s existing abort-and-supersede logic
+  unchanged, so old-card preservation, native Refresh-button disabling,
+  stale-result protection, and abort behavior all carry over automatically;
+  a refresh failure that follows a successful submission produces the
+  incident section's own independent controlled error state without ever
+  rewriting the already-successful submission result.
+- **New styles only** (`src/styles.css`) — form layout, labels/controls,
+  textarea sizing, validation/error text, pending/success/result
+  presentation, and the normalized-configuration preformatted region
+  (including a `prefers-color-scheme: dark` override); no existing
+  incident-card styling changed, no CSS framework or new asset added.
+- **101 new frontend tests across 3 new files, plus additions to 2 existing
+  files** (Vitest + React Testing Library): `src/api/client.test.ts` (+17,
+  `postJson` request shape/headers/credentials/`AbortSignal`, `{code,
+  detail}` surfacing, the new FastAPI-validation-array-to-safe-message
+  mapping, malformed/HTML/empty error bodies, malformed/empty 2xx JSON),
+  `src/api/configurations.test.ts` (30, path-segment encoding including
+  reserved characters, exact request body — including a dedicated
+  regression test proving a caller-supplied object with extra
+  `device_id`/`observed_at`/arbitrary properties is never forwarded as-is —
+  complete nested `normalized_config` structural validation), 22
+  hook-level lifecycle/concurrency tests
+  (`src/hooks/useConfigurationSubmission.test.ts` — idle/submitting/
+  success/error transitions, exact `submit()` call shape, supersession,
+  stale-success/stale-failure guards, `onSuccess` exactly-once semantics
+  including latest-callback-wins and synchronous-exception/rejected-Promise
+  isolation, unmount-before-resolution), 22 standalone form tests
+  (`src/components/ConfigurationSubmissionForm.test.tsx` — labels, the
+  single-option vendor select, local validation messages and their
+  clearing, byte-exact device-ID/raw-config preservation, exact submit call
+  shape, pending/disabled presentation, `ApiRequestError`/network-failure
+  presentation, success-field rendering, `normalized_config` details/escaped
+  text, `onSubmissionSuccess` exactly-once/withheld semantics, values
+  surviving success), and 9 new dashboard-level integration tests
+  (`src/pages/IncidentDashboard.test.tsx` — form presence across every
+  incident-section state, exactly-one-refresh-on-success, no-refresh-on-
+  failure/local-rejection, the refresh-failure/submission-success
+  independence case, and a supersession case against a pending manual
+  refresh) — focused on cross-component integration rather than repeating
+  assertions the standalone hook/form tests already make.
+
+**Not implemented yet** (deliberately — Day 6D and later): additional
+vendors, vendor autodetection, file upload, configuration history, device
+inventory, `GET /devices`, incident acknowledgment/resolution, incident
+mutations, filtering/pagination/client-side sorting, authentication, React
+Router, any global state library, TanStack Query, a component library,
+Tailwind, charts, telemetry, WebSockets/polling, Playwright, browser
+end-to-end tests, a frontend Docker image or Compose service.
+
+Backend test count: unchanged at **470** (360 non-`postgres` + 110
+`postgres`-marked) — Day 6C changed no backend code. Frontend test count:
+**176** across 7 files (see `docs/test-strategy.md` Section 7.1 for the full
+inventory).
+
 Day 3B added, also framework-independent (FR-03, NFR-02/NFR-03):
 
 - `ConfigurationPolicy` and `RequiredAclRule` — a seeded, fixture-data
@@ -1056,3 +1262,23 @@ domain-model.md's `GET /incidents` worked example, which had omitted
 not implemented; incident acknowledgment/resolution, authentication,
 query filtering, drift/telemetry, and the React dashboard remain Day 6 and
 later.
+
+**Day 6A — Deployment/Contract Stabilization**, **Day 6B — React Dashboard
+Foundation**, and **Day 6C — Configuration Submission Frontend Vertical
+Slice.** Day 6A proved the completed vertical slice in its real deployed
+Docker Compose shape and stabilized the frontend-facing HTTP/OpenAPI
+contract (`docs/frontend-api-contract.md`); Day 6B built the first frontend
+consumer of that contract, a read-only React dashboard requesting
+`GET /incidents`; Day 6C added the second frontend vertical slice, a
+configuration-submission form integrated into that same dashboard, POSTing
+to the already-existing `POST /devices/{device_id}/config` endpoint and
+triggering exactly one existing incident refresh on success — no backend
+code, API schema, or domain/application/persistence behavior changed across
+any of the three. See "Current Day 6A scope"/"Current Day 6B scope"/"Current
+Day 6C scope" above for exactly what is and is not implemented; backend test
+count is unchanged at 470 (360 non-`postgres` + 110 `postgres`-marked) since
+Day 5B, and frontend test count stands at 176 across 7 files. Day 6C is
+implemented and passes the full verification matrix but has not yet been
+committed — see CLAUDE.md's "Current Phase". Additional vendors, drift
+detection, telemetry, incident acknowledgment/resolution, authentication,
+and the Playwright/browser E2E suite remain Day 6D and later.

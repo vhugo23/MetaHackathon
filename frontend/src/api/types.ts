@@ -34,6 +34,63 @@ export interface ApiErrorResponse {
   detail: string;
 }
 
+// ---------------------------------------------------------------------------
+// POST /devices/{device_id}/config
+// ---------------------------------------------------------------------------
+
+export interface ConfigurationSubmissionRequest {
+  vendor: "cisco-ios-xe";
+  raw_config_text: string;
+}
+
+export interface NormalizedInterfaceResponse {
+  name: string;
+  description: string | null;
+  ip_address: string | null;
+  mtu: number | null;
+  admin_state: string;
+  acl_in: string | null;
+  acl_out: string | null;
+}
+
+export interface NormalizedBgpNeighborResponse {
+  neighbor_ip: string;
+  remote_as: number;
+}
+
+export interface NormalizedRoutingResponse {
+  bgp_neighbors: NormalizedBgpNeighborResponse[];
+}
+
+export interface NormalizedAclEntryResponse {
+  sequence: number;
+  action: string;
+  protocol: string;
+  source: string;
+  destination: string;
+}
+
+export interface NormalizedAclResponse {
+  name: string;
+  entries: NormalizedAclEntryResponse[];
+}
+
+export interface NormalizedConfigurationResponse {
+  hostname: string;
+  interfaces: NormalizedInterfaceResponse[];
+  routing: NormalizedRoutingResponse;
+  acls: NormalizedAclResponse[];
+}
+
+export interface ConfigurationSubmissionResponse {
+  device_id: string;
+  snapshot_id: string;
+  normalized_config: NormalizedConfigurationResponse;
+  violations_detected: number;
+  incidents_created: number;
+  incidents_updated: number;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -48,6 +105,14 @@ function isNullableString(value: unknown): value is string | null {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value);
+}
+
+function isNullableInteger(value: unknown): value is number | null {
+  return value === null || isInteger(value);
 }
 
 /**
@@ -91,5 +156,96 @@ export function isIncidentResponse(value: unknown): value is IncidentResponse {
     isNonEmptyString(value.created_at) &&
     isNonEmptyString(value.last_seen_at) &&
     isNonNegativeInteger(value.occurrence_count)
+  );
+}
+
+export function isNormalizedAclEntryResponse(value: unknown): value is NormalizedAclEntryResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    isInteger(value.sequence) &&
+    isNonEmptyString(value.action) &&
+    isNonEmptyString(value.protocol) &&
+    isNonEmptyString(value.source) &&
+    isNonEmptyString(value.destination)
+  );
+}
+
+export function isNormalizedAclResponse(value: unknown): value is NormalizedAclResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    isNonEmptyString(value.name) &&
+    Array.isArray(value.entries) &&
+    value.entries.every(isNormalizedAclEntryResponse)
+  );
+}
+
+export function isNormalizedInterfaceResponse(
+  value: unknown,
+): value is NormalizedInterfaceResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    isNonEmptyString(value.name) &&
+    isNullableString(value.description) &&
+    isNullableString(value.ip_address) &&
+    isNullableInteger(value.mtu) &&
+    isNonEmptyString(value.admin_state) &&
+    isNullableString(value.acl_in) &&
+    isNullableString(value.acl_out)
+  );
+}
+
+export function isNormalizedBgpNeighborResponse(
+  value: unknown,
+): value is NormalizedBgpNeighborResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return isNonEmptyString(value.neighbor_ip) && isInteger(value.remote_as);
+}
+
+export function isNormalizedRoutingResponse(value: unknown): value is NormalizedRoutingResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    Array.isArray(value.bgp_neighbors) && value.bgp_neighbors.every(isNormalizedBgpNeighborResponse)
+  );
+}
+
+export function isNormalizedConfigurationResponse(
+  value: unknown,
+): value is NormalizedConfigurationResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    isNonEmptyString(value.hostname) &&
+    Array.isArray(value.interfaces) &&
+    value.interfaces.every(isNormalizedInterfaceResponse) &&
+    isNormalizedRoutingResponse(value.routing) &&
+    Array.isArray(value.acls) &&
+    value.acls.every(isNormalizedAclResponse)
+  );
+}
+
+export function isConfigurationSubmissionResponse(
+  value: unknown,
+): value is ConfigurationSubmissionResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    isNonEmptyString(value.device_id) &&
+    isNonEmptyString(value.snapshot_id) &&
+    isNormalizedConfigurationResponse(value.normalized_config) &&
+    isNonNegativeInteger(value.violations_detected) &&
+    isNonNegativeInteger(value.incidents_created) &&
+    isNonNegativeInteger(value.incidents_updated)
   );
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { getJsonArray, ApiRequestError } from "./client";
+import { getJsonArray, postJson, ApiRequestError } from "./client";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -270,4 +270,236 @@ test("passes an AbortSignal through when supplied", async () => {
 
   const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
   expect(init.signal).toBe(controller.signal);
+});
+
+// ---------------------------------------------------------------------------
+// postJson
+// ---------------------------------------------------------------------------
+
+test("postJson uses POST and the given path", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 201));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postJson("/devices/spine-01/config", { a: 1 });
+
+  const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(url).toBe("http://localhost:8080/devices/spine-01/config");
+  expect(init.method).toBe("POST");
+});
+
+test("postJson joins the base URL and path without a double slash", async () => {
+  vi.stubEnv("VITE_API_BASE_URL", "http://localhost:8080/");
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 201));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postJson("/devices/spine-01/config", { a: 1 });
+
+  const [url] = fetchMock.mock.calls[0] as [string];
+  expect(url).toBe("http://localhost:8080/devices/spine-01/config");
+});
+
+test("postJson sends Accept: application/json", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 201));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postJson("/devices/spine-01/config", { a: 1 });
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  const headers = new Headers(init.headers);
+  expect(headers.get("Accept")).toBe("application/json");
+});
+
+test("postJson sends Content-Type: application/json", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 201));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postJson("/devices/spine-01/config", { a: 1 });
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  const headers = new Headers(init.headers);
+  expect(headers.get("Content-Type")).toBe("application/json");
+});
+
+test("postJson sends no Authorization header", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 201));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postJson("/devices/spine-01/config", { a: 1 });
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  const headers = new Headers(init.headers);
+  expect(headers.has("Authorization")).toBe(false);
+});
+
+test("postJson credentials is omit", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 201));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postJson("/devices/spine-01/config", { a: 1 });
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(init.credentials).toBe("omit");
+});
+
+test("postJson sends the exact given body as JSON, nothing added or removed", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 201));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await postJson("/devices/spine-01/config", {
+    vendor: "cisco-ios-xe",
+    raw_config_text: "hostname spine-01\n",
+  });
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(JSON.parse(init.body as string)).toEqual({
+    vendor: "cisco-ios-xe",
+    raw_config_text: "hostname spine-01\n",
+  });
+});
+
+test("postJson passes an AbortSignal through as the exact same object", async () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }, 201));
+  vi.stubGlobal("fetch", fetchMock);
+  const controller = new AbortController();
+
+  await postJson("/devices/spine-01/config", { a: 1 }, { signal: controller.signal });
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  expect(init.signal).toBe(controller.signal);
+});
+
+test("postJson returns the parsed JSON body on a successful response", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ device_id: "spine-01" }, 201)));
+
+  const result = await postJson("/devices/spine-01/config", { a: 1 });
+
+  expect(result).toEqual({ device_id: "spine-01" });
+});
+
+test("postJson surfaces a {code, detail} error safely with the public detail as the message", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(jsonResponse({ code: "device_conflict", detail: "conflict" }, 409)),
+  );
+
+  await expect(postJson("/devices/spine-01/config", { a: 1 })).rejects.toThrow("conflict");
+});
+
+test("postJson preserves the error code on the thrown ApiRequestError", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(jsonResponse({ code: "device_conflict", detail: "conflict" }, 409)),
+  );
+
+  try {
+    await postJson("/devices/spine-01/config", { a: 1 });
+    expect.unreachable("expected postJson to reject");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect((error as ApiRequestError).code).toBe("device_conflict");
+  }
+});
+
+test("postJson maps a FastAPI {detail: [...]} validation-error body to a stable safe message", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(
+      jsonResponse(
+        {
+          detail: [
+            {
+              loc: ["body", "vendor"],
+              msg: "field required",
+              type: "value_error.missing",
+            },
+          ],
+        },
+        422,
+      ),
+    ),
+  );
+
+  try {
+    await postJson("/devices/spine-01/config", { a: 1 });
+    expect.unreachable("expected postJson to reject");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ApiRequestError);
+    const message = (error as ApiRequestError).message;
+    // Never the raw array, a validation location, rejected input, or the
+    // literal field name/type internals.
+    expect(message).not.toContain("loc");
+    expect(message).not.toContain("vendor");
+    expect(message).not.toContain("value_error.missing");
+    expect(message).not.toMatch(/^\[/);
+    expect(message.length).toBeGreaterThan(0);
+  }
+});
+
+test("postJson produces a stable fallback message for a malformed (non-JSON) error body", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue(
+        new Response("not json", { status: 500, headers: { "Content-Type": "text/plain" } }),
+      ),
+  );
+
+  await expect(postJson("/devices/spine-01/config", { a: 1 })).rejects.toThrow(
+    "The request failed and no further detail is available.",
+  );
+});
+
+test("postJson produces a stable fallback message for an empty error body", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 502 })));
+
+  await expect(postJson("/devices/spine-01/config", { a: 1 })).rejects.toThrow(
+    "The request failed and no further detail is available.",
+  );
+});
+
+test("postJson produces a stable fallback message for an HTML error body, and never renders its content", async () => {
+  const htmlBody =
+    "<!DOCTYPE html><html><head><title>502 Bad Gateway</title></head><body><h1>Bad Gateway</h1></body></html>";
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValue(
+        new Response(htmlBody, { status: 502, headers: { "Content-Type": "text/html" } }),
+      ),
+  );
+
+  try {
+    await postJson("/devices/spine-01/config", { a: 1 });
+    expect.unreachable("expected postJson to reject");
+  } catch (error) {
+    const message = (error as ApiRequestError).message;
+    expect(message).toBe("The request failed and no further detail is available.");
+    expect(message).not.toContain("<html>");
+    expect(message).not.toContain("Bad Gateway");
+  }
+});
+
+test("postJson rejects an invalid-JSON successful response rather than throwing a raw parser error", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(new Response("{not valid json", { status: 201 })),
+  );
+
+  try {
+    await postJson("/devices/spine-01/config", { a: 1 });
+    expect.unreachable("expected postJson to reject");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ApiRequestError);
+    const message = (error as ApiRequestError).message;
+    expect(message).toBe("The server returned a response that could not be understood.");
+    expect(message).not.toMatch(/SyntaxError|JSON\.parse|position \d+/i);
+  }
+});
+
+test("postJson rejects an empty successful response body", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 201 })));
+
+  await expect(postJson("/devices/spine-01/config", { a: 1 })).rejects.toThrow(ApiRequestError);
 });

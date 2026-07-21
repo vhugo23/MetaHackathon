@@ -45,67 +45,138 @@ For each task:
 
 ## Current Phase
 
-**Day 6B — React dashboard foundation (first frontend vertical slice).**
+**Day 6C — Configuration submission frontend vertical slice (implemented,
+awaiting commit/CI approval).**
 
 Day 1 planning, Day 2 scaffolding, Day 3A, Day 3B, Day 4A, Day 4B1, Day 4B2,
-Day 4B3, Day 5A, Day 5B, Day 6A, and Day 6B are complete and approved. See
-README.md's "Current Project Status" for the full history. Day 4B ("Slice 1
-persistence foundations") is complete across all three reviewable gates
-(4B1/4B2/4B3). The first vertical slice (product-spec.md Section 11) is
+Day 4B3, Day 5A, Day 5B, Day 6A, and Day 6B are complete and approved; Day 6C
+is implemented (four reviewable gates, all approved) and passes the full
+frontend/backend verification matrix, but has not yet been committed or
+merged. See README.md's "Current Project Status" for the full history. Day 4B
+("Slice 1 persistence foundations") is complete across all three reviewable
+gates (4B1/4B2/4B3). The first vertical slice (product-spec.md Section 11) is
 runnable end to end over real HTTP against a real PostgreSQL database
 (Day 5B), Day 6A proved that same slice in its actual deployed Docker
 Compose shape (`scripts/compose_smoke.py`) and stabilized the OpenAPI/CORS
-contract (`docs/frontend-api-contract.md`), and Day 6B builds the first
-frontend consumer of that contract: a React/TypeScript/Vite dashboard
-(`frontend/`) requesting `GET /incidents` and rendering the complete
-request lifecycle (loading/empty/error-with-retry/populated). Day 6B
+contract (`docs/frontend-api-contract.md`), Day 6B built the first frontend
+consumer of that contract — a React/TypeScript/Vite dashboard (`frontend/`)
+requesting `GET /incidents` and rendering the complete request lifecycle
+(loading/empty/error-with-retry/populated) — and Day 6C adds the second
+frontend vertical slice: a configuration-submission form
+(`ConfigurationSubmissionForm`) integrated into that same dashboard, POSTing
+to the existing `POST /devices/{device_id}/config` endpoint and triggering
+exactly one `GET /incidents` refresh after a successful submission. Day 6C
 changed no backend code, no API schema, and no domain/application/
-persistence/migration behavior — see README.md's "Current Day 6B scope".
+persistence/migration behavior — see README.md's "Current Day 6C scope".
 
 Application code is now allowed for **`frontend/`** in addition to the
 Day 3A–Day 6A backend capabilities listed below:
 
-- `src/api/client.ts` (`getJsonArray`, `ApiRequestError` with an optional
-  `code`), `src/api/incidents.ts` (`fetchIncidents`), `src/api/types.ts`
-  (`IncidentResponse`, `PolicyViolationIncidentEvidenceResponse`,
-  `ApiErrorResponse`, `severity`/`status`/`source`/`violation_type`/
-  `direction` unions, and the `isIncidentResponse`/
-  `isPolicyViolationIncidentEvidenceResponse` runtime structural guards
-  that validate every parsed array element — never a bare type cast) —
-  derived directly from `docs/frontend-api-contract.md`, no invented
-  fields, `fingerprint` preserved. Enum-like fields are validated as
-  non-empty strings only (never a closed union), so an unrecognized future
-  backend value is preserved and rendered as text.
+- `src/api/client.ts` (`getJsonArray`, `postJson`, `ApiRequestError` with an
+  optional `code`), `src/api/incidents.ts` (`fetchIncidents`),
+  `src/api/configurations.ts` (`submitDeviceConfiguration`),
+  `src/api/types.ts` (`IncidentResponse`,
+  `PolicyViolationIncidentEvidenceResponse`, `ApiErrorResponse`,
+  `ConfigurationSubmissionRequest`, `ConfigurationSubmissionResponse`,
+  `NormalizedConfigurationResponse` and its nested interface/routing/ACL
+  response types, `severity`/`status`/`source`/`violation_type`/`direction`
+  unions, and the `isIncidentResponse`/
+  `isPolicyViolationIncidentEvidenceResponse`/
+  `isConfigurationSubmissionResponse` (plus its nested
+  `isNormalizedConfigurationResponse`/`isNormalizedInterfaceResponse`/
+  `isNormalizedRoutingResponse`/`isNormalizedBgpNeighborResponse`/
+  `isNormalizedAclResponse`/`isNormalizedAclEntryResponse`) runtime
+  structural guards that validate every parsed field — never a bare type
+  cast) — derived directly from `docs/frontend-api-contract.md`, no invented
+  fields (no `static_routes`), `fingerprint` preserved. Enum-like fields are
+  validated as non-empty strings only (never a closed union), so an
+  unrecognized future backend value is preserved and rendered as text.
+  `postJson` narrowly recognizes FastAPI's own `{"detail": [...]}` request-
+  validation body shape and maps it to one stable safe public message,
+  never rendering the array, field locations, rejected input, or any other
+  internal detail.
 - `src/hooks/useIncidents.ts` — the loading/success(`isRefreshing`)/error
   request-lifecycle state machine: one `AbortController` paired with a
   monotonically increasing request ID per request, so a late-resolving
   stale success or stale failure can never overwrite a newer result
   (independent of whether the client honors `AbortSignal`), a superseded
   request's `AbortError` never surfaces as an error, and unmount aborts the
-  active request. `refresh()` (shared by Refresh and Retry) preserves
-  previously loaded data instead of dropping to a full loading state.
-- `src/pages/IncidentDashboard.tsx` and `src/components/{LoadingState,
-  IncidentEmptyState,IncidentErrorState,IncidentCard}.tsx` — the four
-  required UI states, incidents rendered as responsive cards in backend
-  order, evidence/fingerprint in an accessible `<details>` region, and a
-  Refresh button that is natively `disabled` (not merely `aria-disabled`)
-  while a refresh is pending, with `aria-busy`/an `aria-live="polite"`
-  status communicating the pending refresh
+  active request. `refresh()` (shared by Refresh and Retry, and now also by
+  a successful configuration submission) preserves previously loaded data
+  instead of dropping to a full loading state.
+- `src/hooks/useConfigurationSubmission.ts` — the
+  idle/submitting/success(`response`)/error(`message`, optional `code`)
+  submission lifecycle for `POST /devices/{device_id}/config`, following the
+  same `AbortController`/monotonically-increasing-request-ID/mounted-ref
+  guarantees as `useIncidents`: a new `submit()` call aborts any in-flight
+  submission and starts exactly one new POST, a stale completion can never
+  overwrite newer state, `AbortError` never surfaces as a visible error, and
+  unmount aborts the active request and blocks further state updates. An
+  optional `onSuccess` callback is stored in a ref synced via
+  `useLayoutEffect` (never assigned during render) so the latest committed
+  callback — not a stale closure — always runs, exactly once, for a current
+  successful POST; the callback's outcome (a synchronous exception or a
+  rejected Promise) is deliberately never awaited and can never turn a
+  successful submission into an error.
+- `src/components/ConfigurationSubmissionForm.tsx` — a standalone controlled
+  form (device ID text input, an enabled single-option `cisco-ios-xe`
+  vendor `<select>`, a raw-configuration `<textarea>`) built on
+  `useConfigurationSubmission`. Device ID blankness is checked via
+  `deviceId.trim().length === 0` without ever trimming the value actually
+  sent; raw configuration is rejected locally only when
+  `rawConfigText.length === 0` (whitespace-only text is allowed) and is
+  never trimmed, normalized, or line-ending-rewritten. The submit button is
+  natively `disabled` while submitting, with a defensive `onSubmit` guard as
+  a second line of defense against a stray submit event; local validation
+  messages use `aria-invalid`/`aria-describedby`/`role="alert"`; pending
+  state uses `role="status"` text and `aria-busy` on the `<form>`; the
+  hook's error state renders only its controlled `message`/`code` text
+  (`role="alert"`); the success state (`role="status"`) displays
+  `device_id`/`snapshot_id`/`violations_detected`/`incidents_created`/
+  `incidents_updated` plus `normalized_config` inside a semantic
+  `<details>`/`<summary>`, rendered as JSON text via `JSON.stringify` (React
+  text escaping, never `dangerouslySetInnerHTML`).
+- `src/pages/IncidentDashboard.tsx` — still the sole owner of
+  `useIncidents()` (no duplicate incident state, no second data-fetching
+  hook); now also renders `ConfigurationSubmissionForm` inside the existing
+  `<main>`, above the incident-list content and unconditionally visible
+  across every incident-section state (loading/empty/populated/error/
+  refreshing), passing `onSubmissionSuccess={() => { refresh(); }}` as the
+  only integration trigger (no effect watches submission state). A
+  successful POST therefore causes exactly one additional `GET /incidents`;
+  a failed POST or a local validation rejection causes zero. A refresh
+  triggered this way inherits every existing `useIncidents` guarantee
+  (old-card preservation, native Refresh-button disabling, stale-result
+  protection, abort behavior) unchanged; a subsequent refresh failure
+  produces the incident section's own controlled error state without ever
+  changing the already-successful submission result.
+- `src/components/{LoadingState,IncidentEmptyState,IncidentErrorState,
+  IncidentCard}.tsx` — unchanged from Day 6B: the four required incident-
+  list UI states, incidents rendered as responsive cards in backend order,
+  evidence/fingerprint in an accessible `<details>` region, and a Refresh
+  button that is natively `disabled` (not merely `aria-disabled`) while a
+  refresh is pending, with `aria-busy`/an `aria-live="polite"` status
+  communicating the pending refresh.
 - the `frontend` GitHub Actions CI job (Node-based, no PostgreSQL/Docker)
-- 75 frontend Vitest/RTL tests across 4 files (`src/api/client.test.ts`,
-  `src/api/incidents.test.ts`, `src/hooks/useIncidents.test.ts`,
+- 176 frontend Vitest/RTL tests across 7 files (`src/api/client.test.ts`,
+  `src/api/incidents.test.ts`, `src/api/configurations.test.ts`,
+  `src/hooks/useIncidents.test.ts`,
+  `src/hooks/useConfigurationSubmission.test.ts`,
+  `src/components/ConfigurationSubmissionForm.test.tsx`,
   `src/pages/IncidentDashboard.test.tsx`)
 
-**Still prohibited**: configuration-submission UI, incident acknowledgment/
-resolution, incident mutations, filtering/pagination/client-side sorting,
-authentication/authorization, React Router, any global state library,
-TanStack Query, a component library, Tailwind, charts, telemetry,
-WebSockets/polling, Playwright, browser end-to-end tests, a frontend Docker
-image or Compose service. All of these are Day 6C or later.
+**Still prohibited**: additional vendors, vendor autodetection, file upload,
+configuration history, device inventory, `GET /devices`, incident
+acknowledgment/resolution, incident mutations,
+filtering/pagination/client-side sorting, authentication/authorization,
+React Router, any global state library, TanStack Query, a component library,
+Tailwind, charts, telemetry, WebSockets/polling, Playwright, browser
+end-to-end tests, a frontend Docker image or Compose service. All of these
+are Day 6D or later.
 
 Application code is currently allowed **only** for the completed Day 3A,
-Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, Day 5B, Day 6A, and
-Day 6B capabilities:
+Day 3B, Day 4A, Day 4B1, Day 4B2, Day 4B3, Day 5A, Day 5B, Day 6A, Day 6B,
+and Day 6C capabilities:
 
 - explicit OpenAPI `operation_id`s (`health_check`,
   `submit_device_configuration`, `list_incidents`) and documented `409`/
@@ -486,7 +557,8 @@ parameters, drift detection, anomaly/telemetry ingestion, structured
 logging beyond FastAPI's own request logging, Playwright, browser
 end-to-end tests, and new Alembic migrations. The React dashboard
 (`frontend/`), Vite, and Node/npm tooling are no longer prohibited — Day 6B
-implemented the first frontend vertical slice (see the "Current Phase"
-section above). All remaining items are Day 6C or later, against the
-domain model, architecture, and ports already documented, with tests
-written first per the Development Rules above.
+implemented the first frontend vertical slice, and Day 6C implemented the
+second (configuration submission — see the "Current Phase" section above).
+All remaining items are Day 6D or later, against the domain model,
+architecture, and ports already documented, with tests written first per
+the Development Rules above.
