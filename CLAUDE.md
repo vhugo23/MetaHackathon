@@ -45,9 +45,82 @@ For each task:
 
 ## Current Phase
 
+**Day 9 — Fixed-baseline configuration drift detection (FR-04, AC-05,
+AC-06), implemented across four reviewable gates (domain value objects,
+pure `DriftDetector`, an on-demand application service, and the HTTP
+endpoint), all approved.**
+
+`DriftReport{added, removed, changed}` and `DriftEntry{resource, field,
+old_value, new_value}` (`meta_rne.domain.drift`) are new, immutable value
+objects — `field=None` and an identity-string `old_value`/`new_value` for a
+whole-resource `added`/`removed` entry; the exact changed attribute name
+and a converted scalar value (`None` stays `null`, `int` renders as a
+decimal string, an enum renders as its `.value`) for a `changed` entry.
+`DriftDetector.compare(baseline, current) -> DriftReport`
+(`meta_rne.detection.drift_detector`) is a pure, deterministic,
+framework-independent function comparing two `NormalizedConfiguration`
+values: `interfaces` (by name; `description`/`ip_address`/`mtu`/
+`admin_state`/`acl_in`/`acl_out`), `routing.bgp_neighbors` (by
+`neighbor_ip`; `remote_as`), and `acls` (by name, whole-ACL
+addition/removal only — a matched ACL's `entries` are deliberately not
+diffed; no ACL-entry-level comparison contract exists). `hostname` and
+`static_routes` are not compared (the latter because
+`NormalizedRouting.static_routes` remains unimplemented, Day 3A). Output
+preserves each input tuple's order — never re-sorted — matching by
+identity, never by tuple position.
+
+`GetDeviceDriftService.get_drift(device_id) -> DriftReport`
+(`meta_rne.application.device_drift`) is a new, on-demand, read-only
+application service, mirroring `ListIncidentsService`'s exception-preserving
+`UnitOfWork` lifecycle: one `UnitOfWork` per call, `close()` only, never
+`commit()`. It loads the `Device` (raising the new `DeviceNotFoundError`,
+`meta_rne.application.errors`, when absent), follows the persisted
+`baseline_snapshot_id`/`current_snapshot_id` pointers (never repository
+iteration order, never a "latest timestamp" query), loads both
+`ConfigurationSnapshot`s through the existing
+`ConfigurationSnapshotRepository.get_by_id` — no new repository method or
+migration was needed — and calls `DriftDetector.compare` exactly once,
+returning its `DriftReport` unchanged. A device with exactly one submission
+has `baseline_snapshot_id == current_snapshot_id`, so the report is empty
+by construction (AC-06); a later submission is always compared against the
+original, fixed baseline, never "the previous submission" (AC-05) — there
+is no baseline-redesignation API.
+
+**`GET /devices/{device_id}/drift`** (`api/routes.py`, `operation_id =
+"get_device_drift"`) exposes this service: `200` with the direct
+`{"added": [...], "removed": [...], "changed": [...]}` body (no envelope,
+matching every other success response); `404` with the direct
+`{"code": "device_not_found", "detail": "device not found:
+'<device_id>'"}` body (`DeviceNotFoundError` mapped in `api/errors.py`,
+`str(exc)` used verbatim as `detail` — lowercase `device_not_found`,
+matching every other error code in this API, including the sibling
+`incident_not_found`). A `Device` whose snapshot pointer references a
+snapshot that does not exist — an internal invariant violation, never
+reachable through this API's own write paths — remains deliberately
+**unmapped**: it falls through to FastAPI/Starlette's own generic response
+(`500`, `Content-Type: text/plain; charset=utf-8`, body `Internal Server
+Error`), never this API's `ApiErrorResponse` JSON schema, never a `404`,
+and never a leaked traceback. No new repository method, migration,
+dependency, or Docker/Compose change was required. `api/dependencies.py`
+was not touched.
+
+**No drift incident is created.** `IncidentSource.DRIFT` does not exist;
+`GetDeviceDriftService` never calls `uow.commit()`,
+`uow.devices.save()`, or `uow.configuration_snapshots.add()`. Deciding
+which diff entries are incident-worthy remains explicitly deferred to a
+later day, same as telemetry/anomaly detection (FR-05/FR-06). No frontend
+consumes this endpoint yet.
+
+Verified automated-test inventory as of Day 9: backend `pytest`,
+frontend Vitest, Python orchestration-helper, and Playwright browser
+counts are recorded in docs/test-strategy.md Section 23 (Day 9) after
+independent re-verification of the full matrix.
+
+---
+
 **Day 8A — Multi-vendor configuration support: Arista EOS as the platform's
 second vendor (implemented across gates 8A-A through 8A-F, all approved,
-awaiting commit/tag).**
+committed and tagged as of Day 8B).**
 
 The platform now supports two vendors through the same, unmodified
 ingestion pipeline: **Cisco IOS-XE** (Slice 1) and **Arista EOS** (Day 8A).
@@ -1005,7 +1078,7 @@ below):
 enum member/DB constraint has no public transition), reopening, assignment,
 comments/notes, audit history, user identity, bulk resolution, status
 filtering, authentication/authorization, filtering/pagination/sorting query
-parameters, drift detection, anomaly/telemetry ingestion, and structured
+parameters, anomaly/telemetry ingestion, and structured
 logging beyond FastAPI's own request logging. Explicit, single-purpose
 incident resolution (`POST /incidents/{incident_id}/resolve`, `OPEN ->
 RESOLVED` only) is no longer prohibited as of Day 7A — see the "Current
@@ -1024,7 +1097,11 @@ so. **A frontend resolve control exists as of Day 7B** — the third frontend
 vertical slice (Day 6B: incident list; Day 6C: configuration submission;
 Day 7B: incident resolution) — see "Current Phase" above. **A browser
 (Playwright) resolution scenario now exists as of Day 7C** — see "Current
-Phase" above for the full detail; it is no longer deferred.
+Phase" above for the full detail; it is no longer deferred. **Read-only
+configuration drift detection now exists as of Day 9** — `GET
+/devices/{device_id}/drift`, see "Current Phase" above for the full
+detail; drift-triggered incident creation, telemetry ingestion, and
+anomaly detection remain prohibited/deferred.
 All remaining items are later days, against the domain model, architecture,
 and ports already documented, with tests written first per the Development
 Rules above.

@@ -898,11 +898,11 @@ Tests architecture.md Section 5's contract:
   Section 4.1). No `FixedClock` is involved: `PolicyEvaluator` takes
   `observed_at` as a plain argument, so the test supplies a literal
   `datetime` directly.
-- **`DriftDetector` — baseline == current → empty report** (AC-06, later
-  slice) — first submission's `Device.baseline_snapshot_id ==
+- **`DriftDetector` — baseline == current → empty report** (AC-06,
+  implemented Day 9) — first submission's `Device.baseline_snapshot_id ==
   current_snapshot_id`, so `compare` is called with identical values.
 - **`DriftDetector` — removed ACL vs. baseline → `removed` entry**
-  (AC-05, later slice).
+  (AC-05, implemented Day 9).
 - All unit tests (Section 4) — plain values in, plain values out.
 
 ---
@@ -1207,8 +1207,8 @@ test("should create and surface an incident for a missing required ACL", async (
 | AC-02 | Arista equivalent of #1 (later slice) |
 | AC-03 | #6, #8 |
 | AC-04 | #7, #9, #11 |
-| AC-05 | `DriftDetector` removed-ACL test, Section 12 (later slice) |
-| AC-06 | `DriftDetector` baseline==current test, Section 12 (later slice) |
+| AC-05 | `DriftDetector` removed-ACL test (Section 12), `GetDeviceDriftService`/API-contract/PostgreSQL drift tests (Day 9) |
+| AC-06 | `DriftDetector` baseline==current test (Section 12), `GetDeviceDriftService`/API-contract/PostgreSQL drift tests (Day 9) |
 | AC-07 | RULE-CPU-HIGH test (later slice) |
 | AC-08 | RULE-LINK-FLAP test (later slice) |
 | AC-09 | RULE-BGP-DOWN test (later slice) |
@@ -1559,3 +1559,55 @@ Cisco and Arista submissions and one incident resolution, then inspected at:
 This audit is manual and non-repeatable by design — it is a one-time,
 human-reviewed check of the current rendered state, not a CI gate. No
 automated visual-regression tool was added.
+
+## 23. Configuration Drift Detection Verification (Day 9)
+
+Verifies the fixed-baseline configuration-drift vertical slice (FR-04,
+AC-05, AC-06 — architecture.md Section 20, domain-model.md Section 20)
+through the full existing verification matrix, independently re-run in
+this gate.
+
+**Drift-specific test additions, by layer:**
+
+| Layer | Count | Location |
+|---|---|---|
+| `DriftEntry`/`DriftReport` domain | 9 | `backend/tests/unit/domain/test_drift.py` |
+| `DriftDetector` (pure comparison) | 22 | `backend/tests/unit/detection/test_drift_detector.py` |
+| `GetDeviceDriftService` (application) | 12 | `backend/tests/unit/application/test_device_drift.py` |
+| API contract (`GET /devices/{device_id}/drift`) | 11 | `backend/tests/contract/api/test_device_drift_api.py` |
+| OpenAPI (additive; the existing path-set test was updated in place with no count change) | 6 | `backend/tests/contract/api/test_openapi_contract.py` |
+| Real-PostgreSQL AC-05/AC-06 | 2 | `backend/tests/integration/api/test_api_postgres.py` |
+| **Drift-specific total** | **62** | — |
+
+**Full verification matrix, independently re-run this gate (all passed):**
+
+| Check | Result |
+|---|---|
+| Backend `ruff format --check .` | 108 files already formatted |
+| Backend `ruff check .` | All checks passed |
+| Backend `mypy src` | Success, 55 source files |
+| Backend `pytest -m "not postgres"` | 546 passed, 144 deselected |
+| Backend `pytest -m postgres` (disposable Compose Postgres) | 144 passed, 546 deselected |
+| Built-image verification (real `docker build` + `docker compose up`) | `GET /health` 200; `GET /openapi.json` contains `/devices/{device_id}/drift`; `GET /devices/missing-device/drift` → 404, `application/json`, exact `{"code": "device_not_found", "detail": "device not found: 'missing-device'"}` |
+| `scripts/compose_smoke.py` | Smoke flow complete — all assertions passed |
+| Frontend `format:check`/`lint`/`typecheck` | Clean (one gitignored generated file flagged by `format:check`, not source) |
+| Frontend `vitest --run` | 298 passed, 8 files |
+| Frontend `vite build` | Succeeded |
+| `scripts/test_browser_e2e.py` | 19 passed |
+| `scripts/browser_e2e.py` (3 Playwright Chromium scenarios) | 3 passed, unmodified — proves no regression to the existing operator workflows, not drift behavior (the drift endpoint has no frontend consumer and is not exercised by these scenarios) |
+
+**Independently verified combined automated-test total as of Day 9:**
+
+| Layer | Count |
+|---|---|
+| Backend `pytest` | 690 (546 non-`postgres` + 144 `postgres`) |
+| Frontend Vitest | 298, 8 files |
+| Python orchestration-helper (`scripts/test_browser_e2e.py`) | 19, 1 file |
+| Playwright (browser) | 3, 3 files |
+| **Combined** | **1,010** |
+
+**Explicitly not proven by this gate:** drift-triggered incident creation
+(`IncidentSource.DRIFT` does not exist), telemetry ingestion, anomaly
+detection (FR-05/FR-06, AC-07–AC-09), ACL-entry-level diffing, frontend
+rendering of drift data (no consumer exists), and drift acknowledgment or
+remediation.

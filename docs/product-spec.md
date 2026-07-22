@@ -59,6 +59,8 @@ Evaluate a device's `NormalizedConfiguration` against every applicable `Configur
 ### FR-04 — Configuration Drift Detection
 Compare a device's current normalized configuration against its **baseline** — the first successfully ingested configuration for that device, fixed at ingestion time and never silently replaced by later submissions — and report added, removed, and changed fields as a structured diff. A device with only one submission has current == baseline, so it produces zero drift changes.
 
+**Implemented as of Day 9** (`DriftDetector.compare`, `GetDeviceDriftService`, `GET /devices/{device_id}/drift` — see docs/architecture.md Section 20 and CLAUDE.md "Current Phase"). Comparison scope: interfaces (by name), BGP neighbors (by neighbor IP), and whole-ACL additions/removals (by name) — ACL-entry-level diffing, hostname, and static routes are not compared. The endpoint is read-only and never creates an incident.
+
 ### FR-05 — Telemetry Ingestion and Simulation
 Accept telemetry samples for a device (CPU %, memory %, interface error rate, per-interface link state, per-neighbor BGP session state) via a REST endpoint. A telemetry simulator generates realistic streams from a fixture in the absence of live device polling. The platform retains a bounded recent history per device (not only the latest sample), so window-based rules can evaluate a device's recent trajectory.
 
@@ -231,9 +233,9 @@ Cisco only, single configuration submission, policy evaluation only — **exclud
 
 **AC-04** — Given a `ConfigurationPolicy` requiring `ACL-EXTERNAL-IN` inbound on `GigabitEthernet0/1` for `spine-01`, and a Cisco configuration for `spine-01` that does not assign that ACL, `POST /devices/spine-01/config` returns `201` with `violations_detected: 1, incidents_created: 1, incidents_updated: 0`, and `GET /incidents` subsequently returns exactly one `Incident` with `severity = Medium`, `source = POLICY_VIOLATION`, and `rule_ref` equal to the policy's ID.
 
-**AC-05** — Given a device whose baseline configuration contains an ACL and a later submission that removes it, `GET /devices/{id}/drift` returns a diff with at least one `removed` entry referencing that ACL. *(Later slice.)*
+**AC-05** — Given a device whose baseline configuration contains an ACL and a later submission that removes it, `GET /devices/{id}/drift` returns a diff with at least one `removed` entry referencing that ACL. *(Implemented as of Day 9 — proven at the unit, application, API-contract, and real-PostgreSQL levels.)*
 
-**AC-06** — Given a device with exactly one configuration submission, `GET /devices/{id}/drift` returns an empty diff with zero changes (current == baseline). *(Later slice.)*
+**AC-06** — Given a device with exactly one configuration submission, `GET /devices/{id}/drift` returns an empty diff with zero changes (current == baseline). *(Implemented as of Day 9 — proven at the unit, application, API-contract, and real-PostgreSQL levels.)*
 
 **AC-07** — Given telemetry with CPU > 90% on 2 consecutive samples, `GET /incidents` returns an incident with `rule_ref = "RULE-CPU-HIGH"` and populated device ID, severity, and evidence. *(Later slice.)*
 

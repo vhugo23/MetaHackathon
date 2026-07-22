@@ -12,7 +12,10 @@ calls `POST /incidents/{incident_id}/resolve` for every `OPEN` incident's
 "Resolve incident" control** — see README.md's "Current Day 7B scope". The
 "Frontend consumption notes" subsections added to Sections 5–7 below
 describe how the *current* frontend uses this contract, including Day 7B's
-resolution flow.
+resolution flow. **Day 9 added a new endpoint, `GET
+/devices/{device_id}/drift` (Section 8), as a backend-only addition with
+no frontend consumer yet** — same pattern as Day 7A's backend-only
+addition of the resolve endpoint.
 **Derived from:** `backend/src/meta_rne/api/schemas.py`, `api/routes.py`,
 `api/errors.py`, `api/cors.py` (current source, not a planning aspiration)
 
@@ -71,6 +74,7 @@ generated client off of):
 | `POST /devices/{device_id}/config` | `submit_device_configuration` |
 | `GET /incidents` | `list_incidents` |
 | `POST /incidents/{incident_id}/resolve` | `resolve_incident` |
+| `GET /devices/{device_id}/drift` | `get_device_drift` |
 
 ## 3. Identifiers, timestamps, and enums
 
@@ -114,7 +118,7 @@ authoritative — never read from the request body.
 
 | Field | Type | Notes |
 |---|---|---|
-| `vendor` | `string` | Non-empty, non-whitespace-only. As of Day 8A, both `"cisco-ios-xe"` and `"arista-eos"` resolve to a registered adapter; any other value (well-formed or not) still returns the existing `unsupported_vendor` 422 contract (Section 8) — a third vendor is not a frontend concern to guard against, since the backend already rejects it deterministically. |
+| `vendor` | `string` | Non-empty, non-whitespace-only. As of Day 8A, both `"cisco-ios-xe"` and `"arista-eos"` resolve to a registered adapter; any other value (well-formed or not) still returns the existing `unsupported_vendor` 422 contract (Section 9) — a third vendor is not a frontend concern to guard against, since the backend already rejects it deterministically. |
 | `raw_config_text` | `string` | Non-empty. The literal device configuration text. |
 
 `device_id` and `observed_at` in the body are **rejected** (422) —
@@ -185,7 +189,7 @@ required no code change, since both were already generic over
 `ConfigurationSubmissionRequest`. No vendor-specific client-side syntax
 validator exists — a malformed-but-syntactically-plausible EOS or IOS-XE
 submission is still validated only by the backend adapter, surfaced
-through the existing `configuration_parse_error` contract (Section 8)
+through the existing `configuration_parse_error` contract (Section 9)
 unchanged.
 
 ## 6. `GET /incidents`
@@ -324,7 +328,72 @@ unrecognized future status all render no action, matching Section 3's
 "treat unknown values defensively" guidance without ever exposing a control
 for a status this endpoint can't legally accept.
 
-## 8. Errors
+## 8. `GET /devices/{device_id}/drift` (Day 9, backend-only)
+
+Compares a device's current normalized configuration against its fixed
+baseline (the first successfully accepted configuration for that device)
+and returns the structural diff. Read-only — no request body, no query
+parameters, no write of any kind. **No frontend consumer exists yet** —
+the current React dashboard does not call this endpoint.
+
+```
+GET /devices/{device_id}/drift
+```
+
+Required path parameter: `device_id` (string). No query parameters.
+
+**Success response** — `200 OK`, the resource itself, no envelope:
+
+```json
+{
+  "added": [
+    {
+      "resource": "interface:Ethernet1",
+      "field": null,
+      "old_value": null,
+      "new_value": "Ethernet1"
+    }
+  ],
+  "removed": [],
+  "changed": []
+}
+```
+
+Each entry in `added`/`removed`/`changed`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `resource` | `string` | `"interface:<name>"`, `"acl:<name>"`, or `"bgp_neighbor:<neighbor_ip>"` |
+| `field` | `string \| null` | The exact changed attribute name (`"description"`, `"ip_address"`, `"mtu"`, `"admin_state"`, `"acl_in"`, `"acl_out"`, `"remote_as"`) for a `changed` entry; `null` for a whole-resource `added`/`removed` entry |
+| `old_value` | `string \| null` | `null` for an `added` entry |
+| `new_value` | `string \| null` | `null` for a `removed` entry |
+
+A device with exactly one configuration submission always returns
+`{"added": [], "removed": [], "changed": []}` (baseline == current, AC-06).
+A later submission is always compared against the original, fixed
+baseline, never "the previous submission" — there is no
+baseline-redesignation endpoint.
+
+**Unknown device** — exact `404` body (see the error table below):
+
+```json
+{"code": "device_not_found", "detail": "device not found: 'missing-device'"}
+```
+
+**Internal invariant failure** (a corrupted persisted snapshot reference —
+not reachable through this API's own write paths): `500`, but **not** this
+API's `ApiErrorResponse` JSON shape — the framework's own generic response,
+`Content-Type: text/plain; charset=utf-8`, body `Internal Server Error`.
+No traceback or other internal detail is included.
+
+Comparison scope: interfaces (by name; scalar fields `description`,
+`ip_address`, `mtu`, `admin_state`, `acl_in`, `acl_out`), BGP neighbors (by
+`neighbor_ip`; scalar field `remote_as`), and whole-ACL additions/removals
+(by name) — a matched ACL's `entries` are not diffed. `hostname` and
+`static_routes` are not compared. No severity, recommendation, or incident
+is ever produced by this endpoint.
+
+## 9. Errors
 
 Every failure response is a bare object, no envelope:
 
@@ -386,7 +455,7 @@ trace, SQL detail, or other internal value this document's error table
 already says the backend keeps generic is ever exposed further by the
 frontend.
 
-## 9. Example: missing-ACL submission
+## 10. Example: missing-ACL submission
 
 ```bash
 curl -X POST http://localhost:8080/devices/spine-01/config \
@@ -399,7 +468,7 @@ Produces the `201` response shown in Section 5 with
 ACL is assigned inbound on `GigabitEthernet0/1`, and a
 `policy-acl-external-in` policy applies to `spine-01`.
 
-## 10. Not implemented yet
+## 11. Not implemented yet
 
 Do not build frontend features assuming any of the following exist:
 
@@ -411,7 +480,9 @@ Do not build frontend features assuming any of the following exist:
   explicit, single-incident `OPEN -> RESOLVED` resolution, now called by the
   dashboard's "Resolve incident" control for exact `OPEN` incidents only
 - `GET /devices`, `GET /devices/{id}`, `GET /incidents/{id}`
-- Drift detection, telemetry ingestion, or anomaly rules
+- Telemetry ingestion or anomaly rules — configuration drift detection
+  (`GET /devices/{device_id}/drift`, Section 8) is implemented as of Day 9,
+  but has no frontend consumer
 - Any vendor besides `cisco-ios-xe`/`arista-eos` (both now supported as of
   Day 8A — see Section 5's `vendor` row and CLAUDE.md's "Current Phase")
 - Wildcard or shared policy applicability, and policy authoring/CRUD

@@ -38,6 +38,36 @@ T1 = T0 + timedelta(hours=1)
 _MISSING_ACL_RAW_CONFIG = "hostname spine-01\n!\ninterface GigabitEthernet0/1\n!\n"
 _NO_HOSTNAME_RAW_CONFIG = "interface GigabitEthernet0/1\n!\n"
 
+# The "removed" config drops both the ACL definition block and the
+# interface's "ip access-group ... in" assignment — CiscoAdapter's own rule
+# 7 (UNDECLARED_ACL_REFERENCE) rejects a config that references an ACL
+# without defining it, so a dangling assignment cannot be used to isolate
+# only the ACL-definition removal. This legitimately produces two drift
+# entries: the ACL definition itself (removed) and the interface's acl_in
+# field (changed, "ACL-EXTERNAL-IN" -> null) — both asserted below.
+_ACL_DEFINED_RAW_CONFIG = (
+    "hostname spine-01\n"
+    "!\n"
+    "interface GigabitEthernet0/1\n"
+    " ip address 10.0.0.1 255.255.255.252\n"
+    " ip access-group ACL-EXTERNAL-IN in\n"
+    " no shutdown\n"
+    "!\n"
+    "ip access-list extended ACL-EXTERNAL-IN\n"
+    " 10 permit ip any any\n"
+    "!\n"
+    "end\n"
+)
+_ACL_REMOVED_RAW_CONFIG = (
+    "hostname spine-01\n"
+    "!\n"
+    "interface GigabitEthernet0/1\n"
+    " ip address 10.0.0.1 255.255.255.252\n"
+    " no shutdown\n"
+    "!\n"
+    "end\n"
+)
+
 
 class _FakeAristaAdapter:
     vendor_id: str = VendorType.ARISTA_EOS
@@ -470,6 +500,85 @@ def test_resolve_incident_postgres__reingestion_after_resolve__creates_new_open_
     third_body = third.json()
     assert third_body["incidents_created"] == 0
     assert third_body["incidents_updated"] == 1
+
+
+# --- GET /devices/{device_id}/drift (Day 9, Gate 4) --------------------------
+
+
+def test_device_drift_postgres__ac06_single_submission__returns_empty_report(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    client = _app(sqlalchemy_session_factory, snapshot_id_factory=lambda: "snap-1")
+    setup_response = client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _ACL_DEFINED_RAW_CONFIG},
+    )
+    assert setup_response.status_code == 201
+
+    response = client.get(f"/devices/{DEVICE_ID}/drift")
+
+    assert response.status_code == 200
+    assert response.json() == {"added": [], "removed": [], "changed": []}
+
+
+def test_device_drift_postgres__ac05_later_removal__returns_exact_removed_entry(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    client1 = _app(
+        sqlalchemy_session_factory, snapshot_id_factory=lambda: "snap-1", clock=lambda: T0
+    )
+    first_setup_response = client1.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _ACL_DEFINED_RAW_CONFIG},
+    )
+    assert first_setup_response.status_code == 201
+
+    client2 = _app(
+        sqlalchemy_session_factory, snapshot_id_factory=lambda: "snap-2", clock=lambda: T1
+    )
+    second_setup_response = client2.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _ACL_REMOVED_RAW_CONFIG},
+    )
+    assert second_setup_response.status_code == 201
+
+    response = client2.get(f"/devices/{DEVICE_ID}/drift")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["added"] == []
+    assert body["removed"] == [
+        {
+            "resource": "acl:ACL-EXTERNAL-IN",
+            "field": None,
+            "old_value": "ACL-EXTERNAL-IN",
+            "new_value": None,
+        }
+    ]
+    assert body["changed"] == [
+        {
+            "resource": "interface:GigabitEthernet0/1",
+            "field": "acl_in",
+            "old_value": "ACL-EXTERNAL-IN",
+            "new_value": None,
+        }
+    ]
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    device = verify_uow.devices.get_by_id(DEVICE_ID)
+    assert device is not None
+    assert device.baseline_snapshot_id == "snap-1"
+    assert device.current_snapshot_id == "snap-2"
+    verify_uow.close()
+
+    # A fresh app/API instance re-reading the same persisted PostgreSQL
+    # state (no shared Python object, no shared UnitOfWork) reports the
+    # identical drift result — proving the result comes from persisted
+    # state, not in-process memory.
+    client3 = _app(sqlalchemy_session_factory)
+    fresh_response = client3.get(f"/devices/{DEVICE_ID}/drift")
+    assert fresh_response.status_code == 200
+    assert fresh_response.json() == body
 
 
 def test_api_postgres__lazy_database_url_composition__creates_and_disposes_engine(

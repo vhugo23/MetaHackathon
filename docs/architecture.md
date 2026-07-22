@@ -422,8 +422,9 @@ inputs in, a tuple out, no I/O.
 
 ## 8. Configuration Drift Detection Flow
 
-Implements FR-04, AC-05/AC-06. **Not part of the first vertical slice —
-the next one.**
+Implements FR-04, AC-05/AC-06. **Implemented as of Day 9** — see Section 20
+for the full implementation record (application service, HTTP route, error
+mapping, and verification).
 
 ```
 DriftDetector.compare(baseline: NormalizedConfiguration, current: NormalizedConfiguration)
@@ -443,14 +444,24 @@ DriftDetector.compare(baseline: NormalizedConfiguration, current: NormalizedConf
   identical content, always diff to empty. `ConfigurationSnapshot`
   metadata (`snapshot_id`, `submitted_at`, `raw_text_hash`) is never
   passed into `compare` at all.
-- Comparison walks each top-level collection (`interfaces`,
-  `static_routes`, `bgp_neighbors`, `acls`) keyed by natural identity
-  (name / neighbor IP / prefix), diffing scalar fields within matches.
-- `application` decides which diff entries are incident-worthy. For the
-  slice this unblocks, a removed ACL is always incident-worthy
-  (`severity = Medium`, matching the policy path's severity for the same
-  underlying condition). A general drift-severity table beyond "removed
-  ACL" is deferred (Section 17).
+- Comparison walks each top-level collection that actually exists on
+  `NormalizedConfiguration` today — `interfaces` and `bgp_neighbors`
+  (keyed by name / neighbor IP, diffing scalar fields within matches) and
+  `acls` (keyed by name, whole-ACL addition/removal only — a matched
+  ACL's `entries` collection is not compared in this slice, since no
+  ACL-entry-level diff contract is defined). `static_routes` is not
+  compared, since `NormalizedRouting` does not implement it yet (Section
+  5). `hostname` is a top-level scalar, not a collection, and is likewise
+  not compared. See Section 20 for the exact resource-naming and
+  scalar-value conventions.
+- **Incident creation from a drift finding is not implemented.** As of
+  Day 9, `GET /devices/{device_id}/drift` is a pure, on-demand query —
+  `application` does not yet decide which diff entries are
+  incident-worthy, no `IncidentSource.DRIFT` exists, and no
+  `Incident`/`UnitOfWork.commit()` is ever produced by this flow. A
+  general drift-severity table (and the incident-emission decision this
+  paragraph previously described as part of "the slice this unblocks")
+  remains deferred (Section 17).
 
 ---
 
@@ -1468,9 +1479,11 @@ needs:
   production `AdapterRegistry` alongside `CiscoAdapter` with no change to
   `ConfigIngestionService`, `api/routes.py`, or `api/schemas.py`. A third
   vendor remains later-slice scope.
-- **Configuration drift detection** (Section 8) and **telemetry/anomaly
-  detection** (FR-05/FR-06) — wired in the next slice, using the same
-  `UnitOfWork` and post-commit logging rule already established here.
+- **Configuration drift detection** (Section 8) — implemented as of Day 9
+  as a read-only query (`GetDeviceDriftService`, `GET
+  /devices/{device_id}/drift`, Section 20); it does not write to
+  `UnitOfWork` or emit a post-commit log, unlike the policy-violation
+  path. **Telemetry/anomaly detection** (FR-05/FR-06) remains deferred.
 
 ### 17.1.1 Frontend ownership and data flow (Day 6C)
 
@@ -1831,3 +1844,80 @@ getSystemTheme()`). No cookie, session, or server-side state is involved —
 theme selection survives a reload or a new tab on the same browser profile,
 never across devices or accounts, since there is no user identity in this
 MVP.
+
+---
+
+## 20. Configuration Drift Detection — Implementation (Day 9)
+
+Implements FR-04, AC-05, AC-06, backend-only (no frontend consumption; see
+Section 19's own scope for the last frontend-facing change). The request
+flow, end to end:
+
+1. `GET /devices/{device_id}/drift` (`api/routes.py`, `operation_id =
+   "get_device_drift"`) receives the path parameter `device_id`.
+2. `GetDeviceDriftService.get_drift(device_id)`
+   (`application/device_drift.py`) opens one `UnitOfWork` and loads the
+   `Device` via `uow.devices.get_by_id(device_id)`. A missing device
+   raises `DeviceNotFoundError` (`application/errors.py`), mapped by
+   `api/errors.py` to HTTP 404 with the direct `{"code":
+   "device_not_found", "detail": str(exc)}` body (`str(exc)` is
+   `"device not found: '<device_id>'"` — the same not-found convention
+   `IncidentNotFoundError` already uses, one level down in casing only:
+   `device_not_found` is lowercase, matching every other error code in
+   this API).
+3. It follows the persisted `Device.baseline_snapshot_id` and
+   `Device.current_snapshot_id` — never a repository iteration order,
+   never a "most recent timestamp" query — and loads both
+   `ConfigurationSnapshot`s via the existing
+   `ConfigurationSnapshotRepository.get_by_id`. No new repository method
+   or migration was required for this gate; both ports already existed.
+4. It compares `baseline_snapshot.normalized_config` against
+   `current_snapshot.normalized_config` through `DriftDetector.compare`
+   (Section 8) exactly once, and returns the resulting `DriftReport`
+   unchanged — no reclassification, no reordering, no incident produced.
+5. `DriftReportResponse.from_domain`/`DriftEntryResponse.from_domain`
+   (`api/schemas.py`) map the domain `DriftReport`/`DriftEntry` tuples
+   directly to a JSON body (no envelope, matching every other success
+   response in this API): `{"added": [...], "removed": [...], "changed":
+   [...]}`, each entry `{"resource": string, "field": string | null,
+   "old_value": string | null, "new_value": string | null}`.
+6. **No data is written.** `GetDeviceDriftService` never calls
+   `uow.commit()`, `uow.devices.save()`, or
+   `uow.configuration_snapshots.add()` — proven directly by spy-repository
+   tests. On a device with exactly one submission,
+   `baseline_snapshot_id == current_snapshot_id`, so both `get_by_id`
+   calls resolve the same snapshot and the diff is empty by construction
+   (AC-06). A later submission is always compared against the original,
+   fixed baseline (never "the previous submission") — there is no
+   baseline-redesignation API, and none is planned for this gate.
+7. **No incident is created.** Drift detection and incident emission are
+   deliberately decoupled in this gate — see Section 8's closing note and
+   Section 17.1. `IncidentSource.DRIFT` does not exist.
+
+**Corrupted-reference behavior.** A `Device` whose `baseline_snapshot_id`
+or `current_snapshot_id` points at a `ConfigurationSnapshot` that does not
+exist is an internal invariant violation — this can only happen through
+direct persistence tampering, never through the public API's own write
+path (`DeviceRepository.save` validates every non-null snapshot reference
+before allowing it). This case raises a plain `RuntimeError`, which has no
+registered exception handler and therefore falls through to FastAPI/
+Starlette's own generic response: HTTP 500, `Content-Type: text/plain;
+charset=utf-8`, body `Internal Server Error` — never this API's
+`ApiErrorResponse` JSON schema, never a 404, and never a leaked traceback.
+
+**Comparison scope, exactly as implemented** (see Section 8 and
+`domain-model.md` Section 20 for the full contract):
+
+| Collection | Keyed by | Changed scalar fields | Whole-resource add/remove |
+|---|---|---|---|
+| `interfaces` | `name` | `description`, `ip_address`, `mtu`, `admin_state`, `acl_in`, `acl_out` | Yes |
+| `routing.bgp_neighbors` | `neighbor_ip` | `remote_as` | Yes |
+| `acls` | `name` | — (`entries` not compared) | Yes |
+
+**Explicitly out of scope for this gate:** `hostname`-only drift;
+`static_routes` (the normalized static-route model itself remains
+deferred, Section 5); ACL-entry/rule-level diffing; drift severity
+assignment and recommendations; drift-triggered incident creation;
+drift acknowledgment or remediation; frontend rendering of drift data;
+telemetry ingestion and anomaly detection (FR-05/FR-06, unrelated to this
+gate).

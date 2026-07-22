@@ -16,11 +16,13 @@ from fastapi import APIRouter, status
 from meta_rne.api.clock import require_utc
 from meta_rne.api.schemas import (
     ApiErrorResponse,
+    DriftReportResponse,
     IncidentResponse,
     SubmitConfigurationRequest,
     SubmitConfigurationResponse,
 )
 from meta_rne.application.config_ingestion import ConfigIngestionService
+from meta_rne.application.device_drift import GetDeviceDriftService
 from meta_rne.application.incident_queries import ListIncidentsService
 from meta_rne.application.incident_resolution import ResolveIncidentService
 from meta_rne.application.models import IngestConfigurationCommand
@@ -55,6 +57,7 @@ def build_router(
     config_ingestion_service: ConfigIngestionService,
     list_incidents_service: ListIncidentsService,
     resolve_incident_service: ResolveIncidentService,
+    get_device_drift_service: GetDeviceDriftService,
     clock: Callable[[], datetime],
 ) -> APIRouter:
     router = APIRouter()
@@ -121,5 +124,30 @@ def build_router(
     def resolve_incident(incident_id: str) -> IncidentResponse:
         incident = resolve_incident_service.resolve(incident_id)
         return IncidentResponse.from_domain(incident)
+
+    @router.get(
+        "/devices/{device_id}/drift",
+        response_model=DriftReportResponse,
+        operation_id="get_device_drift",
+        responses={
+            404: {
+                "model": ApiErrorResponse,
+                "description": "device_not_found.",
+            },
+            500: {
+                "description": (
+                    "An unmapped internal invariant failure (e.g. a device "
+                    "referencing a snapshot that does not exist) returns the "
+                    "framework's generic 500 response — plain text "
+                    '"Internal Server Error", not this API\'s ApiErrorResponse '
+                    "JSON schema. No traceback or other internal detail is "
+                    "leaked."
+                ),
+            },
+        },
+    )
+    def get_device_drift(device_id: str) -> DriftReportResponse:
+        report = get_device_drift_service.get_drift(device_id)
+        return DriftReportResponse.from_domain(report)
 
     return router

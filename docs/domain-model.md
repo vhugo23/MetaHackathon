@@ -888,7 +888,7 @@ is the caller's (`application` layer's) job.
 |---|---|---|
 | `VendorConfigAdapter` (Cisco, Arista) | `parse(raw_text) -> NormalizedConfiguration \| ParseError` | FR-02 |
 | `PolicyEvaluator` | `evaluate(device_id, source_snapshot_id, observed_at, config, policies: list[ConfigurationPolicy]) -> list[ConfigurationViolation]` | FR-03, Section 6–7 |
-| `DriftDetector` | `compare(baseline: NormalizedConfiguration, current: NormalizedConfiguration) -> DriftReport` | FR-04, later slice |
+| `DriftDetector` | `compare(baseline: NormalizedConfiguration, current: NormalizedConfiguration) -> DriftReport` | FR-04, implemented Day 9 — Section 20 |
 | `RuleEngine` | `evaluate(observed_at, recent_samples: list[TelemetrySample]) -> list[Anomaly]` | FR-06, later slice |
 | `IncidentFactory` | `build_candidate(finding) -> IncidentCandidate` (Section 11's fields, pre-fingerprint) | FR-07 |
 | `compute_fingerprint` | `(device_id, source, rule_ref, affected_resource) -> str` (SHA-256 hex, Section 11) | Section 11 |
@@ -1094,4 +1094,64 @@ Named to prevent them being mistaken for oversights — genuinely post-MVP:
   collections within `NormalizedConfiguration.routing`.
 - **Cross-device/topology entities** (e.g. a `Link` between two devices'
   interfaces) — every entity here is single-device-scoped.
-- **Drift-to-incident severity table** beyond "removed ACL → Medium."
+- **Drift-to-incident severity table** beyond "removed ACL → Medium." Note:
+  this is about incident-emission from a drift finding, which remains
+  deferred — `DriftDetector`/`DriftReport`/`DriftEntry` themselves are
+  implemented as of Day 9 (Section 20); no `Incident` is ever produced by
+  that flow.
+
+---
+
+## 20. DriftEntry and DriftReport (Day 9)
+
+**Purpose.** `DriftDetector.compare`'s output shape (Section 17, FR-04) —
+the drift-based sibling of `ConfigurationViolation` (Section 7), used by
+`GetDeviceDriftService`/`GET /devices/{device_id}/drift`
+(architecture.md Section 20). Transient values, no independent identity or
+repository — never persisted, computed fresh on every request.
+
+```
+DriftEntry
+├── resource: string       # "interface:<name>" | "acl:<name>" |
+│                           # "bgp_neighbor:<neighbor_ip>"
+├── field: string | null   # the exact NormalizedInterface/NormalizedBgpNeighbor
+│                           # attribute name for a `changed` entry; null for
+│                           # a whole-resource `added`/`removed` entry
+├── old_value: string | null
+└── new_value: string | null
+
+DriftReport
+├── added: [DriftEntry]
+├── removed: [DriftEntry]
+└── changed: [DriftEntry]
+```
+
+**Invariants.** `DriftEntry.resource` must not be empty.
+`old_value`/`new_value` must not both be `null` (an `added` entry has
+`old_value = null`; a `removed` entry has `new_value = null`; a `changed`
+entry has both set). Both types are immutable value objects (`tuple`
+fields on `DriftReport`, never a `list`).
+
+**Whole-resource `added`/`removed` value.** `old_value` (removed) /
+`new_value` (added) is the resource's own natural-identity string (the
+interface name, ACL name, or neighbor IP) — not a serialization of the
+full removed/added object.
+
+**Scalar-value conversion for a `changed` entry.** `None` stays `null`;
+`str` values are unchanged; `int` values (e.g. `mtu`, `remote_as`) render
+as their base-10 decimal string; enum values (e.g. `admin_state`) render
+as the enum's own `.value`, never `EnumClass.MEMBER`. No tuple, list,
+dataclass repr, or JSON dump is ever used as a value.
+
+**Determinism.** Output preserves each input tuple's order — never
+re-sorted, the same precedent `PolicyEvaluator` (Section 7) uses.
+`removed`/`changed` entries follow `baseline`'s collection order; `added`
+entries follow `current`'s collection order. Matching between baseline and
+current is always by identity (name / neighbor IP), never by tuple
+position — reordering an unrelated collection element never produces a
+spurious drift entry.
+
+**Comparison scope, exactly as implemented** — see architecture.md
+Section 20 for the full table and explicit exclusions (hostname,
+`static_routes`, ACL-entry-level diffing, severity, recommendations,
+incident creation).

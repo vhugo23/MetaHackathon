@@ -27,6 +27,7 @@ from meta_rne.domain.config import (
     NormalizedInterface,
     NormalizedRouting,
 )
+from meta_rne.domain.drift import DriftEntry, DriftReport
 from meta_rne.domain.incident import Incident, PolicyViolationIncidentEvidence
 
 
@@ -221,6 +222,36 @@ class IncidentResponse(BaseModel):
             occurrence_count=incident.occurrence_count,
             updated_at=incident.updated_at,
             resolved_at=incident.resolved_at,
+        )
+
+
+class DriftEntryResponse(BaseModel):
+    resource: str
+    field: str | None
+    old_value: str | None
+    new_value: str | None
+
+    @classmethod
+    def from_domain(cls, entry: DriftEntry) -> "DriftEntryResponse":
+        return cls(
+            resource=entry.resource,
+            field=entry.field,
+            old_value=entry.old_value,
+            new_value=entry.new_value,
+        )
+
+
+class DriftReportResponse(BaseModel):
+    added: list[DriftEntryResponse]
+    removed: list[DriftEntryResponse]
+    changed: list[DriftEntryResponse]
+
+    @classmethod
+    def from_domain(cls, report: DriftReport) -> "DriftReportResponse":
+        return cls(
+            added=[DriftEntryResponse.from_domain(entry) for entry in report.added],
+            removed=[DriftEntryResponse.from_domain(entry) for entry in report.removed],
+            changed=[DriftEntryResponse.from_domain(entry) for entry in report.changed],
         )
 
 

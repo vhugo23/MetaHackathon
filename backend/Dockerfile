@@ -1,9 +1,12 @@
-# Runs the first vertical slice's real API: GET /health,
-# POST /devices/{device_id}/config, GET /incidents. `alembic upgrade head`
-# runs to completion before Uvicorn starts (see the CMD below), and the
-# FastAPI lifespan performs idempotent Slice 1 policy seeding once
-# migrations have completed (architecture.md Section 11.2). Frontend and
-# browser E2E (Playwright) remain deferred — see CLAUDE.md "Current Phase".
+# Runs the real API: GET /health, POST /devices/{device_id}/config,
+# GET /incidents, POST /incidents/{incident_id}/resolve, and (Day 9)
+# GET /devices/{device_id}/drift. `alembic upgrade head` runs to
+# completion before Uvicorn starts (see the CMD below), and the FastAPI
+# lifespan performs idempotent Slice 1 policy seeding once migrations
+# have completed (architecture.md Section 11.2). The frontend
+# (`frontend/`) and browser E2E (Playwright, `scripts/browser_e2e.py`)
+# exist as of Day 6B/6D but are not part of this image — see CLAUDE.md
+# "Current Phase".
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

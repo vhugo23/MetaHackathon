@@ -59,6 +59,7 @@ def test_openapi_contract__paths__are_exactly_the_approved_set() -> None:
     assert set(schema["paths"].keys()) == {
         "/health",
         "/devices/{device_id}/config",
+        "/devices/{device_id}/drift",
         "/incidents",
         "/incidents/{incident_id}/resolve",
     }
@@ -270,3 +271,51 @@ def test_openapi_contract__api_error_response__has_exactly_code_and_detail() -> 
 
     properties = schema["components"]["schemas"]["ApiErrorResponse"]["properties"]
     assert set(properties.keys()) == {"code", "detail"}
+
+
+def test_openapi_contract__get_device_drift__operation_id_is_exact() -> None:
+    schema = _openapi_schema()
+
+    assert schema["paths"]["/devices/{device_id}/drift"]["get"]["operationId"] == "get_device_drift"
+
+
+def test_openapi_contract__get_device_drift__path_parameter_is_required_string() -> None:
+    schema = _openapi_schema()
+
+    parameters = schema["paths"]["/devices/{device_id}/drift"]["get"]["parameters"]
+    device_id_param = next(p for p in parameters if p["name"] == "device_id")
+    assert device_id_param["in"] == "path"
+    assert device_id_param["required"] is True
+    assert device_id_param["schema"]["type"] == "string"
+
+
+def test_openapi_contract__get_device_drift__documents_200_with_drift_report_schema() -> None:
+    schema = _openapi_schema()
+
+    responses = schema["paths"]["/devices/{device_id}/drift"]["get"]["responses"]
+    assert "200" in responses
+    schema_ref = responses["200"]["content"]["application/json"]["schema"]
+    assert schema_ref["$ref"] == "#/components/schemas/DriftReportResponse"
+
+
+def test_openapi_contract__get_device_drift__documents_404_with_api_error_response() -> None:
+    schema = _openapi_schema()
+
+    responses = schema["paths"]["/devices/{device_id}/drift"]["get"]["responses"]
+    assert "404" in responses
+    schema_ref = responses["404"]["content"]["application/json"]["schema"]
+    assert schema_ref["$ref"] == "#/components/schemas/ApiErrorResponse"
+
+
+def test_openapi_contract__drift_report_response__has_only_added_removed_changed() -> None:
+    schema = _openapi_schema()
+
+    properties = schema["components"]["schemas"]["DriftReportResponse"]["properties"]
+    assert set(properties.keys()) == {"added", "removed", "changed"}
+
+
+def test_openapi_contract__drift_entry_response__has_only_approved_fields() -> None:
+    schema = _openapi_schema()
+
+    properties = schema["components"]["schemas"]["DriftEntryResponse"]["properties"]
+    assert set(properties.keys()) == {"resource", "field", "old_value", "new_value"}

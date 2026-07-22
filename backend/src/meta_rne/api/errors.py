@@ -16,7 +16,11 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 from meta_rne.api.schemas import ApiErrorResponse
-from meta_rne.application.errors import ConfigurationParseError, IncidentNotFoundError
+from meta_rne.application.errors import (
+    ConfigurationParseError,
+    DeviceNotFoundError,
+    IncidentNotFoundError,
+)
 from meta_rne.domain.errors import UnsupportedVendorError
 from meta_rne.persistence.errors import (
     DeviceConflictError,
@@ -60,6 +64,10 @@ def register_exception_handlers(app: FastAPI) -> None:
             "incident_not_found",
             f"Incident '{exc.incident_id}' was not found.",
         )
+
+    @app.exception_handler(DeviceNotFoundError)
+    async def _device_not_found(request: Request, exc: DeviceNotFoundError) -> JSONResponse:
+        return _error_response(status.HTTP_404_NOT_FOUND, "device_not_found", str(exc))
 
     @app.exception_handler(DeviceConflictError)
     async def _device_conflict(request: Request, exc: DeviceConflictError) -> JSONResponse:

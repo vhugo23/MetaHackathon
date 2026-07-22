@@ -35,6 +35,7 @@ from meta_rne.api.dependencies import (
 from meta_rne.api.errors import register_exception_handlers
 from meta_rne.api.routes import build_router
 from meta_rne.application.config_ingestion import ConfigIngestionService
+from meta_rne.application.device_drift import GetDeviceDriftService
 from meta_rne.application.incident_queries import ListIncidentsService
 from meta_rne.application.incident_resolution import ResolveIncidentService
 from meta_rne.application.snapshot_id import default_snapshot_id_factory
@@ -69,6 +70,7 @@ def create_app(
     resolve_incident_service = ResolveIncidentService(
         unit_of_work_factory=uow_factory, clock=CallableClock(clock)
     )
+    get_device_drift_service = GetDeviceDriftService(unit_of_work_factory=uow_factory)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -98,6 +100,7 @@ def create_app(
             config_ingestion_service=config_ingestion_service,
             list_incidents_service=list_incidents_service,
             resolve_incident_service=resolve_incident_service,
+            get_device_drift_service=get_device_drift_service,
             clock=clock,
         )
     )

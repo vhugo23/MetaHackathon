@@ -1832,3 +1832,36 @@ five existing CI-equivalent jobs (`ci`, `postgres-tests`, `compose-smoke`,
 Policy CRUD, wildcard applicability, a third vendor, universal device
 applicability, authentication, and telemetry remain later-day scope, and
 complete EOS syntax coverage is not claimed.
+
+**Day 9 — Fixed-Baseline Configuration Drift Detection (FR-04, AC-05,
+AC-06).** Adds the platform's first read-only query endpoint, `GET
+/devices/{device_id}/drift`, across four reviewable gates: `DriftReport`/
+`DriftEntry` domain value objects, a pure `DriftDetector.compare`
+(interfaces by name, BGP neighbors by neighbor IP, whole-ACL
+additions/removals by name — `hostname`, `static_routes`, and ACL-entry-
+level diffing are not compared), an on-demand `GetDeviceDriftService`
+(one `UnitOfWork` per call, no write, no commit — mirroring
+`ListIncidentsService`), and the HTTP route itself. A device's baseline is
+fixed at its first successful submission and never silently replaced; a
+device with one submission always returns an empty report; a missing
+device returns `404` with the direct `{"code": "device_not_found",
+"detail": "device not found: '<device_id>'"}` body; a corrupted internal
+snapshot reference (never reachable through this API's own write paths)
+falls through to the framework's own generic `500` response — plain text
+`Internal Server Error`, not this API's `ApiErrorResponse` JSON shape, and
+never a leaked traceback. No drift-triggered incident is created
+(`IncidentSource.DRIFT` does not exist), no new repository method or
+migration was needed, and no frontend consumes this endpoint yet.
+
+Verified totals as of Day 9 (see docs/test-strategy.md Section 23 for the
+full matrix and drift-specific breakdown): **690** backend `pytest` tests
+(546 non-`postgres` + 144 `postgres`-marked, **62** of them new drift
+tests), **298** frontend Vitest tests (8 files, unchanged), **19** Python
+orchestration-helper tests (1 file, unchanged), **3** Playwright browser
+tests (3 files, unchanged — they prove no regression to the existing
+operator workflows, not drift behavior) — **1,010 automated tests
+combined**. Also independently re-verified this gate: a real
+`docker build` + `docker compose up` stack (health check, OpenAPI drift
+path, and the exact 404 body), and `scripts/compose_smoke.py`. Telemetry
+ingestion, anomaly detection, and drift-triggered incidents remain
+later-day scope.

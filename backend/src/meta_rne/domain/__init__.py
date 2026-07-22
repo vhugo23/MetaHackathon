@@ -19,6 +19,7 @@ from meta_rne.domain.config import (
     VendorType,
 )
 from meta_rne.domain.device import Device
+from meta_rne.domain.drift import DriftEntry, DriftReport
 from meta_rne.domain.errors import ParseError, ParseErrorCode, UnsupportedVendorError
 from meta_rne.domain.incident import (
     Incident,
@@ -50,6 +51,8 @@ __all__ = [
     "ConfigurationSnapshot",
     "ConfigurationViolation",
     "Device",
+    "DriftEntry",
+    "DriftReport",
     "Incident",
     "IncidentCandidate",
     "IncidentSource",
