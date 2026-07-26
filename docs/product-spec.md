@@ -237,11 +237,11 @@ Cisco only, single configuration submission, policy evaluation only — **exclud
 
 **AC-06** — Given a device with exactly one configuration submission, `GET /devices/{id}/drift` returns an empty diff with zero changes (current == baseline). *(Implemented as of Day 9 — proven at the unit, application, API-contract, and real-PostgreSQL levels.)*
 
-**AC-07** — Given telemetry with CPU > 90% on 2 consecutive samples, `GET /incidents` returns an incident with `rule_ref = "RULE-CPU-HIGH"` and populated device ID, severity, and evidence. *(Later slice.)*
+**AC-07** — Given telemetry with CPU > 90% on 2 consecutive samples, `GET /incidents` returns an incident with `rule_ref = "RULE-CPU-HIGH"` and populated device ID, severity, and evidence. *(Implemented as of Day 9c and proven end to end through POST telemetry → atomic persistence → GET /incidents in both in-memory and PostgreSQL-backed API paths.)*
 
-**AC-08** — Given a telemetry sequence with at least 4 interface state transitions within 60 seconds (e.g., up→down→up→down→up), `GET /incidents` returns an incident with `rule_ref = "RULE-LINK-FLAP"` referencing that interface. *(Later slice.)*
+**AC-08** — Given a telemetry sequence with at least 4 interface state transitions within 60 seconds (e.g., up→down→up→down→up), `GET /incidents` returns an incident with `rule_ref = "RULE-LINK-FLAP"` referencing that interface. *(Implemented as of Day 9c and proven end to end through POST telemetry → atomic persistence → GET /incidents in both in-memory and PostgreSQL-backed API paths.)*
 
-**AC-09** — Given a BGP neighbor transitioning from a non-down state to Idle or Active, `GET /incidents` returns an incident with `rule_ref = "RULE-BGP-DOWN"` and evidence containing `neighbor_ip`, `state`, and `previous_state`. *(Later slice.)*
+**AC-09** — Given a BGP neighbor transitioning from a non-down state to Idle or Active, `GET /incidents` returns an incident with `rule_ref = "RULE-BGP-DOWN"` and evidence containing `neighbor_ip`, `state`, and `previous_state`. *(Implemented as of Day 9c and proven end to end through POST telemetry → atomic persistence → GET /incidents in both in-memory and PostgreSQL-backed API paths.)*
 
 **AC-10** — When an incident is created or updated, a JSON log line is written to stdout containing `incident_id`, `device_id`, `rule_ref`, `severity`, `status`, `outcome` (`CREATED` or `UPDATED`, distinguishing which case occurred), and `timestamp`.
 
@@ -367,4 +367,4 @@ device applicability, and no third vendor were introduced. Complete
 Arista EOS syntax coverage is not claimed — `AristaAdapter` implements
 only the narrow subset documented in architecture.md Section 18.
 
-**Definition of done:** AC-01, AC-03, AC-04, AC-10, AC-11, AC-12 (for this slice's error paths), AC-13 pass. `GET /incidents` returns the incident with all required fields. No application code exists that is not covered by at least one named test (see [test-strategy.md](./test-strategy.md) Section 19).
+**Definition of done:** AC-01, AC-03, AC-04, AC-11, AC-12 (for this slice's error paths), AC-13 pass. `GET /incidents` returns the incident with all required fields. **AC-10 (structured JSON log line on incident create/update) was not, and still is not, implemented** — no `observability`/structured-logging module exists; it remained deferred through Day 8A and remains deferred as of this document's current revision. No application code exists that is not covered by at least one named test (see [test-strategy.md](./test-strategy.md) Section 19).

@@ -1483,7 +1483,12 @@ needs:
   as a read-only query (`GetDeviceDriftService`, `GET
   /devices/{device_id}/drift`, Section 20); it does not write to
   `UnitOfWork` or emit a post-commit log, unlike the policy-violation
-  path. **Telemetry/anomaly detection** (FR-05/FR-06) remains deferred.
+  path. **Telemetry ingestion and deterministic CPU/link-flap/BGP-down
+  anomaly detection** (FR-05/FR-06) **are implemented as of Day 9b, and
+  anomaly-to-incident mapping/persistence as of Day 9c** — AC-07, AC-08,
+  and AC-09 are proven end to end; AC-10 (structured logging), a
+  deterministic telemetry simulator, and frontend telemetry workflows
+  remain deferred.
 
 ### 17.1.1 Frontend ownership and data flow (Day 6C)
 

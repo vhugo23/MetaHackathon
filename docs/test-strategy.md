@@ -957,26 +957,32 @@ Tests architecture.md Section 5's contract:
   **`IncidentUpsertResult.outcome` itself is asserted directly only by the
   repository conformance tests (Section 9)**, which call
   `upsert_open_incident` without going through `ConfigIngestionService`.
-- **Integration — log emitted per outcome, only after commit.**
-  `test_config_ingestion_service__created_incident__emits_created_log_after_commit`
-  and `test_config_ingestion_service__updated_incident__emits_updated_log_after_commit`:
-  each captures the in-memory log recorder (Section 5) and asserts one
-  JSON line with `incident_id`, `device_id`, `rule_ref`, `severity`,
-  `status`, `outcome`, `timestamp` (AC-10), emitted only after `ingest`
-  returns successfully — explicitly **integration-level**, not something
-  the HTTP E2E test (Section 7) can claim, since it never inspects stdout.
-- **Integration — commit failure suppresses the log.**
-  `test_config_ingestion_service__commit_failure__rolls_back_and_emits_no_incident_log`:
-  using a `FailingUnitOfWork` (Section 9) so `commit()` raises *after*
-  `PolicyEvaluator` already found a violation, the test asserts the log
-  recorder captured **zero** lines, and — inspecting `uow.incidents` on
-  that **same** `FailingUnitOfWork` instance after `rollback()`, not a
+- **Proposed, not implemented — log emitted per outcome, only after
+  commit.** `test_config_ingestion_service__created_incident__emits_created_log_after_commit`
+  and `test_config_ingestion_service__updated_incident__emits_updated_log_after_commit`
+  are **future test-plan entries only** — neither function currently
+  exists in the repository, neither is collected by pytest (`pytest -k
+  "emits_created_log_after_commit or emits_updated_log_after_commit"
+  --collect-only` → "no tests collected"), and no `emit_json_log`
+  implementation or in-memory log recorder exists to test against (the
+  `observability` package is an empty stub). If/when AC-10 is
+  implemented, each would capture the log recorder (Section 5, itself
+  also not yet built) and assert one JSON line with `incident_id`,
+  `device_id`, `rule_ref`, `severity`, `status`, `outcome`, `timestamp`,
+  emitted only after `ingest` returns successfully — explicitly
+  **integration-level**, not something the HTTP E2E test (Section 7)
+  could claim, since it never inspects stdout.
+- **Proposed, not implemented — commit failure suppresses the log.**
+  `test_config_ingestion_service__commit_failure__rolls_back_and_emits_no_incident_log`
+  is likewise a **future test-plan entry only** — it does not currently
+  exist and is not collected by pytest. Its intended design: using a
+  `FailingUnitOfWork` (Section 9) so `commit()` raises *after*
+  `PolicyEvaluator` already found a violation, the test would assert the
+  log recorder captured **zero** lines, and — inspecting `uow.incidents`
+  on that **same** `FailingUnitOfWork` instance after `rollback()`, not a
   separate, unrelated `IncidentRepository` that would trivially be empty
-  and prove nothing — confirms no row remains for that fingerprint. This
-  is the concrete proof that `rollback()` actually discards what was
-  written, not just that some other repository was never touched, and it
-  is what backs architecture.md Section 12's "no log without a successful
-  commit" rule.
+  and prove nothing — confirm no row remains for that fingerprint, backing
+  architecture.md Section 12's "no log without a successful commit" rule.
 
 **Day 5A implementation note.** The two `test_config_ingestion_service__
 ..._log_after_commit`/`..._emits_no_incident_log` cases above describe the
@@ -1153,9 +1159,9 @@ alongside them (Section 14).
 | 10 | `test_config_ingestion_service__repeated_finding__reports_updated_count` — second, identical submission; `incidents_created == 0, incidents_updated == 1`, `occurrence_count == 2`, still one row (AC-11) | Integration | none | `tests/integration/application/test_config_ingestion_service.py` |
 | 11 | `GET /incidents` returns the created incident | Contract (+ E2E) | none | `tests/contract/api/test_incidents_api.py`, `e2e/vertical-slice/` |
 | 12 | `GET /incidents` returns an empty collection when no incidents exist | Contract | none | `tests/contract/api/test_incidents_api.py` |
-| 13 | `test_config_ingestion_service__created_incident__emits_created_log_after_commit` (AC-10) | Integration | in-memory log recorder | `tests/integration/application/test_config_ingestion_service.py` |
-| 14 | `test_config_ingestion_service__updated_incident__emits_updated_log_after_commit` (AC-10) | Integration | in-memory log recorder | `tests/integration/application/test_config_ingestion_service.py` |
-| 15 | `test_config_ingestion_service__commit_failure__rolls_back_and_emits_no_incident_log` | Integration | `FailingUnitOfWork` | `tests/integration/application/test_config_ingestion_service.py` |
+| 13 | **PROPOSED, NOT IMPLEMENTED — not collected by pytest.** `test_config_ingestion_service__created_incident__emits_created_log_after_commit` (AC-10) | Integration (future) | in-memory log recorder (not yet built) | `tests/integration/application/test_config_ingestion_service.py` |
+| 14 | **PROPOSED, NOT IMPLEMENTED — not collected by pytest.** `test_config_ingestion_service__updated_incident__emits_updated_log_after_commit` (AC-10) | Integration (future) | in-memory log recorder (not yet built) | `tests/integration/application/test_config_ingestion_service.py` |
+| 15 | **PROPOSED, NOT IMPLEMENTED — not collected by pytest.** `test_config_ingestion_service__commit_failure__rolls_back_and_emits_no_incident_log` | Integration (future) | `FailingUnitOfWork` | `tests/integration/application/test_config_ingestion_service.py` |
 | 16 | Controlled persistence failure — `POST` with a hand-written failing `UnitOfWork` returns 500 / `persistence_error`, no database detail leaked (Day 5B: not `PERSISTENCE_ERROR`) | Contract | hand-written failing `UnitOfWork` (fails on `commit()`) | `tests/contract/api/test_config_ingestion_api.py` |
 | 17 | Structured invalid-input response — missing `vendor` or empty body returns 422 via FastAPI's own `RequestValidationError` body (Day 5B: no custom envelope/code) | Contract | none | `tests/contract/api/test_config_ingestion_api.py` |
 | 18 | Unexpected exception returns a generic production 500, never a raw stack trace (Day 5B: no custom `INTERNAL_ERROR` handler — FastAPI's own unmapped-exception behavior, asserted via `TestClient(..., raise_server_exceptions=False)`) | Contract | hand-written failing `UnitOfWork` | `tests/contract/api/test_config_ingestion_api.py` |
@@ -1209,10 +1215,10 @@ test("should create and surface an incident for a missing required ACL", async (
 | AC-04 | #7, #9, #11 |
 | AC-05 | `DriftDetector` removed-ACL test (Section 12), `GetDeviceDriftService`/API-contract/PostgreSQL drift tests (Day 9) |
 | AC-06 | `DriftDetector` baseline==current test (Section 12), `GetDeviceDriftService`/API-contract/PostgreSQL drift tests (Day 9) |
-| AC-07 | RULE-CPU-HIGH test (later slice) |
-| AC-08 | RULE-LINK-FLAP test (later slice) |
-| AC-09 | RULE-BGP-DOWN test (later slice) |
-| AC-10 | #13, #14 |
+| AC-07 | `RuleEngine` RULE-CPU-HIGH unit tests (Day 9b) + `TelemetryIngestionService`/API AC-07 acceptance tests (Day 9c, Section 24) |
+| AC-08 | `RuleEngine` RULE-LINK-FLAP unit tests (Day 9b) + `TelemetryIngestionService`/API AC-08 acceptance tests (Day 9c, Section 24) |
+| AC-09 | `RuleEngine` RULE-BGP-DOWN unit tests (Day 9b) + `TelemetryIngestionService`/API AC-09 acceptance tests (Day 9c, Section 24) |
+| AC-10 | Not proven — #13/#14 above are proposed, not-yet-implemented test-plan entries; no `observability`/structured-logging implementation exists (Section 24 also documents this as deferred) |
 | AC-11 | #10, #19, Section 9's repository-level concurrency test |
 | AC-12 | #16, #17, #18, and the remaining rows of Section 14's error table |
 | AC-13 | CI gates, Section 15 |
@@ -1615,8 +1621,73 @@ remediation.
 of this Day 9 checkpoint, verified separately — see below): FR-05
 telemetry ingestion/persistence, FR-06 deterministic CPU-high/link-flap/
 BGP-down anomaly detection, `POST /devices/{device_id}/telemetry`, and
-`GET /devices/{device_id}/telemetry/recent`. **Still not proven:** AC-07,
-AC-08, and AC-09 — these three remain incomplete specifically because they
-require an anomaly-sourced *incident* to appear through `GET /incidents`,
-not merely the detection of an `Anomaly` value; anomaly-to-incident mapping
-does not exist yet.
+`GET /devices/{device_id}/telemetry/recent`. **At the close of Day 9b,
+AC-07, AC-08, and AC-09 were still not proven**, since they require an
+anomaly-sourced *incident* to appear through `GET /incidents`, not merely
+the detection of an `Anomaly` value, and anomaly-to-incident mapping did
+not exist yet. **This is superseded by the subsequent Day 9c gate — see
+Section 24 below, where AC-07/AC-08/AC-09 are proven end to end.**
+
+## 24. Anomaly-to-Incident Mapping and API Acceptance Verification (Day 9c)
+
+Verifies anomaly-to-incident mapping and its API acceptance (FR-06/FR-07,
+AC-07, AC-08, AC-09) through the full existing verification matrix,
+independently re-run in this gate, on top of the Day 9b telemetry
+checkpoint (Section 23).
+
+**New test layers added, by purpose:**
+
+| Layer | Purpose |
+|---|---|
+| Explicit anomaly-evidence serializer tests | `CpuHighEvidence`/`LinkFlapEvidence`/`BgpDownEvidence` JSON (de)serialization, discriminated dispatch, malformed-input `SerializationError` normalization |
+| Incident source/evidence consistency tests | The shared `persistence/incident_validation.py` allow-list: which `(source, rule_ref, evidence type)` triples are accepted or rejected |
+| Shared incident-repository contract tests | `ANOMALY`-sourced candidates inserting/updating correctly against both the in-memory and SQLAlchemy `IncidentRepository` implementations |
+| PostgreSQL JSONB anomaly-evidence tests | Real-database round-trip, nested tuple ordering, enum reconstruction, repeated-upsert evidence replacement, and malformed-persisted-row `SerializationError` proofs (via direct-SQL corruption) |
+| Anomaly mapper tests | `AnomalyIncidentMapper.build_candidate` — exact severity/affected_resource/recommendation per rule, evidence identity preservation, determinism, non-mutation |
+| Telemetry-ingestion atomic incident tests | `TelemetryIngestionService.ingest()`'s extended flow — one upsert per anomaly in rule order, one commit, atomic rollback of the telemetry sample and every incident upserted earlier in the same call on any failure |
+| API AC-07/08/09 acceptance tests | `POST /devices/{device_id}/telemetry` → `GET /incidents`, exact JSON field assertions, both in-memory and real-PostgreSQL-backed |
+| Repeated detection | One `OPEN` incident, `occurrence_count` incremented, `created_at` preserved, `last_seen_at` advanced, evidence replaced |
+| Resolved recurrence | A resolved anomaly incident's recurrence creates a new `OPEN` incident with a new `incident_id`, leaving the `RESOLVED` row untouched |
+| Multi-anomaly persistence | One telemetry ingestion producing multiple anomalies persists all of them in one transaction |
+| Policy/anomaly evidence coexistence | `GET /incidents` renders both `POLICY_VIOLATION` and `ANOMALY` incidents correctly in the same response, with policy evidence unchanged |
+
+**Full verification matrix, independently re-run this gate (all passed):**
+
+| Check | Result |
+|---|---|
+| Backend `ruff format --check .` | Clean |
+| Backend `ruff check .` | All checks passed |
+| Backend `mypy src` | Success, 63 source files — the authoritative project static check |
+| Backend `pytest -m "not postgres"` | 1,033 passed, 265 deselected |
+| Backend `pytest -m postgres` (disposable Compose Postgres) | 265 passed, 1,033 deselected |
+
+Directly invoking `mypy` against
+`tests/unit/application/test_telemetry_ingestion_service.py` (rather than
+`mypy src`) exposes 26 pre-existing `UnitOfWork`-Protocol
+structural-typing errors already present in the file before this gate
+(confirmed via a controlled before/after comparison against the clean Day
+9b checkpoint) — a known limitation of checking that one test file
+directly, not part of the established project static baseline. `mypy src`
+is the authoritative check and is clean.
+
+**Independently verified combined backend-test total as of Day 9c:**
+
+| Layer | Count |
+|---|---|
+| Backend `pytest` | 1,298 (1,033 non-`postgres` + 265 `postgres`) |
+
+Frontend Vitest, Python orchestration-helper, and Playwright browser
+counts are unchanged from Day 9 (Section 23) — Day 9c is backend-only, no
+frontend/browser/CI file changed.
+
+**Explicitly proven by this gate:** AC-07 (sustained CPU anomaly incident),
+AC-08 (link-flap anomaly incident), and AC-09 (BGP-down anomaly incident),
+each via `POST /devices/{device_id}/telemetry` → atomic persistence →
+`GET /incidents`, for both the in-memory and real-PostgreSQL-backed API
+paths, with exact `source`/`severity`/`affected_resource`/`recommendation`/
+evidence assertions per rule.
+
+**Explicitly not proven by this gate:** AC-10 (structured JSON log line on
+incident create/update — no `observability`/structured-logging module
+exists), a deterministic telemetry simulator, and frontend rendering of
+anomaly incidents (no consumer exists).

@@ -1881,11 +1881,56 @@ sample, returns `{sample, anomalies}`, `201`), and `GET
 bare array of samples, `200`, no pagination or API-clock filtering).
 Verified against both the in-memory and real-PostgreSQL backends: **912**
 non-PostgreSQL and **241** PostgreSQL backend `pytest` tests pass, Ruff/
-mypy are clean. **No incident is created from a telemetry anomaly** —
-anomaly-to-incident mapping, severity/recommendation decisions, a
-deterministic telemetry simulator, structured logging, and frontend
-telemetry consumption all remain later-day scope (AC-07/AC-08/AC-09 are
-not claimed complete). No frontend, Playwright, or CI change; frontend/
+mypy are clean. **At the close of Day 9b, no incident was yet created from
+a telemetry anomaly** — anomaly-to-incident mapping was deferred at that
+point (AC-07/AC-08/AC-09 were not claimed complete). **This is superseded
+by Day 9c below.** No frontend, Playwright, or CI change; frontend/
 browser totals are unchanged from Day 9 above. Implemented across a series
 of reviewable gates, all approved, but not yet committed — see CLAUDE.md's
 "Current Phase".
+
+**Day 9c — Anomaly-to-Incident Mapping and API Acceptance (AC-07, AC-08,
+AC-09).** Built on top of the Day 9b telemetry checkpoint: each detected
+`Anomaly` is now mapped to an `IncidentCandidate` via a new, narrow
+`AnomalyIncidentMapper` (a separate module from the existing
+`IncidentFactory`, never modified) using this fixed, approved mapping:
+
+| Rule | Severity | `affected_resource` | Recommendation |
+|---|---|---|---|
+| `RULE-CPU-HIGH` | High | `device` | `Investigate sustained high CPU utilization on {device_id}.` |
+| `RULE-LINK-FLAP` | High | `interface:{interface_name}` | `Investigate unstable link state on {device_id} interface {interface_name}.` |
+| `RULE-BGP-DOWN` | Critical | `bgp-neighbor:{neighbor_ip}` | `Investigate BGP session down on {device_id} neighbor {neighbor_ip}.` |
+
+`TelemetryIngestionService.ingest()` now maps, fingerprints, and upserts
+each fired anomaly (in that fixed rule order) inside the same single
+transaction the telemetry save already used — one commit, and any failure
+at any step rolls back the telemetry sample and every incident upserted
+earlier in the same call. One ingestion may create or update multiple
+incidents. Repeated detection updates the same `OPEN` incident
+(`occurrence_count` increments, `created_at` preserved, `last_seen_at`
+advances, evidence replaced); a resolved incident's recurrence creates a
+new `OPEN` incident, leaving the `RESOLVED` row untouched — the same
+generic dedup behavior policy incidents already had, unmodified.
+
+**`GET /incidents` now returns both `POLICY_VIOLATION` and `ANOMALY`
+incidents** — `IncidentResponse.evidence` is widened to render
+`CpuHighEvidence`/`LinkFlapEvidence`/`BgpDownEvidence` alongside the
+existing (byte-for-byte unchanged) policy-evidence shape. **`POST
+/devices/{device_id}/telemetry`'s response is completely unchanged** —
+still exactly `{sample, anomalies}`; no incident field, ID, or count is
+returned there; no new route was added. AC-07, AC-08, and AC-09 are now
+proven end to end (`POST` telemetry → atomic persistence → `GET
+/incidents`) for both the in-memory and real-PostgreSQL-backed API paths.
+
+Verified against both backends: **1,033** non-PostgreSQL and **265**
+PostgreSQL backend `pytest` tests pass (delta of +121/+24 over Day 9b's
+912/241, across new anomaly-evidence serialization, incident source/
+evidence consistency, shared incident-repository contract, PostgreSQL
+JSONB anomaly-evidence, anomaly-mapper, atomic telemetry-incident, and API
+acceptance test layers), `mypy src` clean across 63 source files, Ruff
+clean. **AC-10 (structured JSON logging) remains deferred** — no
+`observability`/structured-logging module exists yet. A deterministic
+telemetry simulator and frontend telemetry consumption also remain
+deferred. No frontend, Playwright, or CI change. Implemented across a
+series of reviewable gates, all approved, but not yet committed — see
+CLAUDE.md's "Current Phase".

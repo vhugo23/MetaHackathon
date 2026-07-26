@@ -194,6 +194,62 @@ class PolicyViolationIncidentEvidenceResponse(BaseModel):
         )
 
 
+class CpuSampleEvidenceResponse(BaseModel):
+    timestamp: datetime
+    cpu_utilization_pct: float
+
+
+class CpuHighEvidenceResponse(BaseModel):
+    samples: list[CpuSampleEvidenceResponse]
+
+    @classmethod
+    def from_domain(cls, evidence: CpuHighEvidence) -> "CpuHighEvidenceResponse":
+        return cls(
+            samples=[
+                CpuSampleEvidenceResponse(
+                    timestamp=sample.timestamp, cpu_utilization_pct=sample.cpu_utilization_pct
+                )
+                for sample in evidence.samples
+            ]
+        )
+
+
+class InterfaceTransitionEvidenceResponse(BaseModel):
+    timestamp: datetime
+    oper_state: str
+
+
+class LinkFlapEvidenceResponse(BaseModel):
+    interface_name: str
+    transitions: list[InterfaceTransitionEvidenceResponse]
+
+    @classmethod
+    def from_domain(cls, evidence: LinkFlapEvidence) -> "LinkFlapEvidenceResponse":
+        return cls(
+            interface_name=evidence.interface_name,
+            transitions=[
+                InterfaceTransitionEvidenceResponse(
+                    timestamp=transition.timestamp, oper_state=transition.oper_state.value
+                )
+                for transition in evidence.transitions
+            ],
+        )
+
+
+class BgpDownEvidenceResponse(BaseModel):
+    neighbor_ip: str
+    previous_state: str
+    state: str
+
+    @classmethod
+    def from_domain(cls, evidence: BgpDownEvidence) -> "BgpDownEvidenceResponse":
+        return cls(
+            neighbor_ip=evidence.neighbor_ip,
+            previous_state=evidence.previous_state.value,
+            state=evidence.state.value,
+        )
+
+
 class IncidentResponse(BaseModel):
     incident_id: str
     fingerprint: str
@@ -203,7 +259,12 @@ class IncidentResponse(BaseModel):
     affected_resource: str
     severity: str
     status: str
-    evidence: PolicyViolationIncidentEvidenceResponse
+    evidence: (
+        PolicyViolationIncidentEvidenceResponse
+        | CpuHighEvidenceResponse
+        | LinkFlapEvidenceResponse
+        | BgpDownEvidenceResponse
+    )
     recommendation: str
     created_at: datetime
     last_seen_at: datetime
@@ -213,6 +274,27 @@ class IncidentResponse(BaseModel):
 
     @classmethod
     def from_domain(cls, incident: Incident) -> "IncidentResponse":
+        evidence_response: (
+            PolicyViolationIncidentEvidenceResponse
+            | CpuHighEvidenceResponse
+            | LinkFlapEvidenceResponse
+            | BgpDownEvidenceResponse
+        )
+        if isinstance(incident.evidence, PolicyViolationIncidentEvidence):
+            evidence_response = PolicyViolationIncidentEvidenceResponse.from_domain(
+                incident.evidence
+            )
+        elif isinstance(incident.evidence, CpuHighEvidence):
+            evidence_response = CpuHighEvidenceResponse.from_domain(incident.evidence)
+        elif isinstance(incident.evidence, LinkFlapEvidence):
+            evidence_response = LinkFlapEvidenceResponse.from_domain(incident.evidence)
+        elif isinstance(incident.evidence, BgpDownEvidence):
+            evidence_response = BgpDownEvidenceResponse.from_domain(incident.evidence)
+        else:
+            raise ValueError(
+                f"unrecognized Incident.evidence type: {type(incident.evidence).__name__}"
+            )
+
         return cls(
             incident_id=incident.incident_id,
             fingerprint=incident.fingerprint,
@@ -222,7 +304,7 @@ class IncidentResponse(BaseModel):
             affected_resource=incident.affected_resource,
             severity=incident.severity.value,
             status=incident.status.value,
-            evidence=PolicyViolationIncidentEvidenceResponse.from_domain(incident.evidence),
+            evidence=evidence_response,
             recommendation=incident.recommendation,
             created_at=incident.created_at,
             last_seen_at=incident.last_seen_at,
@@ -322,62 +404,6 @@ class TelemetrySampleResponse(BaseModel):
                 BgpSessionResponse(neighbor_ip=session.neighbor_ip, state=session.state.value)
                 for session in sample.bgp_sessions
             ],
-        )
-
-
-class CpuSampleEvidenceResponse(BaseModel):
-    timestamp: datetime
-    cpu_utilization_pct: float
-
-
-class CpuHighEvidenceResponse(BaseModel):
-    samples: list[CpuSampleEvidenceResponse]
-
-    @classmethod
-    def from_domain(cls, evidence: CpuHighEvidence) -> "CpuHighEvidenceResponse":
-        return cls(
-            samples=[
-                CpuSampleEvidenceResponse(
-                    timestamp=sample.timestamp, cpu_utilization_pct=sample.cpu_utilization_pct
-                )
-                for sample in evidence.samples
-            ]
-        )
-
-
-class InterfaceTransitionEvidenceResponse(BaseModel):
-    timestamp: datetime
-    oper_state: str
-
-
-class LinkFlapEvidenceResponse(BaseModel):
-    interface_name: str
-    transitions: list[InterfaceTransitionEvidenceResponse]
-
-    @classmethod
-    def from_domain(cls, evidence: LinkFlapEvidence) -> "LinkFlapEvidenceResponse":
-        return cls(
-            interface_name=evidence.interface_name,
-            transitions=[
-                InterfaceTransitionEvidenceResponse(
-                    timestamp=transition.timestamp, oper_state=transition.oper_state.value
-                )
-                for transition in evidence.transitions
-            ],
-        )
-
-
-class BgpDownEvidenceResponse(BaseModel):
-    neighbor_ip: str
-    previous_state: str
-    state: str
-
-    @classmethod
-    def from_domain(cls, evidence: BgpDownEvidence) -> "BgpDownEvidenceResponse":
-        return cls(
-            neighbor_ip=evidence.neighbor_ip,
-            previous_state=evidence.previous_state.value,
-            state=evidence.state.value,
         )
 
 

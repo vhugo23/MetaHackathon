@@ -325,11 +325,14 @@ factory never reads a clock or accepts a separate timestamp argument.
 ```
 IncidentCandidate                        # Day 4A, pre-fingerprint, pre-persistence
 ├── device_id: string
-├── source: IncidentSource                # POLICY_VIOLATION only, Day 4A
+├── source: IncidentSource                # POLICY_VIOLATION (Day 4A) or ANOMALY (Day 9c) —
+│                                          # DRIFT incident creation remains unsupported
 ├── rule_ref: string
 ├── affected_resource: string             # copied verbatim from the violation
 ├── severity: Severity
-├── evidence: PolicyViolationIncidentEvidence
+├── evidence: IncidentEvidence             # PolicyViolationIncidentEvidence | RuleEvidence
+│                                          # (RuleEvidence = CpuHighEvidence |
+│                                          # LinkFlapEvidence | BgpDownEvidence, Day 9c)
 ├── recommendation: string                # copied verbatim, Section 13
 ├── observed_at: timestamp                # = violation.detected_at
 ```
@@ -642,8 +645,19 @@ UnitOfWork
   rollback() -> None
 ```
 
-`TelemetryRepository` (FR-05, later slice) is not part of this grouping —
-telemetry ingestion is a separate operation with its own transaction.
+`UnitOfWork` also exposes `telemetry_samples: TelemetryRepository` (Day
+9b) alongside the four repositories above — both `InMemoryUnitOfWork` and
+`SqlAlchemyUnitOfWork` construct `telemetry_samples` and `incidents`
+against the same working store/`Session` as every other repository, so a
+single `TelemetryIngestionService.ingest()` call (Day 9c) saves the
+telemetry sample and upserts every fired anomaly's incident inside that
+one transaction, committing once; any failure rolls back the telemetry
+sample and every incident upserted earlier in that same operation. This
+describes one telemetry-ingestion operation's own transaction, not a
+claim that every telemetry operation and every incident operation across
+the application share one global transaction — `ConfigIngestionService`'s
+policy-violation path, for example, still opens its own separate
+`UnitOfWork` per call, unrelated to telemetry ingestion's.
 
 All repository operation names are Python-style snake_case, consistent
 with the rest of this stack (ADR-0002):
@@ -889,7 +903,7 @@ is the caller's (`application` layer's) job.
 | `VendorConfigAdapter` (Cisco, Arista) | `parse(raw_text) -> NormalizedConfiguration \| ParseError` | FR-02 |
 | `PolicyEvaluator` | `evaluate(device_id, source_snapshot_id, observed_at, config, policies: list[ConfigurationPolicy]) -> list[ConfigurationViolation]` | FR-03, Section 6–7 |
 | `DriftDetector` | `compare(baseline: NormalizedConfiguration, current: NormalizedConfiguration) -> DriftReport` | FR-04, implemented Day 9 — Section 20 |
-| `RuleEngine` | `evaluate(observed_at, recent_samples: list[TelemetrySample]) -> list[Anomaly]` | FR-06, later slice |
+| `RuleEngine` | `evaluate(observed_at, recent_samples: list[TelemetrySample]) -> list[Anomaly]` | FR-06, implemented Day 9b (deterministic CPU/link-flap/BGP-down detection); integrated with anomaly-incident persistence Day 9c |
 | `IncidentFactory` | `build_candidate(finding) -> IncidentCandidate` (Section 11's fields, pre-fingerprint) | FR-07 |
 | `compute_fingerprint` | `(device_id, source, rule_ref, affected_resource) -> str` (SHA-256 hex, Section 11) | Section 11 |
 | `Clock` (deferred past Day 5A) | `now_utc() -> timestamp` — `SystemClock` (production) / `FixedClock` (tests) | architecture.md Section 4.1; `ConfigIngestionService` instead takes `observed_at` directly on `IngestConfigurationCommand` this phase |
@@ -1051,7 +1065,12 @@ config.
 ]
 ```
 
-stdout log line (FR-09, AC-10) — `outcome` distinguishes creation from update:
+**Target/future AC-10 behavior — not currently implemented, not currently
+emitted by the application.** No `observability`/structured-logging
+module exists yet (the `observability` package is an empty stub). The
+shape below documents the intended stdout log line (FR-09, AC-10) —
+`outcome` distinguishing creation from update — as design documentation
+only, retained for when AC-10 is eventually built:
 
 ```json
 {"incident_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "device_id": "spine-01", "rule_ref": "policy-acl-external-in", "severity": "Medium", "status": "OPEN", "outcome": "CREATED", "timestamp": "2026-07-18T10:00:00Z"}

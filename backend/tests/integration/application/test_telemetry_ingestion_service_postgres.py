@@ -11,17 +11,20 @@ rows the in-memory backend would already have pruned.
 """
 
 from collections.abc import Callable
+from dataclasses import fields as dataclasses_fields
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.orm import Session
 
 from meta_rne.application.errors import DeviceNotFoundError
-from meta_rne.application.models import TelemetryIngestionCommand
+from meta_rne.application.models import TelemetryIngestionCommand, TelemetryIngestionResult
 from meta_rne.application.telemetry_ingestion import TelemetryIngestionService
+from meta_rne.detection.anomaly_incident_mapper import AnomalyIncidentMapper
 from meta_rne.domain.anomaly import RuleId
 from meta_rne.domain.config import VendorType
 from meta_rne.domain.device import Device
+from meta_rne.domain.incident import IncidentSource, compute_fingerprint
 from meta_rne.domain.telemetry import (
     BgpSession,
     BgpState,
@@ -277,3 +280,314 @@ def test_telemetry_ingestion_postgres__failure_after_save__persists_nothing(
     verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
     assert verify_uow.telemetry_samples.get_latest(DEVICE_ID) is None
     verify_uow.close()
+
+
+# --- Gate H3: anomaly-to-incident integration through real PostgreSQL -------
+#
+# AnomalyIncidentMapper and compute_fingerprint are used exactly as approved
+# (Gate H2) — no severity/recommendation/affected_resource logic is
+# duplicated here.
+
+
+def _incidents(session_factory: Callable[[], Session]) -> tuple[object, ...]:
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    result = uow.incidents.list_all()
+    uow.close()
+    return result
+
+
+class _FailingIncidentsWrapper:
+    """Wraps a real SqlAlchemyIncidentRepository, raising on a specific
+    1-indexed upsert_open_incident call — used only to prove atomicity,
+    never to replace the real repository's dedup/persistence behavior."""
+
+    def __init__(self, wrapped: object, fail_on_call: int, fail_error: Exception) -> None:
+        self._wrapped = wrapped
+        self._fail_on_call = fail_on_call
+        self._fail_error = fail_error
+        self.calls: list[object] = []
+
+    def upsert_open_incident(
+        self, candidate: object, fingerprint: str, observed_at: object
+    ) -> object:
+        self.calls.append(candidate)
+        if len(self.calls) == self._fail_on_call:
+            raise self._fail_error
+        return self._wrapped.upsert_open_incident(  # type: ignore[attr-defined]
+            candidate, fingerprint, observed_at
+        )
+
+    def get_by_id(self, incident_id: str) -> object:
+        return self._wrapped.get_by_id(incident_id)  # type: ignore[attr-defined]
+
+    def list_all(self) -> object:
+        return self._wrapped.list_all()  # type: ignore[attr-defined]
+
+    def resolve(self, incident_id: str, resolved_at: object) -> object:
+        return self._wrapped.resolve(incident_id, resolved_at)  # type: ignore[attr-defined]
+
+
+def test_telemetry_ingestion_postgres__cpu_anomaly__persists_one_anomaly_incident(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    _seed_sample(sqlalchemy_session_factory, _sample(sampled_at=T0, cpu=95.0))
+    service = _service(sqlalchemy_session_factory)
+
+    result = service.ingest(
+        _command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0))
+    )
+
+    incidents = _incidents(sqlalchemy_session_factory)
+    assert len(incidents) == 1
+    assert incidents[0].source == IncidentSource.ANOMALY
+    assert incidents[0].rule_ref == "RULE-CPU-HIGH"
+    assert len(result.anomalies) == 1
+
+
+def test_telemetry_ingestion_postgres__link_flap_anomaly__persists_one_anomaly_incident(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    interface = "GigabitEthernet0/1"
+    for offset, state in enumerate([LinkState.UP, LinkState.DOWN, LinkState.UP, LinkState.DOWN]):
+        _seed_sample(
+            sqlalchemy_session_factory,
+            _sample(
+                sampled_at=T0 + timedelta(seconds=12 * offset),
+                interface_states=(InterfaceState(name=interface, oper_state=state),),
+            ),
+        )
+    service = _service(sqlalchemy_session_factory)
+
+    service.ingest(
+        _command(
+            sample=_sample(
+                sampled_at=T0 + timedelta(seconds=48),
+                interface_states=(InterfaceState(name=interface, oper_state=LinkState.UP),),
+            )
+        )
+    )
+
+    incidents = _incidents(sqlalchemy_session_factory)
+    assert len(incidents) == 1
+    assert incidents[0].source == IncidentSource.ANOMALY
+    assert incidents[0].rule_ref == "RULE-LINK-FLAP"
+
+
+def test_telemetry_ingestion_postgres__bgp_down_anomaly__persists_one_anomaly_incident(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    neighbor = "10.0.0.2"
+    _seed_sample(
+        sqlalchemy_session_factory,
+        _sample(
+            sampled_at=T0,
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.ESTABLISHED),),
+        ),
+    )
+    service = _service(sqlalchemy_session_factory)
+
+    service.ingest(
+        _command(
+            sample=_sample(
+                sampled_at=T0 + timedelta(seconds=30),
+                bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.IDLE),),
+            )
+        )
+    )
+
+    incidents = _incidents(sqlalchemy_session_factory)
+    assert len(incidents) == 1
+    assert incidents[0].source == IncidentSource.ANOMALY
+    assert incidents[0].rule_ref == "RULE-BGP-DOWN"
+
+
+def test_telemetry_ingestion_postgres__anomaly_incident_fields_match_mapper_exactly(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    _seed_sample(sqlalchemy_session_factory, _sample(sampled_at=T0, cpu=95.0))
+    service = _service(sqlalchemy_session_factory)
+
+    result = service.ingest(
+        _command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0))
+    )
+
+    anomaly = result.anomalies[0]
+    expected_candidate = AnomalyIncidentMapper.build_candidate(anomaly)
+    expected_fingerprint = compute_fingerprint(
+        expected_candidate.device_id,
+        expected_candidate.source,
+        expected_candidate.rule_ref,
+        expected_candidate.affected_resource,
+    )
+
+    incidents = _incidents(sqlalchemy_session_factory)
+    incident = incidents[0]
+    assert incident.device_id == expected_candidate.device_id
+    assert incident.source == expected_candidate.source
+    assert incident.rule_ref == expected_candidate.rule_ref
+    assert incident.affected_resource == expected_candidate.affected_resource
+    assert incident.severity == expected_candidate.severity
+    assert incident.recommendation == expected_candidate.recommendation
+    assert incident.fingerprint == expected_fingerprint
+
+
+def test_telemetry_ingestion_postgres__repeated_cpu_anomaly__updates_one_open_incident(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    service = _service(sqlalchemy_session_factory)
+
+    _seed_sample(sqlalchemy_session_factory, _sample(sampled_at=T0, cpu=95.0))
+    first_result = service.ingest(
+        _command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0))
+    )
+
+    second_result = service.ingest(
+        _command(
+            sample=_sample(sampled_at=T0 + timedelta(seconds=60), cpu=95.0),
+            observed_at=T0 + timedelta(seconds=60),
+        )
+    )
+
+    incidents = _incidents(sqlalchemy_session_factory)
+    assert len(incidents) == 1
+    incident = incidents[0]
+    assert incident.occurrence_count == 2
+    assert incident.created_at == T0
+    assert incident.last_seen_at == T0 + timedelta(seconds=60)
+    assert incident.evidence == second_result.anomalies[0].evidence
+    assert incident.evidence != first_result.anomalies[0].evidence
+
+
+def test_telemetry_ingestion_postgres__multiple_anomalies__persists_all_in_one_transaction(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    for offset, state in enumerate([LinkState.UP, LinkState.DOWN, LinkState.UP, LinkState.DOWN]):
+        _seed_sample(
+            sqlalchemy_session_factory,
+            _sample(
+                sampled_at=T0 + timedelta(seconds=10 * offset),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=state),),
+            ),
+        )
+    _seed_sample(
+        sqlalchemy_session_factory,
+        _sample(
+            sampled_at=T0 + timedelta(seconds=40),
+            cpu=95.0,
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.ESTABLISHED),),
+        ),
+    )
+    service = _service(sqlalchemy_session_factory)
+
+    service.ingest(
+        _command(
+            sample=_sample(
+                sampled_at=T0 + timedelta(seconds=50),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=LinkState.UP),),
+                bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.IDLE),),
+            )
+        )
+    )
+
+    incidents = _incidents(sqlalchemy_session_factory)
+    assert len(incidents) == 3
+    assert {i.rule_ref for i in incidents} == {"RULE-CPU-HIGH", "RULE-LINK-FLAP", "RULE-BGP-DOWN"}
+
+
+def test_telemetry_ingestion_postgres__failure_during_incident_upsert__rolls_back_everything(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    for offset, state in enumerate([LinkState.UP, LinkState.DOWN, LinkState.UP, LinkState.DOWN]):
+        _seed_sample(
+            sqlalchemy_session_factory,
+            _sample(
+                sampled_at=T0 + timedelta(seconds=10 * offset),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=state),),
+            ),
+        )
+    _seed_sample(
+        sqlalchemy_session_factory,
+        _sample(
+            sampled_at=T0 + timedelta(seconds=40),
+            cpu=95.0,
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.ESTABLISHED),),
+        ),
+    )
+
+    def factory() -> SqlAlchemyUnitOfWork:
+        uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+        uow.incidents = _FailingIncidentsWrapper(  # type: ignore[assignment]
+            uow.incidents, fail_on_call=2, fail_error=RuntimeError("second upsert boom")
+        )
+        return uow
+
+    service = TelemetryIngestionService(unit_of_work_factory=factory)
+
+    with pytest.raises(RuntimeError, match="second upsert boom"):
+        service.ingest(
+            _command(
+                sample=_sample(
+                    sampled_at=T0 + timedelta(seconds=50),
+                    cpu=95.0,
+                    interface_states=(InterfaceState(name=interface, oper_state=LinkState.UP),),
+                    bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.IDLE),),
+                )
+            )
+        )
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    # The five seeded history samples remain (they were committed before
+    # this test's own failing ingestion began) — only the current
+    # ingestion's own sample (sampled_at=T0+50s) must be absent, proving
+    # its save was rolled back along with the incident upserts.
+    latest = verify_uow.telemetry_samples.get_latest(DEVICE_ID)
+    assert latest is not None
+    assert latest.sampled_at != T0 + timedelta(seconds=50)
+    assert verify_uow.incidents.list_all() == ()
+    verify_uow.close()
+
+
+def test_telemetry_ingestion_postgres__no_anomaly__existing_telemetry_only_scenario_unchanged(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    sample = _sample()
+    service = _service(sqlalchemy_session_factory)
+
+    result = service.ingest(_command(sample=sample))
+
+    assert result.sample == sample
+    assert result.anomalies == ()
+    assert _incidents(sqlalchemy_session_factory) == ()
+
+
+def test_telemetry_ingestion_postgres__result_remains_sample_and_anomalies_only(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    _seed_sample(sqlalchemy_session_factory, _sample(sampled_at=T0, cpu=95.0))
+    service = _service(sqlalchemy_session_factory)
+
+    result = service.ingest(
+        _command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0))
+    )
+
+    assert {f.name for f in dataclasses_fields(TelemetryIngestionResult)} == {
+        "sample",
+        "anomalies",
+    }
+    assert result.sample.cpu_utilization_pct == 95.0

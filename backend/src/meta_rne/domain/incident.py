@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from meta_rne.domain.anomaly import RuleEvidence
 from meta_rne.domain.config import AclDirection
 from meta_rne.domain.policy import Severity, ViolationType
 
@@ -62,6 +63,17 @@ class PolicyViolationIncidentEvidence:
         )
 
 
+# The full set of evidence shapes an Incident/IncidentCandidate may carry,
+# one per IncidentSource family that currently has a supported evidence
+# shape (POLICY_VIOLATION, ANOMALY) — DRIFT has none yet (drift incidents
+# are not implemented). Runtime source/evidence consistency (which
+# IncidentSource may pair with which member of this union, and — for
+# ANOMALY specifically — which RuleEvidence subtype a given rule_ref
+# requires) is enforced by persistence/incident_validation.py, never here:
+# this is an annotation widening only, no runtime check.
+IncidentEvidence = PolicyViolationIncidentEvidence | RuleEvidence
+
+
 @dataclass(frozen=True, slots=True)
 class IncidentCandidate:
     device_id: str
@@ -69,7 +81,7 @@ class IncidentCandidate:
     rule_ref: str
     affected_resource: str
     severity: Severity
-    evidence: PolicyViolationIncidentEvidence
+    evidence: IncidentEvidence
     recommendation: str
     observed_at: datetime
 
@@ -109,7 +121,7 @@ class Incident:
     affected_resource: str
     severity: Severity
     status: IncidentStatus
-    evidence: PolicyViolationIncidentEvidence
+    evidence: IncidentEvidence
     recommendation: str
     created_at: datetime
     last_seen_at: datetime

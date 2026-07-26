@@ -18,7 +18,9 @@ no frontend consumer yet** — same pattern as Day 7A's backend-only
 addition of the resolve endpoint. **Day 9b added two more endpoints,
 `POST /devices/{device_id}/telemetry` and `GET
 /devices/{device_id}/telemetry/recent` (Section 9), also backend-only with
-no frontend consumer yet.**
+no frontend consumer yet.** **Day 9c added no new endpoint — `GET
+/incidents` (Section 6) now also returns `"ANOMALY"`-sourced incidents,
+still with no frontend consumer.**
 **Derived from:** `backend/src/meta_rne/api/schemas.py`, `api/routes.py`,
 `api/errors.py`, `api/cors.py` (current source, not a planning aspiration)
 
@@ -236,8 +238,28 @@ GET /incidents
 ```
 
 `fingerprint` is present and treated as a normal, non-internal field.
-`evidence` is currently always the `POLICY_VIOLATION` shape shown above —
-the only `IncidentSource` any current detection path produces.
+`evidence`'s exact shape depends on `source` (Day 9c): for
+`"POLICY_VIOLATION"` it is the shape shown above; for `"ANOMALY"` it is one
+of three shapes, selected by `rule_ref`:
+
+```json
+// rule_ref: "RULE-CPU-HIGH"
+{"samples": [{"timestamp": "2026-07-18T10:00:00Z", "cpu_utilization_pct": 95.0}, "..."]}
+
+// rule_ref: "RULE-LINK-FLAP"
+{"interface_name": "GigabitEthernet0/1", "transitions": [{"timestamp": "2026-07-18T10:00:00Z", "oper_state": "down"}, "..."]}
+
+// rule_ref: "RULE-BGP-DOWN"
+{"neighbor_ip": "10.0.0.1", "previous_state": "Established", "state": "Idle"}
+```
+
+An `"ANOMALY"` incident's `severity` is always `"High"`
+(`RULE-CPU-HIGH`/`RULE-LINK-FLAP`) or `"Critical"` (`RULE-BGP-DOWN`), and
+`affected_resource` is `"device"`, `"interface:{interface_name}"`, or
+`"bgp-neighbor:{neighbor_ip}"` respectively — fixed per rule, never
+computed per-instance. No frontend consumer of `"ANOMALY"`-sourced
+incidents exists yet; the dashboard currently only renders the
+`"POLICY_VIOLATION"` evidence shape.
 
 **`updated_at`/`resolved_at` (Day 7A).** `updated_at` is a required
 `datetime` field — the most recent persisted mutation to this incident of
@@ -402,7 +424,10 @@ Ingests telemetry samples and runs three deterministic anomaly rules
 against them. **No frontend consumer exists yet** — the current React
 dashboard does not call either endpoint, and neither response contains any
 incident field (no `incident_id`, `severity`, `recommendation`, or
-`fingerprint`) — a telemetry anomaly does not create an incident.
+`fingerprint`). **As of Day 9c, a fired anomaly does create or update an
+incident** — as an internal side effect of the same atomic `POST`
+operation, never reflected in this endpoint's own response. The resulting
+incident is visible only through `GET /incidents` (Section 6).
 
 **`POST /devices/{device_id}/telemetry`** — `device_id` (path) is
 authoritative; `observed_at` is always server-generated, never accepted in
@@ -566,12 +591,13 @@ Do not build frontend features assuming any of the following exist:
   dashboard's "Resolve incident" control for exact `OPEN` incidents only
 - `GET /devices`, `GET /devices/{id}`, `GET /incidents/{id}`
 - A frontend consumer of configuration drift detection
-  (`GET /devices/{device_id}/drift`, Section 8, implemented as of Day 9) or
+  (`GET /devices/{device_id}/drift`, Section 8, implemented as of Day 9),
   of telemetry ingestion/anomaly detection (`POST
   /devices/{device_id}/telemetry` and `GET
   /devices/{device_id}/telemetry/recent`, Section 9, implemented as of Day
-  9b) — both are backend-only; no anomaly-to-incident mapping exists, so no
-  telemetry anomaly ever appears through `GET /incidents`
+  9b), or of `"ANOMALY"`-sourced incidents now returned by `GET /incidents`
+  (Section 6, implemented as of Day 9c) — all backend-only; the dashboard
+  does not yet render anomaly evidence
 - Any vendor besides `cisco-ios-xe`/`arista-eos` (both now supported as of
   Day 8A — see Section 5's `vendor` row and CLAUDE.md's "Current Phase")
 - Wildcard or shared policy applicability, and policy authoring/CRUD

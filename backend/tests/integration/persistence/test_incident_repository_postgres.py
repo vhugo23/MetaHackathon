@@ -10,6 +10,13 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from meta_rne.domain.anomaly import (
+    BgpDownEvidence,
+    CpuHighEvidence,
+    CpuSampleEvidence,
+    InterfaceTransitionEvidence,
+    LinkFlapEvidence,
+)
 from meta_rne.domain.config import (
     AclDirection,
     VendorType,
@@ -24,7 +31,9 @@ from meta_rne.domain.incident import (
     compute_fingerprint,
 )
 from meta_rne.domain.policy import Severity, ViolationType
+from meta_rne.domain.telemetry import BgpState, LinkState
 from meta_rne.persistence.errors import ReferencedDeviceNotFoundError
+from meta_rne.persistence.serialization import SerializationError
 from meta_rne.persistence.sqlalchemy.device_repository import SqlAlchemyDeviceRepository
 from meta_rne.persistence.sqlalchemy.incident_repository import SqlAlchemyIncidentRepository
 
@@ -256,3 +265,193 @@ def test_incident_repository_sqlalchemy__resolve__stale_timestamp_sql_path__leav
     assert stored.updated_at == T1
     assert stored.last_seen_at == T1
     assert stored.occurrence_count == 1
+
+
+# --- Gate H1B: ANOMALY evidence through real PostgreSQL/JSONB ---------------
+#
+# Severity/recommendation below are neutral, existing values — never the
+# unapproved Gate H0 per-rule proposals. No anomaly-to-IncidentCandidate
+# mapping exists yet (Gate H2); these candidates are built directly.
+
+
+def _seed_device(sqlalchemy_session: Session, device_id: str = DEVICE_ID) -> None:
+    SqlAlchemyDeviceRepository(sqlalchemy_session).save(
+        Device(
+            device_id=device_id,
+            vendor=VendorType.CISCO_IOS_XE,
+            current_snapshot_id=None,
+            baseline_snapshot_id=None,
+            created_at=T0,
+            updated_at=T0,
+        )
+    )
+
+
+def _anomaly_candidate(**overrides: object) -> IncidentCandidate:
+    defaults: dict[str, object] = {
+        "device_id": DEVICE_ID,
+        "source": IncidentSource.ANOMALY,
+        "rule_ref": "RULE-CPU-HIGH",
+        "affected_resource": "device",
+        "severity": Severity.MEDIUM,
+        "evidence": CpuHighEvidence(
+            samples=(CpuSampleEvidence(timestamp=T0, cpu_utilization_pct=95.0),)
+        ),
+        "recommendation": "test recommendation",
+        "observed_at": T0,
+    }
+    defaults.update(overrides)
+    return IncidentCandidate(**defaults)  # type: ignore[arg-type]
+
+
+def test_incident_repository_sqlalchemy__cpu_high_evidence__round_trips_through_jsonb(
+    sqlalchemy_session: Session,
+) -> None:
+    _seed_device(sqlalchemy_session)
+    incidents = SqlAlchemyIncidentRepository(sqlalchemy_session, incident_id_factory=lambda: "id-1")
+    evidence = CpuHighEvidence(
+        samples=(
+            CpuSampleEvidence(timestamp=T0, cpu_utilization_pct=91.0),
+            CpuSampleEvidence(timestamp=T1, cpu_utilization_pct=99.0),
+        )
+    )
+    candidate = _anomaly_candidate(evidence=evidence)
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+    fetched = incidents.get_by_id(result.incident.incident_id)
+
+    assert fetched is not None
+    assert fetched.evidence == evidence
+    assert isinstance(fetched.evidence, CpuHighEvidence)
+    # Nested tuple ordering preserved through JSONB.
+    assert [s.cpu_utilization_pct for s in fetched.evidence.samples] == [91.0, 99.0]
+
+
+def test_incident_repository_sqlalchemy__link_flap_evidence__round_trips_through_jsonb(
+    sqlalchemy_session: Session,
+) -> None:
+    _seed_device(sqlalchemy_session)
+    incidents = SqlAlchemyIncidentRepository(sqlalchemy_session, incident_id_factory=lambda: "id-1")
+    evidence = LinkFlapEvidence(
+        interface_name="GigabitEthernet0/1",
+        transitions=(
+            InterfaceTransitionEvidence(timestamp=T0, oper_state=LinkState.DOWN),
+            InterfaceTransitionEvidence(timestamp=T1, oper_state=LinkState.UP),
+        ),
+    )
+    candidate = _anomaly_candidate(
+        rule_ref="RULE-LINK-FLAP",
+        affected_resource="interface:GigabitEthernet0/1",
+        evidence=evidence,
+    )
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+    fetched = incidents.get_by_id(result.incident.incident_id)
+
+    assert fetched is not None
+    assert fetched.evidence == evidence
+    assert isinstance(fetched.evidence, LinkFlapEvidence)
+    # Nested tuple ordering and enum values preserved through JSONB.
+    assert [t.oper_state for t in fetched.evidence.transitions] == [LinkState.DOWN, LinkState.UP]
+
+
+def test_incident_repository_sqlalchemy__bgp_down_evidence__round_trips_through_jsonb(
+    sqlalchemy_session: Session,
+) -> None:
+    _seed_device(sqlalchemy_session)
+    incidents = SqlAlchemyIncidentRepository(sqlalchemy_session, incident_id_factory=lambda: "id-1")
+    evidence = BgpDownEvidence(
+        neighbor_ip="10.0.0.1", state=BgpState.IDLE, previous_state=BgpState.ESTABLISHED
+    )
+    candidate = _anomaly_candidate(
+        rule_ref="RULE-BGP-DOWN", affected_resource="bgp-neighbor:10.0.0.1", evidence=evidence
+    )
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+    fetched = incidents.get_by_id(result.incident.incident_id)
+
+    assert fetched is not None
+    assert fetched.evidence == evidence
+    assert isinstance(fetched.evidence, BgpDownEvidence)
+    # Enum values reconstruct exactly, not as their raw string value.
+    assert fetched.evidence.state == BgpState.IDLE
+    assert fetched.evidence.previous_state == BgpState.ESTABLISHED
+
+
+def test_incident_repository_sqlalchemy__repeated_anomaly_upsert__replaces_evidence_in_jsonb(
+    sqlalchemy_session: Session,
+) -> None:
+    _seed_device(sqlalchemy_session)
+    incidents = SqlAlchemyIncidentRepository(
+        sqlalchemy_session, incident_id_factory=lambda: "sequential-id"
+    )
+    candidate = _anomaly_candidate()
+    fingerprint = _fingerprint(candidate)
+    incidents.upsert_open_incident(candidate, fingerprint, T0)
+    new_evidence = CpuHighEvidence(
+        samples=(CpuSampleEvidence(timestamp=T1, cpu_utilization_pct=99.0),)
+    )
+
+    result = incidents.upsert_open_incident(
+        _anomaly_candidate(evidence=new_evidence, observed_at=T1), fingerprint, T1
+    )
+
+    assert result.outcome == IncidentUpsertOutcome.UPDATED
+    fetched = incidents.get_by_id(result.incident.incident_id)
+    assert fetched is not None
+    assert fetched.evidence == new_evidence
+
+
+def test_incident_repository_sqlalchemy__anomaly_row_unknown_rule_ref__raises_serialization_error(
+    sqlalchemy_session: Session,
+) -> None:
+    """Direct-SQL corruption, same pattern as the ACKNOWLEDGED-status test
+    above: bypasses the repository to force a persisted state the write path
+    can never produce, proving the read path never leaks a raw ValueError/
+    KeyError/TypeError for a malformed persisted rule_ref."""
+    _seed_device(sqlalchemy_session)
+    incidents = SqlAlchemyIncidentRepository(sqlalchemy_session, incident_id_factory=lambda: "id-1")
+    candidate = _anomaly_candidate()
+    created = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+    sqlalchemy_session.execute(
+        text("UPDATE incidents SET rule_ref = 'RULE-DOES-NOT-EXIST' WHERE incident_id = :id"),
+        {"id": created.incident.incident_id},
+    )
+
+    with pytest.raises(SerializationError):
+        incidents.get_by_id(created.incident.incident_id)
+
+
+def test_incident_repository_sqlalchemy__anomaly_row_malformed_evidence__raises_serialization_error(
+    sqlalchemy_session: Session,
+) -> None:
+    """Direct-SQL corruption: a valid rule_ref whose persisted evidence JSON
+    does not match that subtype's required shape."""
+    _seed_device(sqlalchemy_session)
+    incidents = SqlAlchemyIncidentRepository(sqlalchemy_session, incident_id_factory=lambda: "id-1")
+    candidate = _anomaly_candidate()
+    created = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+    sqlalchemy_session.execute(
+        text("UPDATE incidents SET evidence = '{}'::jsonb WHERE incident_id = :id"),
+        {"id": created.incident.incident_id},
+    )
+
+    with pytest.raises(SerializationError):
+        incidents.get_by_id(created.incident.incident_id)
+
+
+def test_incident_repository_sqlalchemy__anomaly_evidence__exposes_no_persistence_identity(
+    sqlalchemy_session: Session,
+) -> None:
+    _seed_device(sqlalchemy_session)
+    incidents = SqlAlchemyIncidentRepository(sqlalchemy_session, incident_id_factory=lambda: "id-1")
+    evidence = CpuHighEvidence(samples=(CpuSampleEvidence(timestamp=T0, cpu_utilization_pct=95.0),))
+    candidate = _anomaly_candidate(evidence=evidence)
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+    fetched = incidents.get_by_id(result.incident.incident_id)
+
+    assert fetched is not None
+    # The reconstructed evidence has exactly the fields the domain dataclass
+    # declares — no row identity, no insertion sequence, nothing else.
+    assert fetched.evidence == evidence

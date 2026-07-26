@@ -4,6 +4,13 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
+from meta_rne.domain.anomaly import (
+    BgpDownEvidence,
+    CpuHighEvidence,
+    CpuSampleEvidence,
+    InterfaceTransitionEvidence,
+    LinkFlapEvidence,
+)
 from meta_rne.domain.config import AclDirection
 from meta_rne.domain.incident import (
     Incident,
@@ -16,6 +23,7 @@ from meta_rne.domain.incident import (
     compute_fingerprint,
 )
 from meta_rne.domain.policy import Severity, ViolationType
+from meta_rne.domain.telemetry import BgpState, LinkState
 
 DEVICE_ID = "spine-01"
 SOURCE = IncidentSource.POLICY_VIOLATION
@@ -453,3 +461,144 @@ def test_incident_upsert_result__wraps_incident_and_outcome() -> None:
 
     assert result.incident is incident
     assert result.outcome is IncidentUpsertOutcome.CREATED
+
+
+# --- Gate H1B: IncidentCandidate/Incident evidence-union widening -----------
+#
+# Severity/recommendation below are deliberately neutral, existing values —
+# never the unapproved Gate H0 per-rule severity/recommendation proposals.
+# These six tests construct IncidentCandidate/Incident directly (never
+# through the _candidate/_incident helpers above, whose
+# `# type: ignore[arg-type]` would silently suppress the exact mypy error
+# this gate's expected-red checkpoint depends on).
+
+_H1B_SEVERITY = Severity.MEDIUM
+_H1B_RECOMMENDATION = "test recommendation"
+
+_CPU_HIGH_EVIDENCE = CpuHighEvidence(
+    samples=(CpuSampleEvidence(timestamp=OBSERVED_AT, cpu_utilization_pct=95.0),)
+)
+_LINK_FLAP_EVIDENCE = LinkFlapEvidence(
+    interface_name="GigabitEthernet0/1",
+    transitions=(InterfaceTransitionEvidence(timestamp=OBSERVED_AT, oper_state=LinkState.DOWN),),
+)
+_BGP_DOWN_EVIDENCE = BgpDownEvidence(
+    neighbor_ip="10.0.0.1", state=BgpState.IDLE, previous_state=BgpState.ESTABLISHED
+)
+
+
+def test_incident_candidate__cpu_high_evidence__constructs_successfully() -> None:
+    candidate = IncidentCandidate(
+        device_id=DEVICE_ID,
+        source=IncidentSource.ANOMALY,
+        rule_ref="RULE-CPU-HIGH",
+        affected_resource="device",
+        severity=_H1B_SEVERITY,
+        evidence=_CPU_HIGH_EVIDENCE,
+        recommendation=_H1B_RECOMMENDATION,
+        observed_at=OBSERVED_AT,
+    )
+
+    assert candidate.evidence == _CPU_HIGH_EVIDENCE
+
+
+def test_incident_candidate__link_flap_evidence__constructs_successfully() -> None:
+    candidate = IncidentCandidate(
+        device_id=DEVICE_ID,
+        source=IncidentSource.ANOMALY,
+        rule_ref="RULE-LINK-FLAP",
+        affected_resource="interface:GigabitEthernet0/1",
+        severity=_H1B_SEVERITY,
+        evidence=_LINK_FLAP_EVIDENCE,
+        recommendation=_H1B_RECOMMENDATION,
+        observed_at=OBSERVED_AT,
+    )
+
+    assert candidate.evidence == _LINK_FLAP_EVIDENCE
+
+
+def test_incident_candidate__bgp_down_evidence__constructs_successfully() -> None:
+    candidate = IncidentCandidate(
+        device_id=DEVICE_ID,
+        source=IncidentSource.ANOMALY,
+        rule_ref="RULE-BGP-DOWN",
+        affected_resource="bgp-neighbor:10.0.0.1",
+        severity=_H1B_SEVERITY,
+        evidence=_BGP_DOWN_EVIDENCE,
+        recommendation=_H1B_RECOMMENDATION,
+        observed_at=OBSERVED_AT,
+    )
+
+    assert candidate.evidence == _BGP_DOWN_EVIDENCE
+
+
+def test_incident__cpu_high_evidence__constructs_successfully() -> None:
+    incident = Incident(
+        incident_id="7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        fingerprint=compute_fingerprint(
+            DEVICE_ID, IncidentSource.ANOMALY, "RULE-CPU-HIGH", "device"
+        ),
+        device_id=DEVICE_ID,
+        source=IncidentSource.ANOMALY,
+        rule_ref="RULE-CPU-HIGH",
+        affected_resource="device",
+        severity=_H1B_SEVERITY,
+        status=IncidentStatus.OPEN,
+        evidence=_CPU_HIGH_EVIDENCE,
+        recommendation=_H1B_RECOMMENDATION,
+        created_at=OBSERVED_AT,
+        last_seen_at=OBSERVED_AT,
+        occurrence_count=1,
+        updated_at=OBSERVED_AT,
+        resolved_at=None,
+    )
+
+    assert incident.evidence == _CPU_HIGH_EVIDENCE
+
+
+def test_incident__link_flap_evidence__constructs_successfully() -> None:
+    incident = Incident(
+        incident_id="7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        fingerprint=compute_fingerprint(
+            DEVICE_ID, IncidentSource.ANOMALY, "RULE-LINK-FLAP", "interface:GigabitEthernet0/1"
+        ),
+        device_id=DEVICE_ID,
+        source=IncidentSource.ANOMALY,
+        rule_ref="RULE-LINK-FLAP",
+        affected_resource="interface:GigabitEthernet0/1",
+        severity=_H1B_SEVERITY,
+        status=IncidentStatus.OPEN,
+        evidence=_LINK_FLAP_EVIDENCE,
+        recommendation=_H1B_RECOMMENDATION,
+        created_at=OBSERVED_AT,
+        last_seen_at=OBSERVED_AT,
+        occurrence_count=1,
+        updated_at=OBSERVED_AT,
+        resolved_at=None,
+    )
+
+    assert incident.evidence == _LINK_FLAP_EVIDENCE
+
+
+def test_incident__bgp_down_evidence__constructs_successfully() -> None:
+    incident = Incident(
+        incident_id="7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        fingerprint=compute_fingerprint(
+            DEVICE_ID, IncidentSource.ANOMALY, "RULE-BGP-DOWN", "bgp-neighbor:10.0.0.1"
+        ),
+        device_id=DEVICE_ID,
+        source=IncidentSource.ANOMALY,
+        rule_ref="RULE-BGP-DOWN",
+        affected_resource="bgp-neighbor:10.0.0.1",
+        severity=_H1B_SEVERITY,
+        status=IncidentStatus.OPEN,
+        evidence=_BGP_DOWN_EVIDENCE,
+        recommendation=_H1B_RECOMMENDATION,
+        created_at=OBSERVED_AT,
+        last_seen_at=OBSERVED_AT,
+        occurrence_count=1,
+        updated_at=OBSERVED_AT,
+        resolved_at=None,
+    )
+
+    assert incident.evidence == _BGP_DOWN_EVIDENCE

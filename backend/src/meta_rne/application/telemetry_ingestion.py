@@ -44,9 +44,21 @@ participates in ``RuleEngine.evaluate``'s input exactly once:
     synthetic entry was evicted by the cap in step 7.
 11. Evaluate, commit once, return.
 
-No incident is created; no API/route code; no repository or ``UnitOfWork``
-change. Neither the PostgreSQL identity column nor the in-memory insertion
-sequence is ever read or exposed.
+Gate H3 adds: after ``RuleEngine.evaluate`` returns anomalies and before
+``uow.commit()``, each ``Anomaly`` (in returned order) is mapped to an
+``IncidentCandidate`` via the already-approved
+``AnomalyIncidentMapper.build_candidate`` (Gate H2, unmodified — no
+severity/recommendation/affected_resource logic is duplicated here),
+fingerprinted via the existing ``compute_fingerprint``, and persisted via
+``uow.incidents.upsert_open_incident`` — all inside the same single
+``UnitOfWork``/transaction the telemetry save already uses, so a failure at
+any step (save, history lookup, evaluation, mapping, fingerprinting, any
+upsert, or commit) rolls back the telemetry sample and every incident
+upserted earlier in the same call. ``TelemetryIngestionResult`` is
+unchanged — incident persistence is an internal side effect, not part of
+the returned/API-visible shape. No API/route code; no repository, port, or
+``UnitOfWork`` change. Neither the PostgreSQL identity column nor the
+in-memory insertion sequence is ever read or exposed.
 """
 
 from collections.abc import Callable
@@ -56,8 +68,10 @@ from typing import Protocol
 
 from meta_rne.application.errors import DeviceNotFoundError
 from meta_rne.application.models import TelemetryIngestionCommand, TelemetryIngestionResult
+from meta_rne.detection.anomaly_incident_mapper import AnomalyIncidentMapper
 from meta_rne.detection.rule_engine import RuleEngine
 from meta_rne.domain.anomaly import Anomaly
+from meta_rne.domain.incident import compute_fingerprint
 from meta_rne.domain.ports import UnitOfWork
 from meta_rne.domain.telemetry import TelemetrySample
 
@@ -143,6 +157,16 @@ class TelemetryIngestionService:
             uow.telemetry_samples.save(command.device_id, current_sample)
 
             anomalies = self._rule_engine.evaluate(command.observed_at, evaluation_sequence)
+
+            for anomaly in anomalies:
+                candidate = AnomalyIncidentMapper.build_candidate(anomaly)
+                fingerprint = compute_fingerprint(
+                    candidate.device_id,
+                    candidate.source,
+                    candidate.rule_ref,
+                    candidate.affected_resource,
+                )
+                uow.incidents.upsert_open_incident(candidate, fingerprint, candidate.observed_at)
 
             uow.commit()
         except Exception as original_error:

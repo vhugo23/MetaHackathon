@@ -22,6 +22,7 @@ from meta_rne.adapters.cisco import CiscoAdapter
 from meta_rne.adapters.registry import AdapterRegistry
 from meta_rne.api.app import create_app
 from meta_rne.domain.config import NormalizedConfiguration, NormalizedRouting, VendorType
+from meta_rne.domain.device import Device
 from meta_rne.persistence.errors import PolicySeedConflictError
 from meta_rne.persistence.seeds import build_slice1_policies
 from meta_rne.persistence.sqlalchemy.policy_repository import (
@@ -276,6 +277,111 @@ def test_get_incidents_postgres__returns_stored_incident_with_fingerprint(
     assert len(incidents) == 1
     assert incidents[0]["fingerprint"]
     assert incidents[0]["device_id"] == DEVICE_ID
+
+
+# --- Gate H4A: anomaly-incident API acceptance through real PostgreSQL -----
+#
+# T0_PLUS_30S (not this file's own T1 = T0 + 1 hour, which is unrelated —
+# used elsewhere in this file for drift-timing tests, and is far outside
+# TelemetryIngestionService's 5-minute retention window, which would prune
+# the first sample before RuleEngine.evaluate ever sees it).
+
+T0_PLUS_30S = T0 + timedelta(seconds=30)
+
+
+def _seed_device_for_telemetry(
+    session_factory: Callable[[], Session], device_id: str = DEVICE_ID
+) -> None:
+    uow = SqlAlchemyUnitOfWork(session_factory)
+    uow.devices.save(
+        Device(
+            device_id=device_id,
+            vendor=VendorType.CISCO_IOS_XE,
+            current_snapshot_id=None,
+            baseline_snapshot_id=None,
+            created_at=T0,
+            updated_at=T0,
+        )
+    )
+    uow.commit()
+    uow.close()
+
+
+def _telemetry_payload(**overrides: object) -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "sampled_at": T0.isoformat(),
+        "cpu_utilization_pct": 50.0,
+        "memory_utilization_pct": 50.0,
+        "interface_error_rate": 0.0,
+        "interface_states": [],
+        "bgp_sessions": [],
+    }
+    defaults.update(overrides)
+    return defaults
+
+
+def test_get_incidents_postgres__cpu_anomaly__returns_matching_anomaly_incident(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device_for_telemetry(sqlalchemy_session_factory)
+    client = _app(sqlalchemy_session_factory)
+
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=T0.isoformat(), cpu_utilization_pct=95.0),
+    )
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=T0_PLUS_30S.isoformat(), cpu_utilization_pct=96.0),
+    )
+
+    incidents = client.get("/incidents").json()
+    anomaly_incidents = [i for i in incidents if i["rule_ref"] == "RULE-CPU-HIGH"]
+    assert len(anomaly_incidents) == 1
+    incident = anomaly_incidents[0]
+    assert incident["source"] == "ANOMALY"
+    assert incident["severity"] == "High"
+    assert incident["affected_resource"] == "device"
+    assert incident["recommendation"] == (
+        f"Investigate sustained high CPU utilization on {DEVICE_ID}."
+    )
+    assert incident["evidence"]["samples"][0]["cpu_utilization_pct"] == 95.0
+    assert incident["evidence"]["samples"][1]["cpu_utilization_pct"] == 96.0
+
+
+def test_get_incidents_postgres__repeated_cpu_anomaly__updates_one_open_incident(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device_for_telemetry(sqlalchemy_session_factory)
+    # A distinct observed_at per request (the API's server-generated clock,
+    # not sampled_at) is required to prove last_seen_at actually advances —
+    # _app's default clock is fixed at T0.
+    clock_values = iter([T0, T0_PLUS_30S, T0_PLUS_30S + timedelta(minutes=1)])
+    client = _app(sqlalchemy_session_factory, clock=lambda: next(clock_values))
+
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=T0.isoformat(), cpu_utilization_pct=95.0),
+    )
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=T0_PLUS_30S.isoformat(), cpu_utilization_pct=96.0),
+    )
+    first = next(i for i in client.get("/incidents").json() if i["rule_ref"] == "RULE-CPU-HIGH")
+
+    t2 = T0_PLUS_30S + timedelta(minutes=1)
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=t2.isoformat(), cpu_utilization_pct=97.0),
+    )
+
+    incidents = [i for i in client.get("/incidents").json() if i["rule_ref"] == "RULE-CPU-HIGH"]
+    assert len(incidents) == 1
+    second = incidents[0]
+    assert second["incident_id"] == first["incident_id"]
+    assert second["occurrence_count"] == 2
+    assert second["created_at"] == first["created_at"]
+    assert second["last_seen_at"] != first["last_seen_at"]
 
 
 def test_api_postgres__post_and_get_use_independent_sessions(

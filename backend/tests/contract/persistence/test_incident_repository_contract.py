@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from meta_rne.domain.anomaly import BgpDownEvidence, CpuHighEvidence, LinkFlapEvidence
 from meta_rne.domain.config import (
     AclDirection,
     NormalizedConfiguration,
@@ -30,6 +31,7 @@ from meta_rne.domain.incident import (
 )
 from meta_rne.domain.policy import Severity, ViolationType
 from meta_rne.domain.snapshot import ConfigurationSnapshot, compute_raw_text_hash
+from meta_rne.domain.telemetry import BgpState
 
 DEVICE_ID = "spine-01"
 T0 = datetime(2026, 7, 18, 10, 0, 0, tzinfo=UTC)
@@ -690,3 +692,132 @@ def test_incident_repository__delimiter_quote_backslash_and_unicode_values__surv
     assert fetched.recommendation == tricky
     assert fetched.evidence.expected_acl_name == tricky
     assert fetched.evidence.interface_name == tricky
+
+
+# --- Gate H1B: ANOMALY-sourced candidates ------------------------------------
+#
+# Severity/recommendation below are neutral, existing values — never the
+# unapproved Gate H0 per-rule proposals. No anomaly-to-IncidentCandidate
+# mapping exists yet (Gate H2); these candidates are built directly.
+
+_CPU_HIGH_EVIDENCE = CpuHighEvidence(samples=())
+_LINK_FLAP_EVIDENCE = LinkFlapEvidence(interface_name="GigabitEthernet0/1", transitions=())
+_BGP_DOWN_EVIDENCE = BgpDownEvidence(
+    neighbor_ip="10.0.0.1", state=BgpState.IDLE, previous_state=BgpState.ESTABLISHED
+)
+
+
+def _anomaly_candidate(**overrides: object) -> IncidentCandidate:
+    defaults: dict[str, object] = {
+        "device_id": DEVICE_ID,
+        "source": IncidentSource.ANOMALY,
+        "rule_ref": "RULE-CPU-HIGH",
+        "affected_resource": "device",
+        "severity": Severity.MEDIUM,
+        "evidence": _CPU_HIGH_EVIDENCE,
+        "recommendation": "test recommendation",
+        "observed_at": T0,
+    }
+    defaults.update(overrides)
+    return IncidentCandidate(**defaults)  # type: ignore[arg-type]
+
+
+def test_incident_repository__anomaly_cpu_high_candidate__inserts_successfully(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _anomaly_candidate()
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    assert result.outcome == IncidentUpsertOutcome.CREATED
+
+
+def test_incident_repository__anomaly_link_flap_candidate__inserts_successfully(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _anomaly_candidate(
+        rule_ref="RULE-LINK-FLAP",
+        affected_resource="interface:GigabitEthernet0/1",
+        evidence=_LINK_FLAP_EVIDENCE,
+    )
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    assert result.outcome == IncidentUpsertOutcome.CREATED
+
+
+def test_incident_repository__anomaly_bgp_down_candidate__inserts_successfully(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _anomaly_candidate(
+        rule_ref="RULE-BGP-DOWN",
+        affected_resource="bgp-neighbor:10.0.0.1",
+        evidence=_BGP_DOWN_EVIDENCE,
+    )
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    assert result.outcome == IncidentUpsertOutcome.CREATED
+
+
+def test_incident_repository__anomaly_candidate__preserves_source_rule_ref_and_evidence(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _anomaly_candidate(
+        rule_ref="RULE-BGP-DOWN",
+        affected_resource="bgp-neighbor:10.0.0.1",
+        evidence=_BGP_DOWN_EVIDENCE,
+    )
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    incident = result.incident
+    assert incident.source == IncidentSource.ANOMALY
+    assert incident.rule_ref == "RULE-BGP-DOWN"
+    assert isinstance(incident.evidence, BgpDownEvidence)
+    assert incident.evidence == _BGP_DOWN_EVIDENCE
+
+
+def test_incident_repository__repeated_anomaly_upsert__updates_in_place(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID, SECOND_ID]))
+    candidate = _anomaly_candidate()
+    fingerprint = _fingerprint(candidate)
+    created = incidents.upsert_open_incident(candidate, fingerprint, T0)
+    new_evidence = CpuHighEvidence(samples=())
+
+    result = incidents.upsert_open_incident(
+        _anomaly_candidate(evidence=new_evidence, observed_at=T1), fingerprint, T1
+    )
+
+    assert result.outcome == IncidentUpsertOutcome.UPDATED
+    assert result.incident.incident_id == created.incident.incident_id
+    assert result.incident.created_at == T0
+    assert result.incident.last_seen_at == T1
+    assert result.incident.occurrence_count == 2
+    assert result.incident.evidence == new_evidence
+    # never a second row for the same fingerprint
+    assert len([i for i in incidents.list_all() if i.fingerprint == fingerprint]) == 1
+
+
+def test_incident_repository__mismatched_source_and_evidence_candidate__is_rejected(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _anomaly_candidate(rule_ref="RULE-CPU-HIGH", evidence=_LINK_FLAP_EVIDENCE)
+
+    with pytest.raises(ValueError):
+        incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    assert incidents.list_all() == ()

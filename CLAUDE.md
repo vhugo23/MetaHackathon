@@ -108,8 +108,8 @@ was not touched.
 `GetDeviceDriftService` never calls `uow.commit()`,
 `uow.devices.save()`, or `uow.configuration_snapshots.add()`. Deciding
 which diff entries are incident-worthy remains explicitly deferred to a
-later day, same as anomaly-to-incident mapping (see Day 9b below). No
-frontend consumes this endpoint yet.
+later day (unlike anomaly-to-incident mapping, which now exists — see Day
+9c below). No frontend consumes this endpoint yet.
 
 Verified automated-test inventory as of Day 9: backend `pytest`,
 frontend Vitest, Python orchestration-helper, and Playwright browser
@@ -163,10 +163,86 @@ API clock is never called. Both endpoints reuse the existing
 `device_not_found`/`invalid_request` error mapping — no new error class or
 API code was introduced.
 
-**No incident is created from a telemetry anomaly.** Anomaly-to-incident
-mapping, anomaly severity/recommendation decisions, a deterministic
+**At the close of Day 9b, no incident was yet created from a telemetry
+anomaly** — anomaly-to-incident mapping was deferred at that point. **This
+is superseded by Day 9c below**, which adds exactly that. A deterministic
 telemetry simulator, structured logging, and frontend telemetry
-consumption all remain explicitly deferred — see "Still prohibited" below.
+consumption remain explicitly deferred — see "Still prohibited" below.
+
+---
+
+**Day 9c — Anomaly-to-incident mapping and API acceptance (AC-07/AC-08/
+AC-09), implemented across gates H1 through H4A, all approved, built on
+top of the Day 9b telemetry checkpoint; passes the full backend
+verification matrix (1,033 non-PostgreSQL + 265 PostgreSQL tests) but has
+not yet been committed.**
+
+Each `Anomaly` `RuleEngine.evaluate` returns is now mapped to an
+`IncidentCandidate` via a new, narrow `AnomalyIncidentMapper`
+(`meta_rne.detection.anomaly_incident_mapper`) — a fully separate module
+from `IncidentFactory`, never modifying it. The approved fixed mapping,
+per rule:
+
+| Rule | `severity` | `affected_resource` | `recommendation` |
+|---|---|---|---|
+| `RULE-CPU-HIGH` | `High` | `"device"` | `"Investigate sustained high CPU utilization on {device_id}."` |
+| `RULE-LINK-FLAP` | `High` | `"interface:{interface_name}"` | `"Investigate unstable link state on {device_id} interface {interface_name}."` |
+| `RULE-BGP-DOWN` | `Critical` | `"bgp-neighbor:{neighbor_ip}"` | `"Investigate BGP session down on {device_id} neighbor {neighbor_ip}."` |
+
+`source` is always `ANOMALY`, `rule_ref` is the exact `Anomaly.rule_id`
+value, and `evidence` is the `Anomaly`'s own `CpuHighEvidence`/
+`LinkFlapEvidence`/`BgpDownEvidence` value, preserved unchanged (no
+severity/recommendation/affected_resource inference happens anywhere
+else). `Incident.evidence` (`domain/incident.py`) is widened to
+`IncidentEvidence = PolicyViolationIncidentEvidence | RuleEvidence`; the
+shared `persistence/incident_validation.py` consistency check now
+allow-lists exactly these `(source, rule_ref, evidence type)` triples (an
+unknown anomaly `rule_ref`, a mismatched evidence subtype, or any other
+source is still rejected); `SqlAlchemyIncidentRepository` dispatches
+evidence (de)serialization by `source`/`rule_ref` to the already-approved
+`anomaly_evidence_to_json`/`anomaly_evidence_from_json` functions
+(`persistence/serialization.py`, unchanged since Day 9b); the in-memory
+repository needed no change, since it stores domain objects directly.
+
+`TelemetryIngestionService.ingest()` (`application/telemetry_ingestion.py`)
+is extended, not replaced: after `RuleEngine.evaluate` returns anomalies
+and before the existing single `commit()`, each anomaly (in the engine's
+deterministic `RULE-CPU-HIGH` → `RULE-LINK-FLAP` → `RULE-BGP-DOWN` order)
+is mapped, fingerprinted via the existing `compute_fingerprint`, and
+persisted via `uow.incidents.upsert_open_incident` — all inside the same
+`UnitOfWork`/transaction the telemetry save already used. A failure at any
+step (save, evaluation, mapping, fingerprinting, any upsert, or commit)
+rolls back the telemetry sample and every incident upserted earlier in the
+same call — proven both in-memory and against real PostgreSQL. One
+ingestion may create or update multiple incidents (one per fired rule).
+Repeated detection of the same finding updates the same `OPEN` incident
+(`occurrence_count` increments, `created_at` preserved, `last_seen_at`
+advances, evidence replaced) via the existing, unmodified
+`upsert_open_incident` dedup contract; a resolved incident's recurrence
+creates a new `OPEN` incident with a new `incident_id`, leaving the
+`RESOLVED` row untouched — both are the same generic behavior policy
+incidents already had, now proven for `ANOMALY` incidents too, with zero
+change to that dedup logic itself.
+
+**`GET /incidents` now returns both `POLICY_VIOLATION` and `ANOMALY`
+incidents.** `IncidentResponse.evidence` (`api/schemas.py`) is widened to
+`PolicyViolationIncidentEvidenceResponse | CpuHighEvidenceResponse |
+LinkFlapEvidenceResponse | BgpDownEvidenceResponse`, dispatched by
+`isinstance` in `from_domain` — the same pattern `AnomalyResponse.
+from_domain` (Day 9b) already used, policy-evidence rendering is
+byte-for-byte unchanged. **`POST /devices/{device_id}/telemetry`'s
+response is completely unchanged** — still exactly `{sample, anomalies}`;
+incident persistence is an internal side effect of that one atomic
+operation, never exposed in the telemetry response itself, and no new
+route was added. AC-07 (sustained CPU), AC-08 (link flap), and AC-09 (BGP
+down) are now proven end to end — `POST /devices/{device_id}/telemetry` →
+atomic persistence → `GET /incidents` — for both the in-memory and
+real-PostgreSQL-backed API paths.
+
+**AC-10 (structured JSON log line on incident create/update) remains
+deferred** — no `observability`/structured-logging module exists in this
+codebase. A deterministic telemetry simulator and frontend telemetry
+consumption also remain deferred, unchanged from Day 9b.
 
 ---
 
@@ -1130,8 +1206,7 @@ below):
 enum member/DB constraint has no public transition), reopening, assignment,
 comments/notes, audit history, user identity, bulk resolution, status
 filtering, authentication/authorization, filtering/pagination/sorting query
-parameters, anomaly-to-incident mapping, anomaly severity/recommendation
-decisions, a deterministic telemetry simulator, and structured
+parameters, a deterministic telemetry simulator, and structured
 logging beyond FastAPI's own request logging. Explicit, single-purpose
 incident resolution (`POST /incidents/{incident_id}/resolve`, `OPEN ->
 RESOLVED` only) is no longer prohibited as of Day 7A — see the "Current
@@ -1158,7 +1233,10 @@ detail; drift-triggered incident creation remains prohibited/deferred.
 (FR-05/FR-06) now exist as of Day 9b** — `POST
 /devices/{device_id}/telemetry` and `GET
 /devices/{device_id}/telemetry/recent`, see "Current Phase" above for the
-full detail; anomaly-to-incident mapping remains prohibited/deferred.
+full detail. **Anomaly-to-incident mapping now exists as of Day 9c** —
+`GET /incidents` returns `ANOMALY` incidents alongside `POLICY_VIOLATION`
+ones, proving AC-07/AC-08/AC-09; see "Current Phase" above for the full
+detail; AC-10 (structured logging) remains deferred.
 All remaining items are later days, against the domain model, architecture,
 and ports already documented, with tests written first per the Development
 Rules above.

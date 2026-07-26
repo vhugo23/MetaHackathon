@@ -23,6 +23,17 @@ A referenced ``device_id`` that does not exist raises ``IntegrityError``
 (``session.begin_nested()``), translated to ``ReferencedDeviceNotFoundError``
 without touching the caller's outer transaction or Session — the same
 pattern already used by ``snapshot_repository.py``.
+
+Gate H1B adds explicit, source-dispatched evidence (de)serialization
+(``_evidence_to_json``/``_evidence_from_json`` below): POLICY_VIOLATION uses
+``policy_violation_evidence_to_json``/``_from_json``; ANOMALY uses
+``anomaly_evidence_to_json``/``anomaly_evidence_from_json`` (both already
+approved, unmodified, Gate H1). Every dispatch is a runtime ``isinstance``
+check, never an unchecked cast or a generic serializer — an
+``IncidentCandidate`` reaching this dispatch has already passed
+``validate_candidate_consistency`` (source/evidence family already
+verified), so the ``isinstance`` checks here exist to satisfy static typing
+narrowing, not as the primary validation boundary.
 """
 
 from collections.abc import Callable
@@ -35,13 +46,16 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from meta_rne.domain.anomaly import BgpDownEvidence, CpuHighEvidence, LinkFlapEvidence, RuleEvidence
 from meta_rne.domain.incident import (
     Incident,
     IncidentCandidate,
+    IncidentEvidence,
     IncidentSource,
     IncidentStatus,
     IncidentUpsertOutcome,
     IncidentUpsertResult,
+    PolicyViolationIncidentEvidence,
 )
 from meta_rne.domain.policy import Severity
 from meta_rne.persistence.errors import PersistenceError, ReferencedDeviceNotFoundError
@@ -51,12 +65,55 @@ from meta_rne.persistence.incident_validation import (
     validate_candidate_consistency,
 )
 from meta_rne.persistence.serialization import (
+    SerializationError,
+    anomaly_evidence_from_json,
+    anomaly_evidence_to_json,
     policy_violation_evidence_from_json,
     policy_violation_evidence_to_json,
 )
 from meta_rne.persistence.sqlalchemy.models import _IncidentModel
 
 _FOREIGN_KEY_VIOLATION = "23503"
+
+
+def _evidence_to_json(candidate: IncidentCandidate) -> dict[str, Any]:
+    """Source-dispatched write-side serialization — never a generic
+    recursive serializer, never an unchecked cast. DRIFT and any other
+    unsupported source are already rejected earlier by
+    ``validate_candidate_consistency`` (called before this function), so
+    reaching the final branch here indicates that guard was bypassed."""
+    if candidate.source is IncidentSource.POLICY_VIOLATION:
+        if not isinstance(candidate.evidence, PolicyViolationIncidentEvidence):
+            raise SerializationError(
+                "IncidentCandidate.evidence must be a PolicyViolationIncidentEvidence for "
+                f"source POLICY_VIOLATION, got {type(candidate.evidence).__name__}"
+            )
+        return policy_violation_evidence_to_json(candidate.evidence)
+    if candidate.source is IncidentSource.ANOMALY:
+        if not isinstance(candidate.evidence, CpuHighEvidence | LinkFlapEvidence | BgpDownEvidence):
+            raise SerializationError(
+                "IncidentCandidate.evidence must be a RuleEvidence subtype for source ANOMALY, "
+                f"got {type(candidate.evidence).__name__}"
+            )
+        return anomaly_evidence_to_json(candidate.evidence)
+    raise SerializationError(
+        f"unsupported IncidentSource for evidence serialization: {candidate.source!r}"
+    )
+
+
+def _evidence_from_json(source: str, rule_ref: str, evidence_json: Any) -> IncidentEvidence:
+    """Source-dispatched read-side deserialization, mirroring
+    ``_evidence_to_json`` — an unsupported persisted ``source`` (e.g. a
+    stored 'DRIFT' row, which has no evidence shape) raises
+    SerializationError rather than leaking a raw exception."""
+    if source == IncidentSource.POLICY_VIOLATION.value:
+        return policy_violation_evidence_from_json(evidence_json)
+    if source == IncidentSource.ANOMALY.value:
+        result: RuleEvidence = anomaly_evidence_from_json(rule_ref, evidence_json)
+        return result
+    raise SerializationError(
+        f"unsupported persisted IncidentSource for evidence deserialization: {source!r}"
+    )
 
 
 def _to_utc(value: datetime) -> datetime:
@@ -92,7 +149,7 @@ def _build_domain_incident(
         affected_resource=affected_resource,
         severity=Severity(severity),
         status=IncidentStatus(status),
-        evidence=policy_violation_evidence_from_json(evidence),
+        evidence=_evidence_from_json(source, rule_ref, evidence),
         recommendation=recommendation,
         created_at=_to_utc(created_at),
         last_seen_at=_to_utc(last_seen_at),
@@ -190,7 +247,7 @@ class SqlAlchemyIncidentRepository:
             affected_resource=candidate.affected_resource,
             severity=candidate.severity.value,
             status=IncidentStatus.OPEN.value,
-            evidence=policy_violation_evidence_to_json(candidate.evidence),
+            evidence=_evidence_to_json(candidate),
             recommendation=candidate.recommendation,
             created_at=observed_at,
             last_seen_at=observed_at,

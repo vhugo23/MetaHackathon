@@ -9,7 +9,7 @@ exact-duplicate historical samples are never discarded by equality or
 identity.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -18,9 +18,11 @@ import pytest
 from meta_rne.application.errors import DeviceNotFoundError
 from meta_rne.application.models import TelemetryIngestionCommand, TelemetryIngestionResult
 from meta_rne.application.telemetry_ingestion import TelemetryIngestionService
+from meta_rne.detection.anomaly_incident_mapper import AnomalyIncidentMapper
 from meta_rne.domain.anomaly import RuleId
 from meta_rne.domain.config import VendorType
 from meta_rne.domain.device import Device
+from meta_rne.domain.incident import compute_fingerprint
 from meta_rne.domain.telemetry import (
     BgpSession,
     BgpState,
@@ -138,6 +140,49 @@ class _LifecycleSpyUnitOfWork:
         if self._fail_close is not None:
             raise self._fail_close
         self._wrapped.close()
+
+
+@dataclass
+class _IncidentsSpy:
+    """Wraps a real IncidentRepository, recording every upsert_open_incident
+    call and optionally raising on a specific 1-indexed call — used only to
+    prove atomicity/ordering, never to replace the real repository's
+    dedup/persistence behavior (Gate H3)."""
+
+    _wrapped: Any
+    calls: list[tuple[Any, str, Any]] = field(default_factory=list)
+    fail_on_call: int | None = None
+    fail_error: Exception | None = None
+
+    def upsert_open_incident(self, candidate: Any, fingerprint: str, observed_at: Any) -> Any:
+        self.calls.append((candidate, fingerprint, observed_at))
+        if self.fail_on_call is not None and len(self.calls) == self.fail_on_call:
+            assert self.fail_error is not None
+            raise self.fail_error
+        return self._wrapped.upsert_open_incident(candidate, fingerprint, observed_at)
+
+    def get_by_id(self, incident_id: str) -> Any:
+        return self._wrapped.get_by_id(incident_id)
+
+    def list_all(self) -> Any:
+        return self._wrapped.list_all()
+
+    def resolve(self, incident_id: str, resolved_at: Any) -> Any:
+        return self._wrapped.resolve(incident_id, resolved_at)
+
+
+def _make_service_with_incidents_spy(
+    store: InMemoryStore, fail_on_call: int | None = None, fail_error: Exception | None = None
+) -> tuple[TelemetryIngestionService, _IncidentsSpy]:
+    spy = _IncidentsSpy(_wrapped=None, fail_on_call=fail_on_call, fail_error=fail_error)
+
+    def factory() -> InMemoryUnitOfWork:
+        uow = InMemoryUnitOfWork(store)
+        spy._wrapped = uow.incidents
+        uow.incidents = spy  # type: ignore[assignment]
+        return uow
+
+    return TelemetryIngestionService(unit_of_work_factory=factory), spy
 
 
 class _RuleEngineSpy:
@@ -802,3 +847,392 @@ def test_no_application_service_deduplication_occurs() -> None:
 
     evaluated = engine.calls[0][1]
     assert len(evaluated) == 4
+
+
+# --- Gate H3: anomaly-to-incident integration --------------------------------
+#
+# AnomalyIncidentMapper and compute_fingerprint are used exactly as approved
+# (Gate H2) — no severity/recommendation/affected_resource logic is
+# duplicated here.
+
+
+def _incidents(store: InMemoryStore) -> tuple[Any, ...]:
+    return InMemoryUnitOfWork(store).incidents.list_all()
+
+
+def test_no_anomaly__no_incident_upsert_occurs() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    service, spy = _make_service_with_incidents_spy(store)
+
+    result = service.ingest(_command())
+
+    assert result.anomalies == ()
+    assert spy.calls == []
+    assert _incidents(store) == ()
+
+
+def test_no_anomaly__telemetry_sample_still_saves() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    sample = _sample()
+    service, _ = _make_service_with_incidents_spy(store)
+
+    service.ingest(_command(sample=sample))
+
+    assert InMemoryUnitOfWork(store).telemetry_samples.get_latest(DEVICE_ID) == sample
+
+
+def test_no_anomaly__commits_exactly_once() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    counts = _LifecycleCounts()
+    service = TelemetryIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts)
+    )
+
+    service.ingest(_command())
+
+    assert counts.commit == 1
+    assert counts.rollback == 0
+
+
+def test_no_anomaly__result_remains_sample_and_empty_anomalies() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    sample = _sample()
+    service, _ = _make_service_with_incidents_spy(store)
+
+    result = service.ingest(_command(sample=sample))
+
+    assert result == TelemetryIngestionResult(sample=sample, anomalies=())
+
+
+def test_one_cpu_anomaly__exactly_one_incident_upsert() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    service, spy = _make_service_with_incidents_spy(store)
+
+    result = service.ingest(
+        _command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0))
+    )
+
+    assert len(spy.calls) == 1
+    assert len(result.anomalies) == 1
+
+
+def test_one_cpu_anomaly__candidate_matches_mapper_output() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    service, spy = _make_service_with_incidents_spy(store)
+
+    result = service.ingest(
+        _command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0))
+    )
+
+    anomaly = result.anomalies[0]
+    expected_candidate = AnomalyIncidentMapper.build_candidate(anomaly)
+    candidate, fingerprint, observed_at = spy.calls[0]
+    assert candidate == expected_candidate
+    assert fingerprint == compute_fingerprint(
+        expected_candidate.device_id,
+        expected_candidate.source,
+        expected_candidate.rule_ref,
+        expected_candidate.affected_resource,
+    )
+    assert observed_at == candidate.observed_at
+
+
+def test_one_cpu_anomaly__commits_exactly_once() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    counts = _LifecycleCounts()
+    service = TelemetryIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts)
+    )
+
+    service.ingest(_command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)))
+
+    assert counts.commit == 1
+    assert counts.rollback == 0
+
+
+def test_one_cpu_anomaly__result_shape_unchanged() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    service, _ = _make_service_with_incidents_spy(store)
+
+    result = service.ingest(
+        _command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0))
+    )
+
+    assert {f.name for f in fields(result)} == {"sample", "anomalies"}
+
+
+def test_multiple_anomalies__exactly_three_upserts_in_rule_order() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    for offset, state in enumerate([LinkState.UP, LinkState.DOWN, LinkState.UP, LinkState.DOWN]):
+        _seed_sample(
+            store,
+            _sample(
+                sampled_at=T0 + timedelta(seconds=10 * offset),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=state),),
+            ),
+        )
+    _seed_sample(
+        store,
+        _sample(
+            sampled_at=T0 + timedelta(seconds=40),
+            cpu=95.0,
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.ESTABLISHED),),
+        ),
+    )
+    service, spy = _make_service_with_incidents_spy(store)
+
+    result = service.ingest(
+        _command(
+            sample=_sample(
+                sampled_at=T0 + timedelta(seconds=50),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=LinkState.UP),),
+                bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.IDLE),),
+            )
+        )
+    )
+
+    assert len(spy.calls) == 3
+    assert len(result.anomalies) == 3
+    upserted_rule_refs = [call[0].rule_ref for call in spy.calls]
+    assert upserted_rule_refs == ["RULE-CPU-HIGH", "RULE-LINK-FLAP", "RULE-BGP-DOWN"]
+    for anomaly, (candidate, fingerprint, observed_at) in zip(
+        result.anomalies, spy.calls, strict=True
+    ):
+        expected_candidate = AnomalyIncidentMapper.build_candidate(anomaly)
+        assert candidate == expected_candidate
+        assert fingerprint == compute_fingerprint(
+            expected_candidate.device_id,
+            expected_candidate.source,
+            expected_candidate.rule_ref,
+            expected_candidate.affected_resource,
+        )
+        assert observed_at == candidate.observed_at
+
+
+def test_multiple_anomalies__commits_exactly_once() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    for offset, state in enumerate([LinkState.UP, LinkState.DOWN, LinkState.UP, LinkState.DOWN]):
+        _seed_sample(
+            store,
+            _sample(
+                sampled_at=T0 + timedelta(seconds=10 * offset),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=state),),
+            ),
+        )
+    _seed_sample(
+        store,
+        _sample(
+            sampled_at=T0 + timedelta(seconds=40),
+            cpu=95.0,
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.ESTABLISHED),),
+        ),
+    )
+    counts = _LifecycleCounts()
+    service = TelemetryIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts)
+    )
+
+    service.ingest(
+        _command(
+            sample=_sample(
+                sampled_at=T0 + timedelta(seconds=50),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=LinkState.UP),),
+                bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.IDLE),),
+            )
+        )
+    )
+
+    assert counts.commit == 1
+    assert counts.rollback == 0
+
+
+def test_multiple_anomalies__result_still_exposes_only_sample_and_anomalies() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    for offset, state in enumerate([LinkState.UP, LinkState.DOWN, LinkState.UP, LinkState.DOWN]):
+        _seed_sample(
+            store,
+            _sample(
+                sampled_at=T0 + timedelta(seconds=10 * offset),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=state),),
+            ),
+        )
+    _seed_sample(
+        store,
+        _sample(
+            sampled_at=T0 + timedelta(seconds=40),
+            cpu=95.0,
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.ESTABLISHED),),
+        ),
+    )
+    service, _ = _make_service_with_incidents_spy(store)
+
+    result = service.ingest(
+        _command(
+            sample=_sample(
+                sampled_at=T0 + timedelta(seconds=50),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=LinkState.UP),),
+                bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.IDLE),),
+            )
+        )
+    )
+
+    assert {f.name for f in fields(result)} == {"sample", "anomalies"}
+
+
+def test_repeated_cpu_detection__updates_the_same_open_incident() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    service, _ = _make_service_with_incidents_spy(store)
+
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    first_result = service.ingest(
+        _command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0))
+    )
+    assert len(first_result.anomalies) == 1
+
+    second_result = service.ingest(
+        _command(
+            sample=_sample(sampled_at=T0 + timedelta(seconds=60), cpu=95.0),
+            observed_at=T0 + timedelta(seconds=60),
+        )
+    )
+    assert len(second_result.anomalies) == 1
+
+    incidents = _incidents(store)
+    assert len(incidents) == 1
+    incident = incidents[0]
+    assert incident.occurrence_count == 2
+    assert incident.created_at == T0
+    assert incident.last_seen_at == T0 + timedelta(seconds=60)
+    assert incident.evidence == second_result.anomalies[0].evidence
+    assert incident.evidence != first_result.anomalies[0].evidence
+
+
+def test_failure_during_first_incident_upsert__rolls_back_everything() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    counts = _LifecycleCounts()
+    upsert_error = RuntimeError("first upsert boom")
+    spy = _IncidentsSpy(_wrapped=None, fail_on_call=1, fail_error=upsert_error)
+
+    def factory() -> _LifecycleSpyUnitOfWork:
+        uow = InMemoryUnitOfWork(store)
+        spy._wrapped = uow.incidents
+        uow.incidents = spy  # type: ignore[assignment]
+        return _LifecycleSpyUnitOfWork(uow, counts)
+
+    service = TelemetryIngestionService(unit_of_work_factory=factory)
+
+    with pytest.raises(RuntimeError, match="first upsert boom"):
+        service.ingest(_command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)))
+
+    assert counts.commit == 0
+    assert counts.rollback == 1
+    assert len(spy.calls) == 1
+    # The pre-existing seeded sample is the only one retained — the current
+    # ingestion's own save was rolled back with the rest of the transaction.
+    retained = InMemoryUnitOfWork(store).telemetry_samples.get_latest(DEVICE_ID)
+    assert retained is not None
+    assert retained.sampled_at == T0
+    assert _incidents(store) == ()
+
+
+def test_failure_during_later_incident_upsert__rolls_back_first_upsert_too() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    for offset, state in enumerate([LinkState.UP, LinkState.DOWN, LinkState.UP, LinkState.DOWN]):
+        _seed_sample(
+            store,
+            _sample(
+                sampled_at=T0 + timedelta(seconds=10 * offset),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=state),),
+            ),
+        )
+    _seed_sample(
+        store,
+        _sample(
+            sampled_at=T0 + timedelta(seconds=40),
+            cpu=95.0,
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.ESTABLISHED),),
+        ),
+    )
+    counts = _LifecycleCounts()
+    upsert_error = RuntimeError("second upsert boom")
+    spy = _IncidentsSpy(_wrapped=None, fail_on_call=2, fail_error=upsert_error)
+
+    def factory() -> _LifecycleSpyUnitOfWork:
+        uow = InMemoryUnitOfWork(store)
+        spy._wrapped = uow.incidents
+        uow.incidents = spy  # type: ignore[assignment]
+        return _LifecycleSpyUnitOfWork(uow, counts)
+
+    service = TelemetryIngestionService(unit_of_work_factory=factory)
+
+    with pytest.raises(RuntimeError, match="second upsert boom"):
+        service.ingest(
+            _command(
+                sample=_sample(
+                    sampled_at=T0 + timedelta(seconds=50),
+                    cpu=95.0,
+                    interface_states=(InterfaceState(name=interface, oper_state=LinkState.UP),),
+                    bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.IDLE),),
+                )
+            )
+        )
+
+    assert counts.commit == 0
+    assert counts.rollback == 1
+    assert len(spy.calls) == 2  # third (BGP-down) never attempted
+    assert _incidents(store) == ()
+
+
+def test_rule_engine_exception__no_incident_upsert_occurs() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    engine = _RuleEngineSpy(fail=RuntimeError("rule engine boom"))
+    spy = _IncidentsSpy(_wrapped=None)
+
+    def factory() -> InMemoryUnitOfWork:
+        uow = InMemoryUnitOfWork(store)
+        spy._wrapped = uow.incidents
+        uow.incidents = spy  # type: ignore[assignment]
+        return uow
+
+    service = TelemetryIngestionService(unit_of_work_factory=factory, rule_engine=engine)
+
+    with pytest.raises(RuntimeError, match="rule engine boom"):
+        service.ingest(_command())
+
+    assert spy.calls == []
+    assert _incidents(store) == ()
