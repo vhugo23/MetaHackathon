@@ -60,6 +60,8 @@ def test_openapi_contract__paths__are_exactly_the_approved_set() -> None:
         "/health",
         "/devices/{device_id}/config",
         "/devices/{device_id}/drift",
+        "/devices/{device_id}/telemetry",
+        "/devices/{device_id}/telemetry/recent",
         "/incidents",
         "/incidents/{incident_id}/resolve",
     }

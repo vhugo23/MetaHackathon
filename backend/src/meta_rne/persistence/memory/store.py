@@ -24,6 +24,17 @@ all-four-collections publish into a store used as a UnitOfWork's *committed*
 store — a separate lock from ``incidents_lock`` since it protects a
 different critical section (publishing four collection references at once,
 not one repository's check-then-act sequence).
+
+``telemetry_samples``/``telemetry_sequence`` (Gate E1) back
+``InMemoryTelemetryRepository`` — standalone, not yet wired into
+``InMemoryUnitOfWork`` (architecture.md Section 11: telemetry ingestion is
+its own operation). Each per-device value is a ``tuple``, never a ``list``:
+the existing ``dict(store.X)`` shallow-copy idiom used elsewhere in this
+package is only safe when values are immutable objects replaced whole, never
+mutated in place — a ``list`` value would let two shallow-copied dicts share
+(and corrupt) the same underlying mutable object. ``_StoredTelemetrySample``
+is repository-internal metadata (an ``insertion_sequence`` tie-breaker) and
+is never merged into the domain ``TelemetrySample`` dataclass itself.
 """
 
 import threading
@@ -33,6 +44,13 @@ from meta_rne.domain.device import Device
 from meta_rne.domain.incident import Incident
 from meta_rne.domain.policy import ConfigurationPolicy
 from meta_rne.domain.snapshot import ConfigurationSnapshot
+from meta_rne.domain.telemetry import TelemetrySample
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredTelemetrySample:
+    sample: TelemetrySample
+    insertion_sequence: int
 
 
 @dataclass
@@ -43,3 +61,5 @@ class InMemoryStore:
     incidents: dict[str, Incident] = field(default_factory=dict)
     incidents_lock: threading.Lock = field(default_factory=threading.Lock)
     publish_lock: threading.Lock = field(default_factory=threading.Lock)
+    telemetry_samples: dict[str, tuple[_StoredTelemetrySample, ...]] = field(default_factory=dict)
+    telemetry_sequence: int = 0

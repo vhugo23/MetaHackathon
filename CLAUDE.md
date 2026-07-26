@@ -108,13 +108,65 @@ was not touched.
 `GetDeviceDriftService` never calls `uow.commit()`,
 `uow.devices.save()`, or `uow.configuration_snapshots.add()`. Deciding
 which diff entries are incident-worthy remains explicitly deferred to a
-later day, same as telemetry/anomaly detection (FR-05/FR-06). No frontend
-consumes this endpoint yet.
+later day, same as anomaly-to-incident mapping (see Day 9b below). No
+frontend consumes this endpoint yet.
 
 Verified automated-test inventory as of Day 9: backend `pytest`,
 frontend Vitest, Python orchestration-helper, and Playwright browser
 counts are recorded in docs/test-strategy.md Section 23 (Day 9) after
 independent re-verification of the full matrix.
+
+---
+
+**Day 9b — Deterministic telemetry monitoring (FR-05, FR-06), implemented
+across a series of reviewable gates (domain/detection, persistence,
+application, and the two HTTP endpoints), all approved, built on top of
+the Day 9 configuration-drift checkpoint; passes the full backend
+verification matrix (912 non-PostgreSQL + 241 PostgreSQL tests) but has
+not yet been committed.**
+
+`TelemetrySample`/`InterfaceState`/`BgpSession` (`meta_rne.domain.telemetry`)
+and `Anomaly`/its evidence value objects (`meta_rne.domain.anomaly`) are new,
+framework-independent domain types. `RuleEngine.evaluate`
+(`meta_rne.detection.rule_engine`) is a pure, deterministic function
+implementing three rules — `RULE-CPU-HIGH` (the latest two same-device
+samples both `> 90.0%` CPU), `RULE-LINK-FLAP` (`>= 4` interface-state
+transitions within an inclusive 60-second window, isolated per
+`(device_id, interface_name)`), and `RULE-BGP-DOWN` (a BGP neighbor
+transitioning from a non-down state into `Idle`/`Active`, isolated per
+`(device_id, neighbor_ip)`) — evaluated in that fixed order, with no
+severity/recommendation/incident invented anywhere.
+
+`TelemetryRepository` (`domain/ports.py`, plus `UnitOfWork.
+telemetry_samples`) and its SQLAlchemy/PostgreSQL and in-memory
+implementations persist `TelemetrySample` rows; the in-memory
+implementation bounds retention (5 minutes / 100 entries, whichever is
+more restrictive), while PostgreSQL may retain longer — a documented
+permission, never a required cross-backend divergence. Alembic revision
+`0003_telemetry_samples.py` adds the one new table.
+
+`TelemetryIngestionService` (`meta_rne.application.telemetry_ingestion`)
+saves an incoming sample and calls `RuleEngine.evaluate` exactly once
+inside one `UnitOfWork` transaction, using a provenance-tagged evaluation
+window (the current sample always participates exactly once, historical
+exact duplicates remain independent). `GetRecentTelemetryService`
+(`meta_rne.application.telemetry_query`) is a read-only service validating
+`since` (timezone-aware UTC) before any `UnitOfWork` is created.
+
+**`POST /devices/{device_id}/telemetry`** (`operation_id =
+"submit_device_telemetry"`) ingests one telemetry sample: `201` with
+`{sample, anomalies}`; `device_id` is path-only; `observed_at` is
+server-generated. **`GET /devices/{device_id}/telemetry/recent`**
+(`operation_id = "get_recent_telemetry"`) requires a `since` query
+parameter and returns a bare `list[TelemetrySampleResponse]`, `200`; the
+API clock is never called. Both endpoints reuse the existing
+`device_not_found`/`invalid_request` error mapping — no new error class or
+API code was introduced.
+
+**No incident is created from a telemetry anomaly.** Anomaly-to-incident
+mapping, anomaly severity/recommendation decisions, a deterministic
+telemetry simulator, structured logging, and frontend telemetry
+consumption all remain explicitly deferred — see "Still prohibited" below.
 
 ---
 
@@ -1078,7 +1130,8 @@ below):
 enum member/DB constraint has no public transition), reopening, assignment,
 comments/notes, audit history, user identity, bulk resolution, status
 filtering, authentication/authorization, filtering/pagination/sorting query
-parameters, anomaly/telemetry ingestion, and structured
+parameters, anomaly-to-incident mapping, anomaly severity/recommendation
+decisions, a deterministic telemetry simulator, and structured
 logging beyond FastAPI's own request logging. Explicit, single-purpose
 incident resolution (`POST /incidents/{incident_id}/resolve`, `OPEN ->
 RESOLVED` only) is no longer prohibited as of Day 7A — see the "Current
@@ -1100,8 +1153,12 @@ Day 7B: incident resolution) — see "Current Phase" above. **A browser
 Phase" above for the full detail; it is no longer deferred. **Read-only
 configuration drift detection now exists as of Day 9** — `GET
 /devices/{device_id}/drift`, see "Current Phase" above for the full
-detail; drift-triggered incident creation, telemetry ingestion, and
-anomaly detection remain prohibited/deferred.
+detail; drift-triggered incident creation remains prohibited/deferred.
+**Telemetry ingestion, persistence, and deterministic anomaly detection
+(FR-05/FR-06) now exist as of Day 9b** — `POST
+/devices/{device_id}/telemetry` and `GET
+/devices/{device_id}/telemetry/recent`, see "Current Phase" above for the
+full detail; anomaly-to-incident mapping remains prohibited/deferred.
 All remaining items are later days, against the domain model, architecture,
 and ports already documented, with tests written first per the Development
 Rules above.

@@ -19,6 +19,7 @@ from meta_rne.domain.errors import ParseError
 from meta_rne.domain.incident import Incident, IncidentCandidate, IncidentUpsertResult
 from meta_rne.domain.policy import ConfigurationPolicy
 from meta_rne.domain.snapshot import ConfigurationSnapshot
+from meta_rne.domain.telemetry import TelemetrySample
 
 
 @runtime_checkable
@@ -83,6 +84,28 @@ class IncidentRepository(Protocol):
         ...
 
 
+class TelemetryRepository(Protocol):
+    """Standalone port (Gate E1) — deliberately **not** part of `UnitOfWork`
+    yet (architecture.md Section 11: "telemetry ingestion is its own
+    operation with its own transaction once built"). `save` requires
+    `device_id == sample.device_id`, raising `ValueError` on mismatch with
+    no coercion of either value; it performs no `Device`-existence lookup.
+    Duplicate samples and duplicate `sampled_at` values are both permitted —
+    there is no identity/deduplication concept for `TelemetrySample`.
+    `get_latest` returns `None`, and `get_recent` returns `[]`, for a device
+    with no retained sample."""
+
+    def save(self, device_id: str, sample: TelemetrySample) -> None: ...
+
+    def get_latest(self, device_id: str) -> TelemetrySample | None: ...
+
+    def get_recent(
+        self,
+        device_id: str,
+        since: datetime,
+    ) -> list[TelemetrySample]: ...
+
+
 class UnitOfWork(Protocol):
     """One session/transaction per instance (Day 4B3's concrete
     ``SqlAlchemyUnitOfWork``); every repository below shares it."""
@@ -91,6 +114,7 @@ class UnitOfWork(Protocol):
     configuration_snapshots: ConfigurationSnapshotRepository
     configuration_policies: ConfigurationPolicyRepository
     incidents: IncidentRepository
+    telemetry_samples: TelemetryRepository
 
     def commit(self) -> None: ...
     def rollback(self) -> None: ...

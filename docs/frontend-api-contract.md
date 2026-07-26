@@ -15,7 +15,10 @@ describe how the *current* frontend uses this contract, including Day 7B's
 resolution flow. **Day 9 added a new endpoint, `GET
 /devices/{device_id}/drift` (Section 8), as a backend-only addition with
 no frontend consumer yet** — same pattern as Day 7A's backend-only
-addition of the resolve endpoint.
+addition of the resolve endpoint. **Day 9b added two more endpoints,
+`POST /devices/{device_id}/telemetry` and `GET
+/devices/{device_id}/telemetry/recent` (Section 9), also backend-only with
+no frontend consumer yet.**
 **Derived from:** `backend/src/meta_rne/api/schemas.py`, `api/routes.py`,
 `api/errors.py`, `api/cors.py` (current source, not a planning aspiration)
 
@@ -393,7 +396,89 @@ Comparison scope: interfaces (by name; scalar fields `description`,
 `static_routes` are not compared. No severity, recommendation, or incident
 is ever produced by this endpoint.
 
-## 9. Errors
+## 9. `POST /devices/{device_id}/telemetry` and `GET /devices/{device_id}/telemetry/recent` (Day 9b, backend-only)
+
+Ingests telemetry samples and runs three deterministic anomaly rules
+against them. **No frontend consumer exists yet** — the current React
+dashboard does not call either endpoint, and neither response contains any
+incident field (no `incident_id`, `severity`, `recommendation`, or
+`fingerprint`) — a telemetry anomaly does not create an incident.
+
+**`POST /devices/{device_id}/telemetry`** — `device_id` (path) is
+authoritative; `observed_at` is always server-generated, never accepted in
+the request body.
+
+```json
+// Request
+{
+  "sampled_at": "2026-07-18T10:00:00Z",
+  "cpu_utilization_pct": 95.0,
+  "memory_utilization_pct": 60.0,
+  "interface_error_rate": 0.0,
+  "interface_states": [
+    {"name": "GigabitEthernet0/1", "oper_state": "up"}
+  ],
+  "bgp_sessions": [
+    {"neighbor_ip": "10.0.0.1", "state": "Established"}
+  ]
+}
+```
+
+**Success response** — `201 Created`, the resource itself, no envelope:
+
+```json
+{
+  "sample": { "...": "the persisted TelemetrySample, same shape as the GET response item below" },
+  "anomalies": [
+    {
+      "rule_id": "RULE-CPU-HIGH",
+      "device_id": "spine-01",
+      "detected_at": "2026-07-18T10:00:00Z",
+      "evidence": { "samples": ["...", "..."] }
+    }
+  ]
+}
+```
+
+`anomalies` reflects exactly the three deterministic rules evaluated in a
+fixed order (`RULE-CPU-HIGH`, `RULE-LINK-FLAP`, `RULE-BGP-DOWN`) — it may
+be empty. No severity or recommendation is present on an anomaly.
+
+**`GET /devices/{device_id}/telemetry/recent`** — requires a `since` query
+parameter (timezone-aware UTC `datetime`; naive or non-UTC-offset values
+are rejected with `invalid_request`, Section 10). No `limit`/`minutes`/
+`page`/`cursor` parameter exists — every matching sample is returned, in
+persisted order, with no API-clock-based filtering.
+
+```
+GET /devices/{device_id}/telemetry/recent?since=2026-07-18T09:55:00Z
+```
+
+**Success response** — `200 OK`, a bare JSON array (no envelope):
+
+```json
+[
+  {
+    "device_id": "spine-01",
+    "sampled_at": "2026-07-18T10:00:00Z",
+    "cpu_utilization_pct": 95.0,
+    "memory_utilization_pct": 60.0,
+    "interface_error_rate": 0.0,
+    "interface_states": [
+      {"name": "GigabitEthernet0/1", "oper_state": "up"}
+    ],
+    "bgp_sessions": [
+      {"neighbor_ip": "10.0.0.1", "state": "Established"}
+    ]
+  }
+]
+```
+
+Both endpoints share the existing `device_not_found`/404 and
+`invalid_request`/422 error mapping (Section 10) — no new error class or
+API code was introduced for telemetry.
+
+## 10. Errors
 
 Every failure response is a bare object, no envelope:
 
@@ -455,7 +540,7 @@ trace, SQL detail, or other internal value this document's error table
 already says the backend keeps generic is ever exposed further by the
 frontend.
 
-## 10. Example: missing-ACL submission
+## 11. Example: missing-ACL submission
 
 ```bash
 curl -X POST http://localhost:8080/devices/spine-01/config \
@@ -468,7 +553,7 @@ Produces the `201` response shown in Section 5 with
 ACL is assigned inbound on `GigabitEthernet0/1`, and a
 `policy-acl-external-in` policy applies to `spine-01`.
 
-## 11. Not implemented yet
+## 12. Not implemented yet
 
 Do not build frontend features assuming any of the following exist:
 
@@ -480,9 +565,13 @@ Do not build frontend features assuming any of the following exist:
   explicit, single-incident `OPEN -> RESOLVED` resolution, now called by the
   dashboard's "Resolve incident" control for exact `OPEN` incidents only
 - `GET /devices`, `GET /devices/{id}`, `GET /incidents/{id}`
-- Telemetry ingestion or anomaly rules — configuration drift detection
-  (`GET /devices/{device_id}/drift`, Section 8) is implemented as of Day 9,
-  but has no frontend consumer
+- A frontend consumer of configuration drift detection
+  (`GET /devices/{device_id}/drift`, Section 8, implemented as of Day 9) or
+  of telemetry ingestion/anomaly detection (`POST
+  /devices/{device_id}/telemetry` and `GET
+  /devices/{device_id}/telemetry/recent`, Section 9, implemented as of Day
+  9b) — both are backend-only; no anomaly-to-incident mapping exists, so no
+  telemetry anomaly ever appears through `GET /incidents`
 - Any vendor besides `cisco-ios-xe`/`arista-eos` (both now supported as of
   Day 8A — see Section 5's `vendor` row and CLAUDE.md's "Current Phase")
 - Wildcard or shared policy applicability, and policy authoring/CRUD

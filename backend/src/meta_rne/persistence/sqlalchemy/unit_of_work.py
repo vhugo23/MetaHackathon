@@ -22,6 +22,7 @@ from meta_rne.persistence.sqlalchemy.policy_repository import (
 from meta_rne.persistence.sqlalchemy.snapshot_repository import (
     SqlAlchemyConfigurationSnapshotRepository,
 )
+from meta_rne.persistence.sqlalchemy.telemetry_repository import SqlAlchemyTelemetryRepository
 
 
 class SqlAlchemyUnitOfWork:
@@ -31,6 +32,7 @@ class SqlAlchemyUnitOfWork:
         self.configuration_snapshots = SqlAlchemyConfigurationSnapshotRepository(self._session)
         self.configuration_policies = SqlAlchemyConfigurationPolicyRepository(self._session)
         self.incidents = SqlAlchemyIncidentRepository(self._session)
+        self.telemetry_samples = SqlAlchemyTelemetryRepository(self._session)
 
     def commit(self) -> None:
         try:

@@ -1862,6 +1862,30 @@ tests (3 files, unchanged — they prove no regression to the existing
 operator workflows, not drift behavior) — **1,010 automated tests
 combined**. Also independently re-verified this gate: a real
 `docker build` + `docker compose up` stack (health check, OpenAPI drift
-path, and the exact 404 body), and `scripts/compose_smoke.py`. Telemetry
-ingestion, anomaly detection, and drift-triggered incidents remain
-later-day scope.
+path, and the exact 404 body), and `scripts/compose_smoke.py`.
+Drift-triggered incidents remain later-day scope. **Telemetry ingestion
+and deterministic anomaly detection are no longer later-day scope — see
+Day 9b below.**
+
+**Day 9b — Deterministic Telemetry Monitoring (FR-05, FR-06).** Built on
+top of the Day 9 configuration-drift checkpoint: `TelemetrySample`
+persistence (SQLAlchemy/PostgreSQL and in-memory, Alembic revision
+`0003_telemetry_samples`), three deterministic anomaly rules evaluated in
+a fixed order (`RULE-CPU-HIGH`: the latest two same-device samples both
+`> 90.0%` CPU; `RULE-LINK-FLAP`: `>= 4` interface-state transitions within
+an inclusive 60-second window, isolated per interface; `RULE-BGP-DOWN`: a
+BGP neighbor transitioning from a non-down state into `Idle`/`Active`,
+isolated per neighbor), `POST /devices/{device_id}/telemetry` (ingests one
+sample, returns `{sample, anomalies}`, `201`), and `GET
+/devices/{device_id}/telemetry/recent?since=<UTC timestamp>` (returns a
+bare array of samples, `200`, no pagination or API-clock filtering).
+Verified against both the in-memory and real-PostgreSQL backends: **912**
+non-PostgreSQL and **241** PostgreSQL backend `pytest` tests pass, Ruff/
+mypy are clean. **No incident is created from a telemetry anomaly** —
+anomaly-to-incident mapping, severity/recommendation decisions, a
+deterministic telemetry simulator, structured logging, and frontend
+telemetry consumption all remain later-day scope (AC-07/AC-08/AC-09 are
+not claimed complete). No frontend, Playwright, or CI change; frontend/
+browser totals are unchanged from Day 9 above. Implemented across a series
+of reviewable gates, all approved, but not yet committed — see CLAUDE.md's
+"Current Phase".

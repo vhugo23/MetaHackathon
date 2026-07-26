@@ -27,6 +27,7 @@ from meta_rne.domain.config import (
 )
 from meta_rne.domain.incident import PolicyViolationIncidentEvidence
 from meta_rne.domain.policy import RequiredAclRule, Severity, ViolationType
+from meta_rne.domain.telemetry import BgpSession, BgpState, InterfaceState, LinkState
 
 
 class SerializationError(Exception):
@@ -215,6 +216,50 @@ def policy_violation_evidence_to_json(evidence: PolicyViolationIncidentEvidence)
         "interface_name": evidence.interface_name,
         "direction": evidence.direction.value,
     }
+
+
+def interface_states_to_json(states: tuple[InterfaceState, ...]) -> list[dict[str, Any]]:
+    return [{"name": state.name, "oper_state": state.oper_state.value} for state in states]
+
+
+def interface_states_from_json(data: Any) -> tuple[InterfaceState, ...]:
+    items = _require_list(data, "InterfaceState list")
+    try:
+        return tuple(
+            InterfaceState(
+                name=_get(item, "name", "InterfaceState"),
+                oper_state=_enum(
+                    LinkState, _get(item, "oper_state", "InterfaceState"), "oper_state"
+                ),
+            )
+            for item in (_require_dict(item, "InterfaceState") for item in items)
+        )
+    except SerializationError:
+        raise
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise SerializationError(f"malformed InterfaceState: {exc}") from exc
+
+
+def bgp_sessions_to_json(sessions: tuple[BgpSession, ...]) -> list[dict[str, Any]]:
+    return [
+        {"neighbor_ip": session.neighbor_ip, "state": session.state.value} for session in sessions
+    ]
+
+
+def bgp_sessions_from_json(data: Any) -> tuple[BgpSession, ...]:
+    items = _require_list(data, "BgpSession list")
+    try:
+        return tuple(
+            BgpSession(
+                neighbor_ip=_get(item, "neighbor_ip", "BgpSession"),
+                state=_enum(BgpState, _get(item, "state", "BgpSession"), "state"),
+            )
+            for item in (_require_dict(item, "BgpSession") for item in items)
+        )
+    except SerializationError:
+        raise
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise SerializationError(f"malformed BgpSession: {exc}") from exc
 
 
 def policy_violation_evidence_from_json(data: Any) -> PolicyViolationIncidentEvidence:

@@ -44,11 +44,14 @@ def repositories(request: pytest.FixtureRequest) -> SimpleNamespace:
         def make_incidents(id_factory: Callable[[], str]) -> InMemoryIncidentRepository:
             return InMemoryIncidentRepository(store, incident_id_factory=id_factory)
 
+        from meta_rne.persistence.memory.telemetry_repository import InMemoryTelemetryRepository
+
         return SimpleNamespace(
             devices=InMemoryDeviceRepository(store),
             snapshots=InMemoryConfigurationSnapshotRepository(store),
             policies=InMemoryConfigurationPolicyRepository(store),
             incidents=InMemoryIncidentRepository(store),
+            telemetry_samples=InMemoryTelemetryRepository(store),
             make_incidents=make_incidents,
         )
 
@@ -59,6 +62,9 @@ def repositories(request: pytest.FixtureRequest) -> SimpleNamespace:
     )
     from meta_rne.persistence.sqlalchemy.snapshot_repository import (
         SqlAlchemyConfigurationSnapshotRepository,
+    )
+    from meta_rne.persistence.sqlalchemy.telemetry_repository import (
+        SqlAlchemyTelemetryRepository,
     )
 
     session = request.getfixturevalue("sqlalchemy_session")
@@ -71,6 +77,7 @@ def repositories(request: pytest.FixtureRequest) -> SimpleNamespace:
         snapshots=SqlAlchemyConfigurationSnapshotRepository(session),
         policies=SqlAlchemyConfigurationPolicyRepository(session),
         incidents=SqlAlchemyIncidentRepository(session),
+        telemetry_samples=SqlAlchemyTelemetryRepository(session),
         make_incidents=make_incidents_sqlalchemy,
     )
 

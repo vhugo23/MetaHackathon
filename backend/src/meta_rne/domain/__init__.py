@@ -6,6 +6,16 @@ ConfigurationSnapshot, ...) are not implemented yet — prohibited until a
 later day (see CLAUDE.md "Current Phase").
 """
 
+from meta_rne.domain.anomaly import (
+    Anomaly,
+    BgpDownEvidence,
+    CpuHighEvidence,
+    CpuSampleEvidence,
+    InterfaceTransitionEvidence,
+    LinkFlapEvidence,
+    RuleEvidence,
+    RuleId,
+)
 from meta_rne.domain.config import (
     AclAction,
     AclDirection,
@@ -41,15 +51,28 @@ from meta_rne.domain.policy import (
 )
 from meta_rne.domain.ports import VendorConfigAdapter
 from meta_rne.domain.snapshot import ConfigurationSnapshot, compute_raw_text_hash
+from meta_rne.domain.telemetry import (
+    BgpSession,
+    BgpState,
+    InterfaceState,
+    LinkState,
+    TelemetrySample,
+)
 
 __all__ = [
     "AclAction",
     "AclAssignmentEvidence",
     "AclDirection",
     "AdminState",
+    "Anomaly",
+    "BgpDownEvidence",
+    "BgpSession",
+    "BgpState",
     "ConfigurationPolicy",
     "ConfigurationSnapshot",
     "ConfigurationViolation",
+    "CpuHighEvidence",
+    "CpuSampleEvidence",
     "Device",
     "DriftEntry",
     "DriftReport",
@@ -59,6 +82,10 @@ __all__ = [
     "IncidentStatus",
     "IncidentUpsertOutcome",
     "IncidentUpsertResult",
+    "InterfaceState",
+    "InterfaceTransitionEvidence",
+    "LinkFlapEvidence",
+    "LinkState",
     "NormalizedAcl",
     "NormalizedAclEntry",
     "NormalizedBgpNeighbor",
@@ -69,7 +96,10 @@ __all__ = [
     "ParseErrorCode",
     "PolicyViolationIncidentEvidence",
     "RequiredAclRule",
+    "RuleEvidence",
+    "RuleId",
     "Severity",
+    "TelemetrySample",
     "UnsupportedVendorError",
     "VendorConfigAdapter",
     "VendorType",

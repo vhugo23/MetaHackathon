@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 
 from meta_rne.domain.config import VendorType
 from meta_rne.domain.device import Device
+from meta_rne.domain.telemetry import TelemetrySample
 from meta_rne.persistence.memory.store import InMemoryStore
 from meta_rne.persistence.memory.unit_of_work import InMemoryUnitOfWork
 
@@ -40,6 +41,18 @@ def _device(device_id: str = "spine-01") -> Device:
         baseline_snapshot_id=None,
         created_at=T0,
         updated_at=T0,
+    )
+
+
+def _sample(device_id: str = "spine-01") -> TelemetrySample:
+    return TelemetrySample(
+        device_id=device_id,
+        sampled_at=T0,
+        cpu_utilization_pct=50.0,
+        memory_utilization_pct=50.0,
+        interface_error_rate=0.0,
+        interface_states=(),
+        bgp_sessions=(),
     )
 
 
@@ -225,3 +238,123 @@ def test_in_memory_unit_of_work__commit__waits_for_committed_publish_lock() -> N
     assert not thread.is_alive()
 
     assert committed.devices["spine-01"] == _device()
+
+
+# --- telemetry_samples (Gate E2C) ---------------------------------------
+
+
+def test_in_memory_unit_of_work__commit__publishes_telemetry_samples_and_sequence() -> None:
+    committed = InMemoryStore()
+    uow = InMemoryUnitOfWork(committed)
+    uow.devices.save(_device())
+    uow.telemetry_samples.save("spine-01", _sample())
+
+    uow.commit()
+
+    assert committed.telemetry_samples["spine-01"][0].sample == _sample()
+    assert committed.telemetry_sequence == 1
+
+
+def test_in_memory_unit_of_work__rollback__restores_telemetry_samples_and_sequence() -> None:
+    committed = InMemoryStore()
+    committed.telemetry_samples["spine-02"] = ()
+    committed.telemetry_sequence = 3
+    uow = InMemoryUnitOfWork(committed)
+    uow.devices.save(_device())
+    uow.telemetry_samples.save("spine-01", _sample())
+
+    uow.rollback()
+
+    assert uow.telemetry_samples.get_latest("spine-01") is None
+    assert uow._working_store.telemetry_sequence == 3
+
+
+def test_in_memory_unit_of_work__rollback_after_telemetry_save__committed_store_unchanged() -> None:
+    committed = InMemoryStore()
+    uow = InMemoryUnitOfWork(committed)
+    uow.devices.save(_device())
+    uow.telemetry_samples.save("spine-01", _sample())
+
+    uow.rollback()
+
+    assert committed.telemetry_samples == {}
+    assert committed.telemetry_sequence == 0
+
+
+def test_in_memory_unit_of_work__new_unit_of_work__sees_committed_telemetry() -> None:
+    committed = InMemoryStore()
+    first = InMemoryUnitOfWork(committed)
+    first.devices.save(_device())
+    first.telemetry_samples.save("spine-01", _sample())
+    first.commit()
+
+    second = InMemoryUnitOfWork(committed)
+
+    assert second.telemetry_samples.get_latest("spine-01") == _sample()
+
+
+def test_in_memory_unit_of_work__new_unit_of_work__does_not_see_rolled_back_telemetry() -> None:
+    committed = InMemoryStore()
+    first = InMemoryUnitOfWork(committed)
+    first.devices.save(_device())
+    first.telemetry_samples.save("spine-01", _sample())
+    first.rollback()
+
+    second = InMemoryUnitOfWork(committed)
+
+    assert second.telemetry_samples.get_latest("spine-01") is None
+
+
+def test_in_memory_unit_of_work__rolled_back_sequence_value__may_be_reused() -> None:
+    committed = InMemoryStore()
+    first = InMemoryUnitOfWork(committed)
+    first.devices.save(_device())
+    first.telemetry_samples.save("spine-01", _sample())  # consumes sequence 0 in the working store
+    first.rollback()  # discarded — never committed
+
+    second = InMemoryUnitOfWork(committed)
+    second.devices.save(_device())
+    second.telemetry_samples.save("spine-01", _sample())
+    second.commit()
+
+    # The committed store's sequence starts fresh at 0 again — the
+    # rolled-back attempt's consumed value (0) is legitimately reused,
+    # since it was never observed by any committed state.
+    assert committed.telemetry_sequence == 1
+
+
+def test_in_memory_unit_of_work__committed_and_working_telemetry_dicts_are_separate_objects() -> (
+    None
+):
+    committed = InMemoryStore()
+    uow = InMemoryUnitOfWork(committed)
+
+    assert uow._working_store.telemetry_samples is not committed.telemetry_samples
+
+
+def test_in_memory_unit_of_work__per_device_stored_tuples_are_replaced_not_mutated() -> None:
+    committed = InMemoryStore()
+    uow = InMemoryUnitOfWork(committed)
+    uow.devices.save(_device())
+    uow.telemetry_samples.save("spine-01", _sample())
+    first_tuple = uow._working_store.telemetry_samples["spine-01"]
+
+    uow.telemetry_samples.save("spine-01", _sample())
+    second_tuple = uow._working_store.telemetry_samples["spine-01"]
+
+    assert first_tuple is not second_tuple
+    assert len(first_tuple) == 1
+    assert len(second_tuple) == 2
+
+
+def test_in_memory_unit_of_work__existing_device_commit_rollback_behavior_is_unchanged() -> None:
+    committed = InMemoryStore()
+    uow = InMemoryUnitOfWork(committed)
+    uow.devices.save(_device())
+
+    uow.commit()
+
+    assert committed.devices["spine-01"] == _device()
+    assert committed.snapshots == {}
+    assert committed.policies == {}
+    assert committed.incidents == {}

@@ -18,8 +18,11 @@ from typing import Any
 
 from sqlalchemy import (
     TIMESTAMP,
+    BigInteger,
     CheckConstraint,
+    Double,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     Text,
@@ -149,6 +152,30 @@ class _IncidentModel(_Base):
             unique=True,
             postgresql_where=text("status = 'OPEN'"),
         ),
+    )
+
+
+class _TelemetrySampleModel(_Base):
+    __tablename__ = "telemetry_samples"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    device_id: Mapped[str] = mapped_column(Text, ForeignKey("devices.device_id"), nullable=False)
+    sampled_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    cpu_utilization_pct: Mapped[float] = mapped_column(Double, nullable=False)
+    memory_utilization_pct: Mapped[float] = mapped_column(Double, nullable=False)
+    interface_error_rate: Mapped[float] = mapped_column(Double, nullable=False)
+    interface_states: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    bgp_sessions: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "cpu_utilization_pct BETWEEN 0 AND 100", name="ck_telemetry_samples_cpu_range"
+        ),
+        CheckConstraint(
+            "memory_utilization_pct BETWEEN 0 AND 100", name="ck_telemetry_samples_memory_range"
+        ),
+        CheckConstraint("btrim(device_id) <> ''", name="ck_telemetry_samples_device_id_not_blank"),
+        Index("ix_telemetry_samples_device_sampled_at", "device_id", "sampled_at", "id"),
     )
 
 

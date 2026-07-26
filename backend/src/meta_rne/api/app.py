@@ -39,6 +39,8 @@ from meta_rne.application.device_drift import GetDeviceDriftService
 from meta_rne.application.incident_queries import ListIncidentsService
 from meta_rne.application.incident_resolution import ResolveIncidentService
 from meta_rne.application.snapshot_id import default_snapshot_id_factory
+from meta_rne.application.telemetry_ingestion import TelemetryIngestionService
+from meta_rne.application.telemetry_query import GetRecentTelemetryService
 from meta_rne.domain.ports import UnitOfWork
 
 
@@ -71,6 +73,8 @@ def create_app(
         unit_of_work_factory=uow_factory, clock=CallableClock(clock)
     )
     get_device_drift_service = GetDeviceDriftService(unit_of_work_factory=uow_factory)
+    telemetry_ingestion_service = TelemetryIngestionService(unit_of_work_factory=uow_factory)
+    telemetry_query_service = GetRecentTelemetryService(unit_of_work_factory=uow_factory)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -101,6 +105,8 @@ def create_app(
             list_incidents_service=list_incidents_service,
             resolve_incident_service=resolve_incident_service,
             get_device_drift_service=get_device_drift_service,
+            telemetry_ingestion_service=telemetry_ingestion_service,
+            telemetry_query_service=telemetry_query_service,
             clock=clock,
         )
     )

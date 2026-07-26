@@ -1607,7 +1607,16 @@ this gate.
 | **Combined** | **1,010** |
 
 **Explicitly not proven by this gate:** drift-triggered incident creation
-(`IncidentSource.DRIFT` does not exist), telemetry ingestion, anomaly
-detection (FR-05/FR-06, AC-07–AC-09), ACL-entry-level diffing, frontend
+(`IncidentSource.DRIFT` does not exist), ACL-entry-level diffing, frontend
 rendering of drift data (no consumer exists), and drift acknowledgment or
 remediation.
+
+**Implemented and proven as of the subsequent Day 9b gate** (built on top
+of this Day 9 checkpoint, verified separately — see below): FR-05
+telemetry ingestion/persistence, FR-06 deterministic CPU-high/link-flap/
+BGP-down anomaly detection, `POST /devices/{device_id}/telemetry`, and
+`GET /devices/{device_id}/telemetry/recent`. **Still not proven:** AC-07,
+AC-08, and AC-09 — these three remain incomplete specifically because they
+require an anomaly-sourced *incident* to appear through `GET /incidents`,
+not merely the detection of an `Anomaly` value; anomaly-to-incident mapping
+does not exist yet.

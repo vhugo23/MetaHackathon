@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from meta_rne.domain.config import VendorType
 from meta_rne.domain.device import Device
+from meta_rne.domain.telemetry import TelemetrySample
 from meta_rne.persistence.sqlalchemy.unit_of_work import SqlAlchemyUnitOfWork
 
 pytestmark = pytest.mark.postgres
@@ -33,6 +34,18 @@ def _device(device_id: str = "spine-01") -> Device:
         baseline_snapshot_id=None,
         created_at=T0,
         updated_at=T0,
+    )
+
+
+def _sample(device_id: str = "spine-01") -> TelemetrySample:
+    return TelemetrySample(
+        device_id=device_id,
+        sampled_at=T0,
+        cpu_utilization_pct=50.0,
+        memory_utilization_pct=50.0,
+        interface_error_rate=0.0,
+        interface_states=(),
+        bgp_sessions=(),
     )
 
 
@@ -170,3 +183,116 @@ def test_sqlalchemy_unit_of_work__close__delegates_to_session_close(
     uow.close()
 
     assert close_calls == [True]
+
+
+# --- telemetry_samples (Gate E2C) ---------------------------------------
+
+
+def test_sqlalchemy_unit_of_work__exposes_sqlalchemy_telemetry_repository(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    from meta_rne.persistence.sqlalchemy.telemetry_repository import SqlAlchemyTelemetryRepository
+
+    uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+
+    assert isinstance(uow.telemetry_samples, SqlAlchemyTelemetryRepository)
+
+
+def test_sqlalchemy_unit_of_work__device_and_telemetry__commit_atomically(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    uow.devices.save(_device())
+    sample = _sample()
+    uow.telemetry_samples.save("spine-01", sample)
+
+    uow.commit()
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    assert verify_uow.devices.get_by_id("spine-01") == _device()
+    assert verify_uow.telemetry_samples.get_latest("spine-01") == sample
+
+
+def test_sqlalchemy_unit_of_work__device_and_telemetry__rollback_atomically(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    uow.devices.save(_device())
+    uow.telemetry_samples.save("spine-01", _sample())
+
+    uow.rollback()
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    assert verify_uow.devices.get_by_id("spine-01") is None
+    assert verify_uow.telemetry_samples.get_latest("spine-01") is None
+
+
+def test_sqlalchemy_unit_of_work__later_unit_of_work__sees_committed_telemetry(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    first = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    first.devices.save(_device())
+    sample = _sample()
+    first.telemetry_samples.save("spine-01", sample)
+    first.commit()
+
+    second = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+
+    assert second.telemetry_samples.get_latest("spine-01") == sample
+
+
+def test_sqlalchemy_unit_of_work__later_unit_of_work__does_not_see_rolled_back_telemetry(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    first = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    first.devices.save(_device())
+    first.telemetry_samples.save("spine-01", _sample())
+    first.rollback()
+
+    second = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+
+    assert second.telemetry_samples.get_latest("spine-01") is None
+
+
+def test_sqlalchemy_unit_of_work__same_unit_of_work__telemetry_read_your_writes(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    uow.devices.save(_device())
+    sample = _sample()
+
+    uow.telemetry_samples.save("spine-01", sample)
+
+    assert uow.telemetry_samples.get_latest("spine-01") == sample
+    assert uow.telemetry_samples.get_recent("spine-01", since=T0) == [sample]
+
+
+def test_sqlalchemy_unit_of_work__telemetry_save_failure__does_not_commit_partial_state(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    from meta_rne.persistence.errors import ReferencedDeviceNotFoundError
+
+    uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    uow.devices.save(_device())
+
+    with pytest.raises(ReferencedDeviceNotFoundError):
+        uow.telemetry_samples.save("leaf-01", _sample(device_id="leaf-01"))
+
+    uow.commit()
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    assert verify_uow.devices.get_by_id("spine-01") == _device()
+    assert verify_uow.telemetry_samples.get_latest("leaf-01") is None
+
+
+def test_sqlalchemy_unit_of_work__telemetry_repository_shares_session_with_devices(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+
+    sessions = {
+        uow.devices._session,  # type: ignore[attr-defined]
+        uow.telemetry_samples._session,  # type: ignore[attr-defined]
+    }
+
+    assert len(sessions) == 1

@@ -12,7 +12,9 @@ be stored on it (Day 5A plan item 1).
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from meta_rne.domain.anomaly import Anomaly
 from meta_rne.domain.config import NormalizedConfiguration
+from meta_rne.domain.telemetry import TelemetrySample
 
 
 def _require_non_empty(value: str, field_name: str) -> None:
@@ -67,3 +69,40 @@ class ConfigIngestionResult:
                 "ConfigIngestionResult.incidents_created + incidents_updated must equal "
                 "violations_detected"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class TelemetryIngestionCommand:
+    device_id: str
+    sample: TelemetrySample
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_non_empty(self.device_id, "TelemetryIngestionCommand.device_id")
+        if self.device_id != self.sample.device_id:
+            raise ValueError(
+                "TelemetryIngestionCommand.device_id "
+                f"{self.device_id!r} does not match sample.device_id "
+                f"{self.sample.device_id!r}"
+            )
+        _require_utc(self.observed_at, "TelemetryIngestionCommand.observed_at")
+
+
+@dataclass(frozen=True, slots=True)
+class TelemetryIngestionResult:
+    sample: TelemetrySample
+    anomalies: tuple[Anomaly, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.anomalies, tuple):
+            raise TypeError(
+                "TelemetryIngestionResult.anomalies must be a tuple, got "
+                f"{type(self.anomalies).__name__}"
+            )
+        for anomaly in self.anomalies:
+            if anomaly.device_id != self.sample.device_id:
+                raise ValueError(
+                    "TelemetryIngestionResult anomaly.device_id "
+                    f"{anomaly.device_id!r} does not match sample.device_id "
+                    f"{self.sample.device_id!r}"
+                )

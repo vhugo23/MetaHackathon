@@ -20,12 +20,18 @@ from meta_rne.api.schemas import (
     IncidentResponse,
     SubmitConfigurationRequest,
     SubmitConfigurationResponse,
+    SubmitTelemetryRequest,
+    SubmitTelemetryResponse,
+    TelemetrySampleResponse,
 )
 from meta_rne.application.config_ingestion import ConfigIngestionService
 from meta_rne.application.device_drift import GetDeviceDriftService
 from meta_rne.application.incident_queries import ListIncidentsService
 from meta_rne.application.incident_resolution import ResolveIncidentService
-from meta_rne.application.models import IngestConfigurationCommand
+from meta_rne.application.models import IngestConfigurationCommand, TelemetryIngestionCommand
+from meta_rne.application.telemetry_ingestion import TelemetryIngestionService
+from meta_rne.application.telemetry_query import GetRecentTelemetryService
+from meta_rne.domain.telemetry import BgpSession, InterfaceState, TelemetrySample
 
 # Documents the real runtime 422 contract (api/errors.py): FastAPI's own
 # RequestValidationError (HTTPValidationError, malformed request schema) and
@@ -58,6 +64,8 @@ def build_router(
     list_incidents_service: ListIncidentsService,
     resolve_incident_service: ResolveIncidentService,
     get_device_drift_service: GetDeviceDriftService,
+    telemetry_ingestion_service: TelemetryIngestionService,
+    telemetry_query_service: GetRecentTelemetryService,
     clock: Callable[[], datetime],
 ) -> APIRouter:
     router = APIRouter()
@@ -149,5 +157,76 @@ def build_router(
     def get_device_drift(device_id: str) -> DriftReportResponse:
         report = get_device_drift_service.get_drift(device_id)
         return DriftReportResponse.from_domain(report)
+
+    @router.post(
+        "/devices/{device_id}/telemetry",
+        status_code=status.HTTP_201_CREATED,
+        response_model=SubmitTelemetryResponse,
+        operation_id="submit_device_telemetry",
+        responses={
+            404: {
+                "model": ApiErrorResponse,
+                "description": "device_not_found.",
+            },
+            422: {
+                "description": (
+                    "Request-schema validation failure (HTTPValidationError) or an "
+                    "application-originated invalid_request ApiErrorResponse."
+                ),
+            },
+        },
+    )
+    def submit_telemetry(
+        device_id: str, request: SubmitTelemetryRequest
+    ) -> SubmitTelemetryResponse:
+        observed_at = require_utc(clock())
+
+        sample = TelemetrySample(
+            device_id=device_id,
+            sampled_at=request.sampled_at,
+            cpu_utilization_pct=request.cpu_utilization_pct,
+            memory_utilization_pct=request.memory_utilization_pct,
+            interface_error_rate=request.interface_error_rate,
+            interface_states=tuple(
+                InterfaceState(name=value.name, oper_state=value.oper_state)
+                for value in request.interface_states
+            ),
+            bgp_sessions=tuple(
+                BgpSession(neighbor_ip=value.neighbor_ip, state=value.state)
+                for value in request.bgp_sessions
+            ),
+        )
+
+        result = telemetry_ingestion_service.ingest(
+            TelemetryIngestionCommand(
+                device_id=device_id,
+                sample=sample,
+                observed_at=observed_at,
+            )
+        )
+        return SubmitTelemetryResponse.from_domain(result)
+
+    @router.get(
+        "/devices/{device_id}/telemetry/recent",
+        response_model=list[TelemetrySampleResponse],
+        status_code=status.HTTP_200_OK,
+        operation_id="get_recent_telemetry",
+        responses={
+            404: {
+                "model": ApiErrorResponse,
+                "description": "device_not_found.",
+            },
+            422: {
+                "description": (
+                    "Request-schema validation failure (HTTPValidationError) or an "
+                    "application-originated invalid_request ApiErrorResponse (naive "
+                    "or non-UTC-offset since)."
+                ),
+            },
+        },
+    )
+    def get_recent_telemetry(device_id: str, since: datetime) -> list[TelemetrySampleResponse]:
+        samples = telemetry_query_service.get(device_id, since)
+        return [TelemetrySampleResponse.from_domain(sample) for sample in samples]
 
     return router

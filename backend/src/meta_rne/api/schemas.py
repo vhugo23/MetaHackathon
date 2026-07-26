@@ -16,9 +16,15 @@ None}`` envelope (Day 5B binding correction).
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from meta_rne.application.models import ConfigIngestionResult
+from meta_rne.application.models import ConfigIngestionResult, TelemetryIngestionResult
+from meta_rne.domain.anomaly import (
+    Anomaly,
+    BgpDownEvidence,
+    CpuHighEvidence,
+    LinkFlapEvidence,
+)
 from meta_rne.domain.config import (
     NormalizedAcl,
     NormalizedAclEntry,
@@ -29,6 +35,7 @@ from meta_rne.domain.config import (
 )
 from meta_rne.domain.drift import DriftEntry, DriftReport
 from meta_rne.domain.incident import Incident, PolicyViolationIncidentEvidence
+from meta_rne.domain.telemetry import BgpState, LinkState, TelemetrySample
 
 
 class SubmitConfigurationRequest(BaseModel):
@@ -252,6 +259,165 @@ class DriftReportResponse(BaseModel):
             added=[DriftEntryResponse.from_domain(entry) for entry in report.added],
             removed=[DriftEntryResponse.from_domain(entry) for entry in report.removed],
             changed=[DriftEntryResponse.from_domain(entry) for entry in report.changed],
+        )
+
+
+class InterfaceStateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    oper_state: LinkState
+
+
+class BgpSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    neighbor_ip: str
+    state: BgpState
+
+
+class SubmitTelemetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sampled_at: datetime
+    cpu_utilization_pct: float
+    memory_utilization_pct: float
+    interface_error_rate: float
+    interface_states: list[InterfaceStateRequest] = Field(default_factory=list)
+    bgp_sessions: list[BgpSessionRequest] = Field(default_factory=list)
+
+
+class InterfaceStateResponse(BaseModel):
+    name: str
+    oper_state: str
+
+
+class BgpSessionResponse(BaseModel):
+    neighbor_ip: str
+    state: str
+
+
+class TelemetrySampleResponse(BaseModel):
+    device_id: str
+    sampled_at: datetime
+    cpu_utilization_pct: float
+    memory_utilization_pct: float
+    interface_error_rate: float
+    interface_states: list[InterfaceStateResponse]
+    bgp_sessions: list[BgpSessionResponse]
+
+    @classmethod
+    def from_domain(cls, sample: TelemetrySample) -> "TelemetrySampleResponse":
+        return cls(
+            device_id=sample.device_id,
+            sampled_at=sample.sampled_at,
+            cpu_utilization_pct=sample.cpu_utilization_pct,
+            memory_utilization_pct=sample.memory_utilization_pct,
+            interface_error_rate=sample.interface_error_rate,
+            interface_states=[
+                InterfaceStateResponse(name=state.name, oper_state=state.oper_state.value)
+                for state in sample.interface_states
+            ],
+            bgp_sessions=[
+                BgpSessionResponse(neighbor_ip=session.neighbor_ip, state=session.state.value)
+                for session in sample.bgp_sessions
+            ],
+        )
+
+
+class CpuSampleEvidenceResponse(BaseModel):
+    timestamp: datetime
+    cpu_utilization_pct: float
+
+
+class CpuHighEvidenceResponse(BaseModel):
+    samples: list[CpuSampleEvidenceResponse]
+
+    @classmethod
+    def from_domain(cls, evidence: CpuHighEvidence) -> "CpuHighEvidenceResponse":
+        return cls(
+            samples=[
+                CpuSampleEvidenceResponse(
+                    timestamp=sample.timestamp, cpu_utilization_pct=sample.cpu_utilization_pct
+                )
+                for sample in evidence.samples
+            ]
+        )
+
+
+class InterfaceTransitionEvidenceResponse(BaseModel):
+    timestamp: datetime
+    oper_state: str
+
+
+class LinkFlapEvidenceResponse(BaseModel):
+    interface_name: str
+    transitions: list[InterfaceTransitionEvidenceResponse]
+
+    @classmethod
+    def from_domain(cls, evidence: LinkFlapEvidence) -> "LinkFlapEvidenceResponse":
+        return cls(
+            interface_name=evidence.interface_name,
+            transitions=[
+                InterfaceTransitionEvidenceResponse(
+                    timestamp=transition.timestamp, oper_state=transition.oper_state.value
+                )
+                for transition in evidence.transitions
+            ],
+        )
+
+
+class BgpDownEvidenceResponse(BaseModel):
+    neighbor_ip: str
+    previous_state: str
+    state: str
+
+    @classmethod
+    def from_domain(cls, evidence: BgpDownEvidence) -> "BgpDownEvidenceResponse":
+        return cls(
+            neighbor_ip=evidence.neighbor_ip,
+            previous_state=evidence.previous_state.value,
+            state=evidence.state.value,
+        )
+
+
+class AnomalyResponse(BaseModel):
+    device_id: str
+    rule_id: str
+    detected_at: datetime
+    evidence: CpuHighEvidenceResponse | LinkFlapEvidenceResponse | BgpDownEvidenceResponse
+
+    @classmethod
+    def from_domain(cls, anomaly: Anomaly) -> "AnomalyResponse":
+        evidence_response: (
+            CpuHighEvidenceResponse | LinkFlapEvidenceResponse | BgpDownEvidenceResponse
+        )
+        if isinstance(anomaly.evidence, CpuHighEvidence):
+            evidence_response = CpuHighEvidenceResponse.from_domain(anomaly.evidence)
+        elif isinstance(anomaly.evidence, LinkFlapEvidence):
+            evidence_response = LinkFlapEvidenceResponse.from_domain(anomaly.evidence)
+        elif isinstance(anomaly.evidence, BgpDownEvidence):
+            evidence_response = BgpDownEvidenceResponse.from_domain(anomaly.evidence)
+        else:
+            raise ValueError(f"unrecognized RuleEvidence type: {type(anomaly.evidence).__name__}")
+
+        return cls(
+            device_id=anomaly.device_id,
+            rule_id=anomaly.rule_id.value,
+            detected_at=anomaly.detected_at,
+            evidence=evidence_response,
+        )
+
+
+class SubmitTelemetryResponse(BaseModel):
+    sample: TelemetrySampleResponse
+    anomalies: list[AnomalyResponse]
+
+    @classmethod
+    def from_domain(cls, result: TelemetryIngestionResult) -> "SubmitTelemetryResponse":
+        return cls(
+            sample=TelemetrySampleResponse.from_domain(result.sample),
+            anomalies=[AnomalyResponse.from_domain(anomaly) for anomaly in result.anomalies],
         )
 
 

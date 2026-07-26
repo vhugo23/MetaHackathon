@@ -25,6 +25,7 @@ _EXPECTED_TABLES = {
     "configuration_snapshots",
     "configuration_policies",
     "incidents",
+    "telemetry_samples",
 }
 
 
@@ -333,5 +334,212 @@ def test_alembic_upgrade_head__succeeds_a_second_time_after_downgrade(
     try:
         inspector = inspect(engine)
         assert _EXPECTED_TABLES <= set(inspector.get_table_names())
+    finally:
+        engine.dispose()
+
+
+# --- telemetry_samples (Gate E2A) ---------------------------------------
+
+
+def test_alembic_upgrade_head__creates_telemetry_samples_table_and_columns(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    command.upgrade(_alembic_config(database_url), "head")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        telemetry_columns = {col["name"] for col in inspector.get_columns("telemetry_samples")}
+        assert telemetry_columns == {
+            "id",
+            "device_id",
+            "sampled_at",
+            "cpu_utilization_pct",
+            "memory_utilization_pct",
+            "interface_error_rate",
+            "interface_states",
+            "bgp_sessions",
+        }
+        assert len(telemetry_columns) == 8
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_head__telemetry_samples_id_is_bigint_identity_primary_key(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    command.upgrade(_alembic_config(database_url), "head")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        columns = {col["name"]: col for col in inspector.get_columns("telemetry_samples")}
+
+        assert "BIGINT" in str(columns["id"]["type"]).upper()
+        assert columns["id"].get("identity") is not None
+
+        pk = inspector.get_pk_constraint("telemetry_samples")
+        assert pk["constrained_columns"] == ["id"]
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_head__telemetry_samples_column_types_and_nullability(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    command.upgrade(_alembic_config(database_url), "head")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        columns = {col["name"]: col for col in inspector.get_columns("telemetry_samples")}
+
+        assert columns["device_id"]["nullable"] is False
+        assert "TEXT" in str(columns["device_id"]["type"]).upper()
+
+        assert columns["sampled_at"]["nullable"] is False
+        assert columns["sampled_at"]["type"].timezone is True
+
+        for name in ("cpu_utilization_pct", "memory_utilization_pct", "interface_error_rate"):
+            assert columns[name]["nullable"] is False
+            assert "DOUBLE PRECISION" in str(columns[name]["type"]).upper()
+
+        for name in ("interface_states", "bgp_sessions"):
+            assert columns[name]["nullable"] is False
+            assert "JSONB" in str(columns[name]["type"]).upper()
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_head__telemetry_samples_foreign_key_to_devices(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    command.upgrade(_alembic_config(database_url), "head")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        fks = inspector.get_foreign_keys("telemetry_samples")
+        matching = [fk for fk in fks if fk["referred_table"] == "devices"]
+        assert len(matching) == 1
+        assert matching[0]["constrained_columns"] == ["device_id"]
+        # No explicit cascade/delete action was configured.
+        assert matching[0].get("options", {}).get("ondelete") is None
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_head__telemetry_samples_check_constraints(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    command.upgrade(_alembic_config(database_url), "head")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        checks = {c["name"] for c in inspector.get_check_constraints("telemetry_samples")}
+        assert {
+            "ck_telemetry_samples_cpu_range",
+            "ck_telemetry_samples_memory_range",
+            "ck_telemetry_samples_device_id_not_blank",
+        } <= checks
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_head__telemetry_samples_composite_index(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    command.upgrade(_alembic_config(database_url), "head")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        indexes = inspector.get_indexes("telemetry_samples")
+        matching = [
+            idx for idx in indexes if idx["name"] == "ix_telemetry_samples_device_sampled_at"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["column_names"] == ["device_id", "sampled_at", "id"]
+    finally:
+        engine.dispose()
+
+
+def test_telemetry_samples__identity_column_generates_distinct_increasing_ids(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    command.upgrade(_alembic_config(database_url), "head")
+
+    engine = create_engine(database_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO devices (device_id, vendor, created_at, updated_at) "
+                    "VALUES ('spine-01', 'cisco-ios-xe', now(), now())"
+                )
+            )
+            first_id = conn.execute(
+                text(
+                    "INSERT INTO telemetry_samples "
+                    "(device_id, sampled_at, cpu_utilization_pct, memory_utilization_pct, "
+                    " interface_error_rate, interface_states, bgp_sessions) "
+                    "VALUES ('spine-01', now(), 50.0, 50.0, 0.0, '[]'::jsonb, '[]'::jsonb) "
+                    "RETURNING id"
+                )
+            ).scalar_one()
+            second_id = conn.execute(
+                text(
+                    "INSERT INTO telemetry_samples "
+                    "(device_id, sampled_at, cpu_utilization_pct, memory_utilization_pct, "
+                    " interface_error_rate, interface_states, bgp_sessions) "
+                    "VALUES ('spine-01', now(), 51.0, 51.0, 0.0, '[]'::jsonb, '[]'::jsonb) "
+                    "RETURNING id"
+                )
+            ).scalar_one()
+
+        assert second_id > first_id
+    finally:
+        engine.dispose()
+
+
+def test_alembic_downgrade_to_incident_resolution__drops_telemetry_samples(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    config = _alembic_config(database_url)
+    command.upgrade(config, "head")
+
+    command.downgrade(config, "0002_incident_resolution")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        assert "telemetry_samples" not in set(inspector.get_table_names())
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_head__succeeds_again_after_downgrading_telemetry_samples(
+    reset_migration_database: str,
+) -> None:
+    database_url = reset_migration_database
+    config = _alembic_config(database_url)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0002_incident_resolution")
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        assert "telemetry_samples" in set(inspector.get_table_names())
     finally:
         engine.dispose()

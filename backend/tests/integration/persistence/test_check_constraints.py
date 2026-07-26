@@ -51,3 +51,76 @@ def test_configuration_snapshots_table__hash_format_check_constraint__rejects_in
             )
         )
         sqlalchemy_session.flush()
+
+
+def test_telemetry_samples_table__cpu_range_check_constraint__rejects_invalid_value(
+    sqlalchemy_session: Session,
+) -> None:
+    sqlalchemy_session.execute(
+        text(
+            "INSERT INTO devices (device_id, vendor, created_at, updated_at) "
+            "VALUES ('spine-01', 'cisco-ios-xe', now(), now())"
+        )
+    )
+    sqlalchemy_session.flush()
+
+    with pytest.raises(IntegrityError, match="ck_telemetry_samples_cpu_range"):
+        sqlalchemy_session.execute(
+            text(
+                "INSERT INTO telemetry_samples "
+                "(device_id, sampled_at, cpu_utilization_pct, memory_utilization_pct, "
+                " interface_error_rate, interface_states, bgp_sessions) "
+                "VALUES ('spine-01', now(), 150.0, 50.0, 0.0, '[]'::jsonb, '[]'::jsonb)"
+            )
+        )
+        sqlalchemy_session.flush()
+
+
+def test_telemetry_samples_table__memory_range_check_constraint__rejects_invalid_value(
+    sqlalchemy_session: Session,
+) -> None:
+    sqlalchemy_session.execute(
+        text(
+            "INSERT INTO devices (device_id, vendor, created_at, updated_at) "
+            "VALUES ('spine-01', 'cisco-ios-xe', now(), now())"
+        )
+    )
+    sqlalchemy_session.flush()
+
+    with pytest.raises(IntegrityError, match="ck_telemetry_samples_memory_range"):
+        sqlalchemy_session.execute(
+            text(
+                "INSERT INTO telemetry_samples "
+                "(device_id, sampled_at, cpu_utilization_pct, memory_utilization_pct, "
+                " interface_error_rate, interface_states, bgp_sessions) "
+                "VALUES ('spine-01', now(), 50.0, -1.0, 0.0, '[]'::jsonb, '[]'::jsonb)"
+            )
+        )
+        sqlalchemy_session.flush()
+
+
+def test_telemetry_samples_table__device_id_not_blank_check_constraint__rejects_blank_value(
+    sqlalchemy_session: Session,
+) -> None:
+    # The devices table itself has no blank-device_id CHECK, so a
+    # whitespace-only device_id can exist there — used here only to
+    # satisfy telemetry_samples' foreign key, so the CHECK under test is
+    # the only constraint this insert can fail.
+    sqlalchemy_session.execute(
+        text(
+            "INSERT INTO devices (device_id, vendor, created_at, updated_at) "
+            "VALUES ('   ', 'cisco-ios-xe', now(), now())"
+        )
+    )
+    sqlalchemy_session.flush()
+
+    with pytest.raises(IntegrityError, match="ck_telemetry_samples_device_id_not_blank"):
+        sqlalchemy_session.execute(
+            text(
+                "INSERT INTO telemetry_samples "
+                "(device_id, sampled_at, cpu_utilization_pct, memory_utilization_pct, "
+                " interface_error_rate, interface_states, bgp_sessions) "
+                "VALUES ('   ', now(), 50.0, 50.0, 0.0, '[]'::jsonb, '[]'::jsonb)"
+            )
+        )
+        sqlalchemy_session.flush()
