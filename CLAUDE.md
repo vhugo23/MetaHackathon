@@ -171,6 +171,96 @@ consumption remain explicitly deferred — see "Still prohibited" below.
 
 ---
 
+**Day 11A — Deterministic Telemetry Simulator, implemented and live-
+verified against a disposable Docker Compose stack; supersedes Day 10's
+"a deterministic telemetry simulator ... remain[s] deferred" statement
+below.**
+
+`scripts/telemetry_simulator.py` and `scripts/test_telemetry_simulator.py`
+(new, standard-library-only — no dependency added) drive the complete
+telemetry → anomaly → incident → PostgreSQL → structured-log (AC-10)
+pipeline end to end through the real, public HTTP API only — never a
+direct database, repository, `UnitOfWork`, or Docker connection, and never
+a modification to any API request/response contract. `JsonHttpClient`
+(`urllib.request`) is the sole transport; `HttpClientLike` (a
+`typing.Protocol`) lets unit tests substitute a fake client with zero real
+network, Docker, or PostgreSQL access, and no real sleeping (health-wait
+polling accepts injectable `now_fn`/`sleep_fn`).
+
+Seven deterministic scenarios — `normal`, `cpu-high`, `cpu-update`,
+`link-flap`, `bgp-down`, `all-anomalies`, `resolved-recurrence` — plus
+`suite` (runs all seven in that exact order) are selectable via
+`--scenario`. Every scenario derives its own device ID from one run ID
+(`sim-{run_id}-{scenario}`) — never a fixed or reused ID — so repeated
+invocations never contaminate telemetry history or produce confusing
+recurrence across unrelated runs; `--run-id` is optional (auto-generated
+from the real UTC clock only for this uniqueness token) or explicit
+(sanitized for URL/hostname safety). Every telemetry `sampled_at` value
+remains derived from one fixed base timestamp
+(`2026-07-18T10:00:00Z`) plus a fixed offset — deterministic, never the
+real clock. The device itself is created only through the public
+`POST /devices/{device_id}/config` (config ingestion), since there is no
+dedicated device-registration endpoint.
+
+Each scenario verifies durable state exclusively through public HTTP —
+`GET /incidents`, filtered/matched by `device_id`/`rule_ref`/`status`/
+`incident_id`, never by response-list position — confirming anomaly rule
+IDs, occurrence-count increments, OPEN/RESOLVED state, incident-identity
+continuity across updates, a new incident's distinct ID and matching
+fingerprint after a resolved recurrence, and (for `all-anomalies`) the
+exact `RULE-CPU-HIGH` → `RULE-LINK-FLAP` → `RULE-BGP-DOWN` order with no
+premature incident creation (the four link-state history requests stay at
+CPU 50.0). `GET /health` is documented and treated as API-*liveness* only
+— it never claims PostgreSQL health; the first successful device-
+configuration request is the actual database-backed end-to-end readiness
+proof. AC-10's structured stdout events are written by the API *process*
+and are never read, parsed, or verified by the simulator itself — it
+prints a one-time reminder pointing at `docker compose logs -f api` and
+never invokes Docker.
+
+**Unit-tested** (21 tests, `scripts/test_telemetry_simulator.py`): payload
+construction, deterministic timestamps/run-ID/device-ID derivation,
+scenario ordering, all-anomalies CPU-50.0 history and final rule order,
+link-flap/BGP-down exact state sequences, resolved-recurrence's post-
+resolution verification phase, normal-scenario no-anomaly/no-incident
+assertions, exit-code behavior for success/HTTP-error/network-error/
+malformed-response paths (via a fake `HttpClientLike`, never a real
+socket), health-wait success-after-transient-failure and stop-at-bound
+behavior (via injectable fake clock/sleep, never real time), incident-
+matching independent of list order, and per-scenario HTTP request
+counting. Ruff format/lint clean; direct `mypy` clean for both files.
+Backend's own non-PostgreSQL regression suite is unaffected and unchanged
+(1,081 passed, 281 deselected) — the 21 simulator tests live outside
+`backend/`'s configured test paths and are never added to that total.
+
+**Live-verified** against an isolated, disposable Docker Compose project
+(dedicated host ports, torn down afterward with `down -v
+--remove-orphans`, no other project/container/volume/network touched):
+the API container reached Docker `healthy`; `python
+scripts/telemetry_simulator.py --scenario suite` exited `0` with all 7
+scenarios `PASS`, 0 `FAIL`, and exactly 40 HTTP requests issued (1 health
++ 39 scenario requests); `GET /incidents` showed exactly 9 durable
+incidents matching the run's device-ID prefix — 8 `OPEN` / 1 `RESOLVED`,
+`RULE-CPU-HIGH: 5` / `RULE-LINK-FLAP: 2` / `RULE-BGP-DOWN: 2`; the API
+container's own stdout contained exactly 10 AC-10 structured events —
+`CREATED: 9` / `UPDATED: 1`, `RULE-CPU-HIGH: 6` / `RULE-LINK-FLAP: 2` /
+`RULE-BGP-DOWN: 2` — with `all-anomalies` emitting its three events in
+the exact `RULE-CPU-HIGH` → `RULE-LINK-FLAP` → `RULE-BGP-DOWN` order, and
+`resolved-recurrence` emitting exactly two `CREATED` events with two
+distinct `incident_id`s and zero events from the resolution request
+itself. No API, schema, database, frontend, or migration file changed for
+any of this.
+
+The implemented tool is an **operator-invoked deterministic scenario
+runner**, not a daemon or continuous traffic generator. Automatic
+background telemetry generation, long-running continuous simulation,
+arbitrary/random traffic, prediction/forecasting, confidence scoring,
+notification delivery, guaranteed AC-10 delivery, and external log
+aggregation all remain explicitly deferred/out of scope. Frontend
+telemetry consumption also remains deferred, unchanged from Day 9b/9c/10.
+
+---
+
 **Day 10 — Structured incident event logging (AC-10), implemented across
 gates AC-10A through AC-10G, all approved, built on top of the Day 9c
 anomaly-incident checkpoint; passes the full backend verification matrix
@@ -1318,7 +1408,10 @@ full detail. **Anomaly-to-incident mapping now exists as of Day 9c** —
 ones, proving AC-07/AC-08/AC-09; see "Current Phase" above for the full
 detail. **Structured incident event logging (AC-10) now exists as of Day
 10** — see "Current Phase" above for the full detail; it is no longer
-deferred.
+deferred. **A deterministic telemetry simulator now exists as of Day
+11A** — `scripts/telemetry_simulator.py`, see "Current Phase" above for
+the full detail; it is no longer deferred. Frontend telemetry consumption
+remains deferred.
 All remaining items are later days, against the domain model, architecture,
 and ports already documented, with tests written first per the Development
 Rules above.

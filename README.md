@@ -172,6 +172,101 @@ own `docker compose up` session, and always cleans up after itself
 library only; the same invocation runs in CI's `compose-smoke` job. See
 `docs/architecture.md` Section 15 for the full flow.
 
+## Deterministic Telemetry Simulator
+
+A standard-library-only Python script that drives the complete telemetry
+→ anomaly → incident → PostgreSQL → structured-log (AC-10) pipeline
+end to end through the real, public HTTP API — no dependency added, no
+direct database/repository/`UnitOfWork`/Docker access, and no change to
+any API request or response contract.
+
+### Start the API
+
+```powershell
+docker compose up -d --build
+```
+
+### Run the full suite
+
+PowerShell:
+
+```powershell
+backend/.venv/Scripts/python.exe scripts/telemetry_simulator.py `
+  --base-url http://localhost:8080 `
+  --scenario suite
+```
+
+Cross-platform:
+
+```bash
+python scripts/telemetry_simulator.py \
+  --base-url http://localhost:8080 \
+  --scenario suite
+```
+
+### Observe AC-10 events
+
+AC-10's structured JSON events are written by the API *process*, to its
+own stdout — the simulator never reads, parses, or verifies them itself.
+View them with:
+
+```bash
+docker compose logs -f api
+```
+
+### Run one scenario
+
+```bash
+python scripts/telemetry_simulator.py \
+  --scenario all-anomalies \
+  --run-id demo-01
+```
+
+All seven scenario names, in order:
+
+- `normal`
+- `cpu-high`
+- `cpu-update`
+- `link-flap`
+- `bgp-down`
+- `all-anomalies`
+- `resolved-recurrence`
+
+`--scenario suite` runs all seven in that exact order.
+
+Every scenario creates its own fresh device — through
+`POST /devices/{device_id}/config` (the public configuration-ingestion
+endpoint; the simulator never connects to PostgreSQL directly) — with a
+device ID derived from a run ID: `sim-{run_id}-{scenario}`. A run ID is
+generated automatically from the current UTC time when `--run-id` is
+omitted; repeated runs should normally use a fresh run ID (the default
+behavior) so telemetry history, occurrence counts, and incident
+recurrence stay unambiguous across invocations. Telemetry `sampled_at`
+values remain fixed and deterministic (based on one constant base
+timestamp) regardless of when the simulator is actually run — only the
+run-ID uniqueness token uses the real clock.
+
+**Verified evidence.** 21 isolated unit tests pass
+(`scripts/test_telemetry_simulator.py` — no real network, Docker,
+PostgreSQL, or real sleeping); Ruff format and lint are clean; direct
+`mypy` is clean for both simulator files; the backend's own
+non-PostgreSQL regression suite is unaffected (**1,081** passed, **281**
+deselected — the 21 simulator tests are not part of that total, since
+they live outside `backend/`'s configured test paths). A live run against
+an isolated, disposable Docker Compose stack passed all 7 scenarios (0
+failed) with exactly 40 HTTP requests issued, and independently verified
+9 durable incidents and 10 AC-10 structured stdout events — see
+CLAUDE.md's "Current Phase" (Day 11A) for the complete measured
+inventory.
+
+**Deferred / explicitly out of scope.** This is an operator-invoked
+deterministic scenario runner, not a daemon or continuous traffic
+generator: automatic background telemetry generation, long-running
+continuous simulation, arbitrary/random traffic, prediction/forecasting,
+confidence scoring, notification delivery, guaranteed AC-10 delivery, and
+external log aggregation are all out of scope. Frontend telemetry
+consumption also remains deferred.
+
 ### CORS (Day 6A)
 
 Disabled by default. To enable for a local frontend dev server, set
@@ -1982,3 +2077,22 @@ delivery, fallback queues, background workers, external log aggregation,
 metrics, and logging-health monitoring remain deferred. A deterministic
 telemetry simulator and frontend telemetry consumption also remain
 deferred, unchanged from Day 9b/9c.
+
+**Day 11A — Deterministic Telemetry Simulator.** Supersedes the
+"a deterministic telemetry simulator ... remain[s] deferred" statement
+above: see the ["Deterministic Telemetry Simulator"](#deterministic-telemetry-simulator)
+section above for the full usage instructions, and CLAUDE.md's "Current
+Phase" for the complete implementation and live-verification detail.
+`scripts/telemetry_simulator.py`/`scripts/test_telemetry_simulator.py`
+(standard-library-only, no dependency added) drive the complete telemetry
+→ anomaly → incident → PostgreSQL → structured-log (AC-10) pipeline
+through the real, public HTTP API only. 21 isolated unit tests pass (no
+real network, Docker, PostgreSQL, or real sleeping); Ruff and direct
+`mypy` are clean for both files; the backend regression suite is
+unaffected (**1,081** non-PostgreSQL / **281** PostgreSQL, unchanged — the
+21 simulator tests are not part of that total). Live-verified against an
+isolated, disposable Compose stack: all 7 scenarios passed, 0 failed, 40
+HTTP requests issued, 9 durable incidents (8 `OPEN` / 1 `RESOLVED`) and 10
+AC-10 structured stdout events (9 `CREATED` / 1 `UPDATED`) independently
+confirmed, then fully torn down. No API, schema, database, frontend, or
+migration file changed. Frontend telemetry consumption remains deferred.
