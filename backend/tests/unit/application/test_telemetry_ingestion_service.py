@@ -22,7 +22,8 @@ from meta_rne.detection.anomaly_incident_mapper import AnomalyIncidentMapper
 from meta_rne.domain.anomaly import RuleId
 from meta_rne.domain.config import VendorType
 from meta_rne.domain.device import Device
-from meta_rne.domain.incident import compute_fingerprint
+from meta_rne.domain.incident import IncidentStatus, IncidentUpsertOutcome, compute_fingerprint
+from meta_rne.domain.policy import Severity
 from meta_rne.domain.telemetry import (
     BgpSession,
     BgpState,
@@ -30,6 +31,7 @@ from meta_rne.domain.telemetry import (
     LinkState,
     TelemetrySample,
 )
+from meta_rne.observability import IncidentLogEvent
 from meta_rne.persistence.memory.store import InMemoryStore
 from meta_rne.persistence.memory.unit_of_work import InMemoryUnitOfWork
 
@@ -92,8 +94,13 @@ def _seed_sample(store: InMemoryStore, sample: TelemetrySample) -> None:
     uow.commit()
 
 
-def _make_service(store: InMemoryStore) -> TelemetryIngestionService:
-    return TelemetryIngestionService(unit_of_work_factory=lambda: InMemoryUnitOfWork(store))
+def _make_service(
+    store: InMemoryStore, *, incident_event_sink: Any = None
+) -> TelemetryIngestionService:
+    kwargs: dict[str, Any] = {"unit_of_work_factory": lambda: InMemoryUnitOfWork(store)}
+    if incident_event_sink is not None:
+        kwargs["incident_event_sink"] = incident_event_sink
+    return TelemetryIngestionService(**kwargs)
 
 
 @dataclass
@@ -172,7 +179,10 @@ class _IncidentsSpy:
 
 
 def _make_service_with_incidents_spy(
-    store: InMemoryStore, fail_on_call: int | None = None, fail_error: Exception | None = None
+    store: InMemoryStore,
+    fail_on_call: int | None = None,
+    fail_error: Exception | None = None,
+    incident_event_sink: Any = None,
 ) -> tuple[TelemetryIngestionService, _IncidentsSpy]:
     spy = _IncidentsSpy(_wrapped=None, fail_on_call=fail_on_call, fail_error=fail_error)
 
@@ -182,7 +192,71 @@ def _make_service_with_incidents_spy(
         uow.incidents = spy  # type: ignore[assignment]
         return uow
 
-    return TelemetryIngestionService(unit_of_work_factory=factory), spy
+    kwargs: dict[str, Any] = {"unit_of_work_factory": factory}
+    if incident_event_sink is not None:
+        kwargs["incident_event_sink"] = incident_event_sink
+    return TelemetryIngestionService(**kwargs), spy
+
+
+@dataclass
+class _RecordingSink:
+    """A plain recording double for ``IncidentEventSink`` — structural
+    typing only, matching test_config_ingestion_service.py's convention."""
+
+    calls: list[IncidentLogEvent] = field(default_factory=list)
+
+    def emit(self, event: IncidentLogEvent) -> None:
+        self.calls.append(event)
+
+
+@dataclass
+class _CommitOrderRecordingSink:
+    """Records the enclosing ``_LifecycleSpyUnitOfWork``'s commit/rollback
+    counts at the exact moment each event is emitted, proving emission
+    happens strictly after commit, never before."""
+
+    counts: _LifecycleCounts
+    snapshots: list[tuple[int, int]] = field(default_factory=list)
+
+    def emit(self, event: IncidentLogEvent) -> None:
+        self.snapshots.append((self.counts.commit, self.counts.rollback))
+
+
+@dataclass
+class _SelectivelyFailingSink:
+    """Raises on the given zero-indexed ``emit`` calls, recording every
+    attempted event (including the ones it raises for) so a test can prove
+    later events are still attempted after an earlier one fails."""
+
+    fail_on_indices: frozenset[int]
+    attempted: list[IncidentLogEvent] = field(default_factory=list)
+    succeeded: list[IncidentLogEvent] = field(default_factory=list)
+
+    def emit(self, event: IncidentLogEvent) -> None:
+        index = len(self.attempted)
+        self.attempted.append(event)
+        if index in self.fail_on_indices:
+            raise RuntimeError(f"sink boom on event index {index}")
+        self.succeeded.append(event)
+
+
+@dataclass
+class _FailingTelemetrySamplesSpy:
+    """Wraps a real TelemetryRepository, raising on `save` only — used to
+    prove no incident event is emitted when the telemetry save itself
+    fails, without replacing the real repository's read behavior."""
+
+    _wrapped: Any
+    fail_error: Exception
+
+    def get_latest(self, device_id: str) -> Any:
+        return self._wrapped.get_latest(device_id)
+
+    def get_recent(self, device_id: str, since: datetime) -> Any:
+        return self._wrapped.get_recent(device_id, since=since)
+
+    def save(self, device_id: str, sample: TelemetrySample) -> None:
+        raise self.fail_error
 
 
 class _RuleEngineSpy:
@@ -1236,3 +1310,364 @@ def test_rule_engine_exception__no_incident_upsert_occurs() -> None:
 
     assert spy.calls == []
     assert _incidents(store) == ()
+
+
+# --- AC-10: structured incident events (Gate AC-10C) -------------------------
+
+
+def test_ac10__created_anomaly_incident__emits_one_created_event() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    sink = _RecordingSink()
+    service = _make_service(store, incident_event_sink=sink)
+
+    service.ingest(_command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)))
+
+    incident = _incidents(store)[0]
+    assert len(sink.calls) == 1
+    event = sink.calls[0]
+    assert event.incident_id == incident.incident_id
+    assert event.device_id == DEVICE_ID
+    assert event.rule_ref == "RULE-CPU-HIGH"
+    assert event.severity == Severity.HIGH
+    assert event.status is IncidentStatus.OPEN
+    assert event.outcome is IncidentUpsertOutcome.CREATED
+    assert event.timestamp == incident.last_seen_at
+
+
+def test_ac10__updated_open_anomaly__emits_exactly_one_updated_event_for_that_ingestion() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    first_sink = _RecordingSink()
+    first_service = _make_service(store, incident_event_sink=first_sink)
+    first_service.ingest(_command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)))
+    assert len(first_sink.calls) == 1
+    assert first_sink.calls[0].outcome is IncidentUpsertOutcome.CREATED
+
+    # A fresh sink/service pair scopes the second ingestion's emitted events
+    # independently, never conflated with the first ingestion's event.
+    second_sink = _RecordingSink()
+    second_service = _make_service(store, incident_event_sink=second_sink)
+    recurrence_observed_at = T0 + timedelta(seconds=60)
+
+    second_service.ingest(
+        _command(
+            sample=_sample(sampled_at=recurrence_observed_at, cpu=95.0),
+            observed_at=recurrence_observed_at,
+        )
+    )
+
+    incident = _incidents(store)[0]
+    assert len(second_sink.calls) == 1
+    event = second_sink.calls[0]
+    assert event.outcome is IncidentUpsertOutcome.UPDATED
+    assert event.incident_id == incident.incident_id
+    assert event.timestamp == incident.last_seen_at
+    assert event.timestamp == recurrence_observed_at
+
+
+def test_ac10__no_anomaly__emits_no_event_and_preserves_result_shape() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    sample = _sample()
+    sink = _RecordingSink()
+    service = _make_service(store, incident_event_sink=sink)
+
+    result = service.ingest(_command(sample=sample))
+
+    assert result == TelemetryIngestionResult(sample=sample, anomalies=())
+    assert sink.calls == []
+
+
+def _seed_multi_anomaly_history(store: InMemoryStore, interface: str, neighbor: str) -> None:
+    for offset, state in enumerate([LinkState.UP, LinkState.DOWN, LinkState.UP, LinkState.DOWN]):
+        _seed_sample(
+            store,
+            _sample(
+                sampled_at=T0 + timedelta(seconds=10 * offset),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=state),),
+            ),
+        )
+    _seed_sample(
+        store,
+        _sample(
+            sampled_at=T0 + timedelta(seconds=40),
+            cpu=95.0,
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.ESTABLISHED),),
+        ),
+    )
+
+
+def _multi_anomaly_command(interface: str, neighbor: str) -> TelemetryIngestionCommand:
+    return _command(
+        sample=_sample(
+            sampled_at=T0 + timedelta(seconds=50),
+            cpu=95.0,
+            interface_states=(InterfaceState(name=interface, oper_state=LinkState.UP),),
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.IDLE),),
+        )
+    )
+
+
+def test_ac10__multiple_anomalies__emits_three_events_matching_upsert_order() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    _seed_multi_anomaly_history(store, interface, neighbor)
+    sink = _RecordingSink()
+    service, spy = _make_service_with_incidents_spy(store, incident_event_sink=sink)
+
+    service.ingest(_multi_anomaly_command(interface, neighbor))
+
+    assert len(sink.calls) == 3
+    assert [event.rule_ref for event in sink.calls] == [
+        "RULE-CPU-HIGH",
+        "RULE-LINK-FLAP",
+        "RULE-BGP-DOWN",
+    ]
+    assert all(event.outcome is IncidentUpsertOutcome.CREATED for event in sink.calls)
+
+    incidents_by_id = {incident.incident_id: incident for incident in _incidents(store)}
+    assert {event.incident_id for event in sink.calls} == set(incidents_by_id)
+
+    for event, (candidate, _fingerprint, _observed_at) in zip(
+        sink.calls,
+        spy.calls,
+        strict=True,
+    ):
+        persisted = incidents_by_id[event.incident_id]
+
+        assert event.rule_ref == candidate.rule_ref
+        assert event.rule_ref == persisted.rule_ref
+        assert event.device_id == persisted.device_id
+        assert event.status is persisted.status
+        assert event.timestamp == persisted.last_seen_at
+
+
+def test_ac10__multiple_anomalies__commits_exactly_once_and_events_emitted_after() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    _seed_multi_anomaly_history(store, interface, neighbor)
+    counts = _LifecycleCounts()
+    sink = _CommitOrderRecordingSink(counts=counts)
+    service = TelemetryIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts),
+        incident_event_sink=sink,
+    )
+
+    service.ingest(_multi_anomaly_command(interface, neighbor))
+
+    assert counts.commit == 1
+    assert counts.rollback == 0
+    assert sink.snapshots == [(1, 0), (1, 0), (1, 0)]
+
+
+def test_ac10__event_emission__happens_strictly_after_commit() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    counts = _LifecycleCounts()
+    sink = _CommitOrderRecordingSink(counts=counts)
+    service = TelemetryIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts),
+        incident_event_sink=sink,
+    )
+
+    service.ingest(_command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)))
+
+    assert sink.snapshots == [(1, 0)]
+
+
+def test_failure__telemetry_save_failure__rolls_back_and_emits_no_event() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    sink = _RecordingSink()
+    save_error = RuntimeError("telemetry save boom")
+
+    def factory() -> InMemoryUnitOfWork:
+        uow = InMemoryUnitOfWork(store)
+        uow.telemetry_samples = _FailingTelemetrySamplesSpy(  # type: ignore[assignment]
+            _wrapped=uow.telemetry_samples, fail_error=save_error
+        )
+        return uow
+
+    service = TelemetryIngestionService(unit_of_work_factory=factory, incident_event_sink=sink)
+
+    with pytest.raises(RuntimeError, match="telemetry save boom"):
+        service.ingest(_command())
+
+    assert sink.calls == []
+    assert _incidents(store) == ()
+
+
+def test_failure__rule_engine_exception__emits_no_event() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    engine = _RuleEngineSpy(fail=RuntimeError("rule engine boom"))
+    sink = _RecordingSink()
+    service = TelemetryIngestionService(
+        unit_of_work_factory=lambda: InMemoryUnitOfWork(store),
+        rule_engine=engine,
+        incident_event_sink=sink,
+    )
+
+    with pytest.raises(RuntimeError, match="rule engine boom"):
+        service.ingest(_command())
+
+    assert sink.calls == []
+
+
+def test_failure__anomaly_mapping_failure__rolls_back_and_emits_no_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    sink = _RecordingSink()
+
+    def failing_build_candidate(anomaly: Any) -> Any:
+        raise RuntimeError("mapping boom")
+
+    monkeypatch.setattr(AnomalyIncidentMapper, "build_candidate", failing_build_candidate)
+    service = _make_service(store, incident_event_sink=sink)
+
+    with pytest.raises(RuntimeError, match="mapping boom"):
+        service.ingest(_command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)))
+
+    assert sink.calls == []
+    assert _incidents(store) == ()
+
+
+def test_failure__incident_upsert_failure__rolls_back_and_emits_no_event() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    upsert_error = RuntimeError("upsert boom")
+    sink = _RecordingSink()
+    service, spy = _make_service_with_incidents_spy(
+        store, fail_on_call=1, fail_error=upsert_error, incident_event_sink=sink
+    )
+
+    with pytest.raises(RuntimeError, match="upsert boom"):
+        service.ingest(_command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)))
+
+    assert sink.calls == []
+    assert _incidents(store) == ()
+
+
+def test_failure__commit_failure__emits_no_event() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    counts = _LifecycleCounts()
+    commit_error = RuntimeError("commit boom")
+    sink = _RecordingSink()
+    service = TelemetryIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(
+            InMemoryUnitOfWork(store), counts, _fail_commit=commit_error
+        ),
+        incident_event_sink=sink,
+    )
+
+    with pytest.raises(RuntimeError, match="commit boom"):
+        service.ingest(_command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)))
+
+    assert sink.calls == []
+
+
+def test_ac10__sink_failure_after_commit__is_swallowed_and_does_not_affect_result() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    counts = _LifecycleCounts()
+
+    class _AlwaysFailingSink:
+        def emit(self, event: IncidentLogEvent) -> None:
+            raise RuntimeError("sink boom")
+
+    service = TelemetryIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts),
+        incident_event_sink=_AlwaysFailingSink(),
+    )
+    sample = _sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)
+
+    result = service.ingest(_command(sample=sample))
+
+    assert result == TelemetryIngestionResult(sample=sample, anomalies=result.anomalies)
+    assert len(result.anomalies) == 1
+    assert counts.commit == 1
+    assert counts.rollback == 0
+    assert counts.close == 1
+    incidents = _incidents(store)
+    assert len(incidents) == 1
+    assert incidents[0].status is IncidentStatus.OPEN
+
+
+def test_ac10__sink_fails_for_one_of_three_events__continues_and_isolates_the_failure() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    _seed_multi_anomaly_history(store, interface, neighbor)
+    counts = _LifecycleCounts()
+    sink = _SelectivelyFailingSink(fail_on_indices=frozenset({1}))
+    service = TelemetryIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts),
+        incident_event_sink=sink,
+    )
+
+    result = service.ingest(_multi_anomaly_command(interface, neighbor))
+
+    assert len(result.anomalies) == 3
+    assert counts.commit == 1
+    assert counts.rollback == 0
+    assert [event.rule_ref for event in sink.attempted] == [
+        "RULE-CPU-HIGH",
+        "RULE-LINK-FLAP",
+        "RULE-BGP-DOWN",
+    ]
+    assert [event.rule_ref for event in sink.succeeded] == ["RULE-CPU-HIGH", "RULE-BGP-DOWN"]
+
+
+def test_ac10__resolved_recurrence__emits_created_event_with_a_new_incident_id() -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    _seed_sample(store, _sample(sampled_at=T0, cpu=95.0))
+    first_sink = _RecordingSink()
+    first_service = _make_service(store, incident_event_sink=first_sink)
+    first_service.ingest(_command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)))
+    resolved_incident = _incidents(store)[0]
+    assert resolved_incident.status is IncidentStatus.OPEN
+
+    resolve_at = T0 + timedelta(seconds=40)
+    resolve_uow = InMemoryUnitOfWork(store)
+    resolve_uow.incidents.resolve(resolved_incident.incident_id, resolve_at)
+    resolve_uow.commit()
+
+    second_sink = _RecordingSink()
+    second_service = _make_service(store, incident_event_sink=second_sink)
+    recurrence_observed_at = T0 + timedelta(seconds=90)
+
+    second_service.ingest(
+        _command(
+            sample=_sample(sampled_at=recurrence_observed_at, cpu=95.0),
+            observed_at=recurrence_observed_at,
+        )
+    )
+
+    open_incidents = [i for i in _incidents(store) if i.status is IncidentStatus.OPEN]
+    assert len(open_incidents) == 1
+    new_incident = open_incidents[0]
+    assert new_incident.incident_id != resolved_incident.incident_id
+
+    assert len(second_sink.calls) == 1
+    event = second_sink.calls[0]
+    assert event.outcome is IncidentUpsertOutcome.CREATED
+    assert event.incident_id == new_incident.incident_id
+    assert event.incident_id != resolved_incident.incident_id

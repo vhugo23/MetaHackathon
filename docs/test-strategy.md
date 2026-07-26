@@ -90,7 +90,7 @@ collaborators.
 | | |
 |---|---|
 | **Tested** | `application` use-case services — chiefly `ConfigIngestionService`, which directly coordinates `PolicyEvaluator`, `IncidentFactory`, and `IncidentRepository` (architecture.md Section 4; there is no separate `PolicyEvaluationService` or `IncidentService`), plus `IncidentQueryService` — wired to **real in-memory repositories** and real adapters/detection services — orchestration, not transport. |
-| **Mocked** | Nothing, except an in-memory log recorder in place of raw stdout capture (Section 13). |
+| **Mocked** | Nothing, except an injected recording `IncidentEventSink` test double in place of the real `StdoutIncidentEventSink` (Section 13; implemented as of Day 10). |
 | **Real components** | In-memory repositories (test doubles for the SQLAlchemy interfaces, ADR-0002), adapters, detection services. |
 | **Speed** | Single-digit ms/test; full suite in a few seconds. |
 | **Location** | `tests/integration/application/`. |
@@ -957,47 +957,77 @@ Tests architecture.md Section 5's contract:
   **`IncidentUpsertResult.outcome` itself is asserted directly only by the
   repository conformance tests (Section 9)**, which call
   `upsert_open_incident` without going through `ConfigIngestionService`.
-- **Proposed, not implemented — log emitted per outcome, only after
-  commit.** `test_config_ingestion_service__created_incident__emits_created_log_after_commit`
-  and `test_config_ingestion_service__updated_incident__emits_updated_log_after_commit`
-  are **future test-plan entries only** — neither function currently
-  exists in the repository, neither is collected by pytest (`pytest -k
-  "emits_created_log_after_commit or emits_updated_log_after_commit"
-  --collect-only` → "no tests collected"), and no `emit_json_log`
-  implementation or in-memory log recorder exists to test against (the
-  `observability` package is an empty stub). If/when AC-10 is
-  implemented, each would capture the log recorder (Section 5, itself
-  also not yet built) and assert one JSON line with `incident_id`,
-  `device_id`, `rule_ref`, `severity`, `status`, `outcome`, `timestamp`,
-  emitted only after `ingest` returns successfully — explicitly
-  **integration-level**, not something the HTTP E2E test (Section 7)
-  could claim, since it never inspects stdout.
-- **Proposed, not implemented — commit failure suppresses the log.**
-  `test_config_ingestion_service__commit_failure__rolls_back_and_emits_no_incident_log`
-  is likewise a **future test-plan entry only** — it does not currently
-  exist and is not collected by pytest. Its intended design: using a
-  `FailingUnitOfWork` (Section 9) so `commit()` raises *after*
-  `PolicyEvaluator` already found a violation, the test would assert the
-  log recorder captured **zero** lines, and — inspecting `uow.incidents`
-  on that **same** `FailingUnitOfWork` instance after `rollback()`, not a
-  separate, unrelated `IncidentRepository` that would trivially be empty
-  and prove nothing — confirm no row remains for that fingerprint, backing
-  architecture.md Section 12's "no log without a successful commit" rule.
+- **Implemented as of Day 10 (Gates AC-10A–AC-10F) — log emitted per
+  outcome, only after commit.** `meta_rne.observability.incident_events`
+  provides `IncidentLogEvent`/`IncidentEventSink`/`StdoutIncidentEventSink`
+  (unit-tested directly in `tests/unit/observability/
+  test_incident_events.py`: event construction from `IncidentUpsertResult`,
+  exact seven-key JSON serialization/order, canonical trailing-`Z`
+  timestamp formatting, and the stdout sink's one-line/flush behavior via
+  an injected `io.StringIO`, never `caplog`/`capsys`). Both
+  `ConfigIngestionService` and `TelemetryIngestionService` accept an
+  injectable `incident_event_sink`; `tests/unit/application/
+  test_config_ingestion_service.py` and `tests/unit/application/
+  test_telemetry_ingestion_service.py` each prove, against a real
+  `InMemoryUnitOfWork` and a local recording-sink test double: one
+  `CREATED` event on first detection, one `UPDATED` event on repeat
+  (scoped per-ingestion, never conflated across calls), zero events for a
+  no-violation/no-anomaly ingestion, event emission strictly after the
+  existing lifecycle-spy's commit count reaches 1 (proving post-commit
+  ordering), and — for telemetry — three ordered events
+  (`RULE-CPU-HIGH` → `RULE-LINK-FLAP` → `RULE-BGP-DOWN`) matched to their
+  durable incidents by `incident_id`, never by `list_all()`'s positional
+  order.
+- **Implemented as of Day 10 — commit failure suppresses the log.**
+  The same two unit-test files prove zero events emitted when policy
+  evaluation, incident-candidate/mapping construction, the incident
+  upsert itself, or `uow.commit()` fails — using the existing
+  `_LifecycleSpyUnitOfWork`/`_IncidentsSpy`/`_RuleEngineSpy` doubles
+  (Section 9), never a new mocking framework — backing architecture.md
+  Section 12/13's "no log without a successful commit" rule.
+- **Implemented as of Day 10 — best-effort delivery, one failure never
+  blocks another event.** Both unit-test files also prove: a sink whose
+  `emit()` raises an ordinary `Exception` never propagates, never rolls
+  back the already-committed result, and never changes the returned
+  `ConfigIngestionResult`/`TelemetryIngestionResult`; and, for a
+  multi-event ingestion, a sink failing on one event still attempts every
+  later event in deterministic order.
+- **Implemented as of Day 10 — PostgreSQL application-service
+  acceptance.** `tests/integration/application/
+  test_config_ingestion_postgres.py` and `tests/integration/application/
+  test_telemetry_ingestion_service_postgres.py` re-prove every behavior
+  above (`CREATED`/`UPDATED`/no-event/rollback/sink-failure/three-ordered-
+  events) against a real `SqlAlchemyUnitOfWork`, using the same injected
+  recording-sink pattern.
+- **Implemented as of Day 10 — in-memory and PostgreSQL HTTP
+  acceptance.** `tests/contract/api/test_config_ingestion_api.py` and
+  `tests/contract/api/test_telemetry_ingestion_api.py` (in-memory), plus
+  `tests/integration/api/test_api_postgres.py` (real PostgreSQL), drive
+  the real, unmodified default `StdoutIncidentEventSink` through
+  `TestClient`, capturing its output with pytest's `capfd` fixture
+  (cleared immediately before, read immediately after, the request under
+  test) and parsing it as JSON Lines — proving `CREATED`, `UPDATED`, no-
+  event, no-event-on-transaction-failure, three-ordered-telemetry-events,
+  and (PostgreSQL only) resolved-incident recurrence emitting `CREATED`
+  with a new `incident_id`, entirely without any `create_app`/API
+  composition seam. Sink-failure resilience at the HTTP layer is proven
+  by monkeypatching `StdoutIncidentEventSink.emit` directly (never
+  `sys.stdout`) to raise, then asserting the response still succeeds.
+  Every test also confirms the exact response body for
+  `POST /devices/{device_id}/config` and
+  `POST /devices/{device_id}/telemetry` is unchanged — AC-10 events never
+  appear in any HTTP response.
 
-**Day 5A implementation note.** The two `test_config_ingestion_service__
-..._log_after_commit`/`..._emits_no_incident_log` cases above describe the
-eventual full-slice suite once structured logging exists (architecture.md
-Section 4's step 12, deferred — see "Documentation corrections applied for
-Day 5A" in CLAUDE.md); Day 5A does not implement logging, so no such tests
-exist yet. Every other guarantee in this section — satisfied policy
-yielding zero counts, `ConfigIngestionResult` distinguishing created from
-updated, `occurrence_count` incrementing on a repeat, exactly one row
-persisting — is covered now, with different (more granular) test names
-than sketched above, in `tests/unit/application/
-test_config_ingestion_service.py` (against a real `InMemoryUnitOfWork`)
-and `tests/integration/application/test_config_ingestion_postgres.py`
-(three focused tests proving atomic commit and atomic rollback-after-
-late-failure against real PostgreSQL). `tests/unit/application/
+**Day 5A historical note (superseded by Day 10 above).** At Day 5A,
+structured logging did not exist (architecture.md Section 4's step 12 was
+deferred — see "Documentation corrections applied for Day 5A" in
+CLAUDE.md), so no logging tests existed yet; only the non-logging
+guarantees in this section (satisfied policy yielding zero counts,
+`ConfigIngestionResult` distinguishing created from updated,
+`occurrence_count` incrementing on a repeat, exactly one row persisting)
+were covered at that time, in `tests/unit/application/
+test_config_ingestion_service.py` and `tests/integration/application/
+test_config_ingestion_postgres.py`. `tests/unit/application/
 test_config_ingestion_models.py` covers `IngestConfigurationCommand`/
 `ConfigIngestionResult` validation directly.
 
@@ -1159,9 +1189,9 @@ alongside them (Section 14).
 | 10 | `test_config_ingestion_service__repeated_finding__reports_updated_count` — second, identical submission; `incidents_created == 0, incidents_updated == 1`, `occurrence_count == 2`, still one row (AC-11) | Integration | none | `tests/integration/application/test_config_ingestion_service.py` |
 | 11 | `GET /incidents` returns the created incident | Contract (+ E2E) | none | `tests/contract/api/test_incidents_api.py`, `e2e/vertical-slice/` |
 | 12 | `GET /incidents` returns an empty collection when no incidents exist | Contract | none | `tests/contract/api/test_incidents_api.py` |
-| 13 | **PROPOSED, NOT IMPLEMENTED — not collected by pytest.** `test_config_ingestion_service__created_incident__emits_created_log_after_commit` (AC-10) | Integration (future) | in-memory log recorder (not yet built) | `tests/integration/application/test_config_ingestion_service.py` |
-| 14 | **PROPOSED, NOT IMPLEMENTED — not collected by pytest.** `test_config_ingestion_service__updated_incident__emits_updated_log_after_commit` (AC-10) | Integration (future) | in-memory log recorder (not yet built) | `tests/integration/application/test_config_ingestion_service.py` |
-| 15 | **PROPOSED, NOT IMPLEMENTED — not collected by pytest.** `test_config_ingestion_service__commit_failure__rolls_back_and_emits_no_incident_log` | Integration (future) | `FailingUnitOfWork` | `tests/integration/application/test_config_ingestion_service.py` |
+| 13 | **Implemented as of Day 10 (Gate AC-10B).** `test_ac10__created_incident__emits_one_created_event` (AC-10) — one `CREATED` event, matching the durable incident's `incident_id`/`device_id`/`rule_ref`/`severity`/`status`/`last_seen_at` | Unit | injected recording `IncidentEventSink` double | `tests/unit/application/test_config_ingestion_service.py` |
+| 14 | **Implemented as of Day 10 (Gate AC-10B).** `test_ac10__updated_incident__emits_exactly_one_updated_event_for_that_ingestion` (AC-10) — one `UPDATED` event scoped to the second ingestion only | Unit | injected recording `IncidentEventSink` double | `tests/unit/application/test_config_ingestion_service.py` |
+| 15 | **Implemented as of Day 10 (Gate AC-10B).** `test_failure__commit_failure__emits_no_event` — a failing `_LifecycleSpyUnitOfWork.commit()` yields zero recorded events | Unit | `_LifecycleSpyUnitOfWork`, injected recording `IncidentEventSink` double | `tests/unit/application/test_config_ingestion_service.py` |
 | 16 | Controlled persistence failure — `POST` with a hand-written failing `UnitOfWork` returns 500 / `persistence_error`, no database detail leaked (Day 5B: not `PERSISTENCE_ERROR`) | Contract | hand-written failing `UnitOfWork` (fails on `commit()`) | `tests/contract/api/test_config_ingestion_api.py` |
 | 17 | Structured invalid-input response — missing `vendor` or empty body returns 422 via FastAPI's own `RequestValidationError` body (Day 5B: no custom envelope/code) | Contract | none | `tests/contract/api/test_config_ingestion_api.py` |
 | 18 | Unexpected exception returns a generic production 500, never a raw stack trace (Day 5B: no custom `INTERNAL_ERROR` handler — FastAPI's own unmapped-exception behavior, asserted via `TestClient(..., raise_server_exceptions=False)`) | Contract | hand-written failing `UnitOfWork` | `tests/contract/api/test_config_ingestion_api.py` |
@@ -1218,7 +1248,7 @@ test("should create and surface an incident for a missing required ACL", async (
 | AC-07 | `RuleEngine` RULE-CPU-HIGH unit tests (Day 9b) + `TelemetryIngestionService`/API AC-07 acceptance tests (Day 9c, Section 24) |
 | AC-08 | `RuleEngine` RULE-LINK-FLAP unit tests (Day 9b) + `TelemetryIngestionService`/API AC-08 acceptance tests (Day 9c, Section 24) |
 | AC-09 | `RuleEngine` RULE-BGP-DOWN unit tests (Day 9b) + `TelemetryIngestionService`/API AC-09 acceptance tests (Day 9c, Section 24) |
-| AC-10 | Not proven — #13/#14 above are proposed, not-yet-implemented test-plan entries; no `observability`/structured-logging implementation exists (Section 24 also documents this as deferred) |
+| AC-10 | **Proven as of Day 10** — #13/#14/#15 above, plus the full four-layer verification described in Section 13 above and the new Day 10 entry in Section 24: unit/in-memory (`test_config_ingestion_service.py`, `test_telemetry_ingestion_service.py`, `test_incident_events.py`), PostgreSQL application-service (`test_config_ingestion_postgres.py`, `test_telemetry_ingestion_service_postgres.py`), in-memory HTTP (`test_config_ingestion_api.py`, `test_telemetry_ingestion_api.py`), and PostgreSQL HTTP (`test_api_postgres.py`) |
 | AC-11 | #10, #19, Section 9's repository-level concurrency test |
 | AC-12 | #16, #17, #18, and the remaining rows of Section 14's error table |
 | AC-13 | CI gates, Section 15 |
@@ -1690,4 +1720,57 @@ evidence assertions per rule.
 **Explicitly not proven by this gate:** AC-10 (structured JSON log line on
 incident create/update — no `observability`/structured-logging module
 exists), a deterministic telemetry simulator, and frontend rendering of
-anomaly incidents (no consumer exists).
+anomaly incidents (no consumer exists). **AC-10 is proven by Day 10,
+Section 25 below** — this Day 9c gate's own totals (1,033/265/1,298/63
+source files) are historical and are not restated here.
+
+---
+
+## 25. Structured Incident Event Logging Verification (Day 10)
+
+Supersedes this document's earlier AC-10 status (Sections 13, 19, 19.1,
+and Section 24 above) — AC-10 is no longer "proposed" or "not proven."
+Verified across gates AC-10A through AC-10F, on top of the Day 9c
+checkpoint.
+
+| Layer | Purpose |
+|---|---|
+| `IncidentLogEvent`/`StdoutIncidentEventSink` unit tests | Event construction from `IncidentUpsertResult`, exact seven-key JSON serialization and order, canonical trailing-`Z` timestamp formatting, one-line/flush stdout-sink behavior (injected `io.StringIO`, never `caplog`/`capsys`) |
+| `ConfigIngestionService`/`TelemetryIngestionService` unit tests | Injected recording-sink double proves `CREATED`/`UPDATED`/no-event outcomes, strict post-commit ordering, best-effort per-event failure isolation, and (telemetry) three-event deterministic rule ordering matched to durable incidents by `incident_id` |
+| PostgreSQL application-service acceptance | The same behaviors re-proven against a real `SqlAlchemyUnitOfWork` |
+| In-memory HTTP acceptance | Real, unmodified default `StdoutIncidentEventSink` output captured via pytest's `capfd` through `TestClient`, parsed as JSON Lines |
+| PostgreSQL HTTP acceptance | The same `capfd` technique through real HTTP and real PostgreSQL, including three-ordered-telemetry-events and resolved-incident-recurrence-emits-CREATED scenarios |
+
+**Full verification matrix, independently re-run this gate (all passed):**
+
+| Check | Result |
+|---|---|
+| Backend `ruff format --check .` | Clean |
+| Backend `ruff check .` | All checks passed |
+| Backend `mypy src` | Success, 64 source files — the authoritative project static check |
+| Backend `pytest -m "not postgres"` | 1,081 passed, 281 deselected |
+| Backend `pytest -m postgres` (disposable Compose Postgres) | 281 passed, 1,081 deselected |
+
+**Independently verified combined backend-test total as of Day 10:**
+
+| Layer | Count |
+|---|---|
+| Backend `pytest` | 1,362 (1,081 non-`postgres` + 281 `postgres`) |
+
+Frontend Vitest, Python orchestration-helper, and Playwright browser
+counts are unchanged from Day 9c (Section 24) — Day 10 is backend-only, no
+frontend/browser/CI file changed.
+
+**Explicitly proven by this gate:** AC-10 (structured JSON log line on
+incident create/update), for both `POLICY_VIOLATION` and `ANOMALY`
+incidents, at all four layers above — `CREATED`, `UPDATED`, no-event
+(no-violation/no-anomaly and transaction-failure/rollback), best-effort
+sink-failure isolation, deterministic multi-event ordering, and resolved-
+incident recurrence emitting `CREATED` with a new `incident_id`. No API
+schema or response body changed anywhere in this gate.
+
+**Explicitly not proven by this gate:** delivery retries, guaranteed/
+at-least-once delivery, fallback queues, background workers, external log
+aggregation, metrics, logging-health monitoring, a deterministic telemetry
+simulator, and frontend rendering of AC-10 events (out of scope — this is
+a stdout-only backend side effect with no frontend consumer).

@@ -10,7 +10,7 @@ genuine red-green-refactor, not retrofitted tests.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -31,9 +31,10 @@ from meta_rne.domain.config import (
     VendorType,
 )
 from meta_rne.domain.errors import ParseErrorCode, UnsupportedVendorError
-from meta_rne.domain.incident import IncidentSource, IncidentStatus
+from meta_rne.domain.incident import IncidentSource, IncidentStatus, IncidentUpsertOutcome
 from meta_rne.domain.policy import ConfigurationPolicy, RequiredAclRule, Severity, ViolationType
 from meta_rne.domain.snapshot import compute_raw_text_hash
+from meta_rne.observability import IncidentLogEvent
 from meta_rne.persistence.errors import DeviceConflictError, SnapshotAlreadyExistsError
 from meta_rne.persistence.memory.policy_repository import InMemoryConfigurationPolicyRepository
 from meta_rne.persistence.memory.store import InMemoryStore
@@ -200,6 +201,48 @@ def _seed_policies(store: InMemoryStore, *policies: ConfigurationPolicy) -> None
     InMemoryConfigurationPolicyRepository(store).seed_if_missing(policies)
 
 
+@dataclass
+class _RecordingSink:
+    """A plain recording double for ``IncidentEventSink`` — structural typing
+    only, never a subclass, proving the protocol needs no inheritance."""
+
+    calls: list[IncidentLogEvent] = field(default_factory=list)
+
+    def emit(self, event: IncidentLogEvent) -> None:
+        self.calls.append(event)
+
+
+@dataclass
+class _CommitOrderRecordingSink:
+    """Records the enclosing ``_LifecycleSpyUnitOfWork``'s commit/rollback
+    counts at the exact moment each event is emitted, proving emission
+    happens strictly after commit, never before."""
+
+    counts: _LifecycleCounts
+    snapshots: list[tuple[int, int]] = field(default_factory=list)
+
+    def emit(self, event: IncidentLogEvent) -> None:
+        self.snapshots.append((self.counts.commit, self.counts.rollback))
+
+
+@dataclass
+class _SelectivelyFailingSink:
+    """Raises on the given zero-indexed ``emit`` calls, recording every
+    attempted event (including the ones it raises for) so a test can prove
+    later events are still attempted after an earlier one fails."""
+
+    fail_on_indices: frozenset[int]
+    attempted: list[IncidentLogEvent] = field(default_factory=list)
+    succeeded: list[IncidentLogEvent] = field(default_factory=list)
+
+    def emit(self, event: IncidentLogEvent) -> None:
+        index = len(self.attempted)
+        self.attempted.append(event)
+        if index in self.fail_on_indices:
+            raise RuntimeError(f"sink boom on event index {index}")
+        self.succeeded.append(event)
+
+
 def _make_service(
     store: InMemoryStore,
     *,
@@ -207,6 +250,7 @@ def _make_service(
     snapshot_id_factory: Callable[[], str] | None = None,
     policy_evaluator: Callable[..., Any] | None = None,
     incident_candidate_factory: Callable[..., Any] | None = None,
+    incident_event_sink: Any = None,
 ) -> ConfigIngestionService:
     kwargs: dict[str, Any] = {
         "unit_of_work_factory": lambda: InMemoryUnitOfWork(store),
@@ -218,6 +262,8 @@ def _make_service(
         kwargs["policy_evaluator"] = policy_evaluator
     if incident_candidate_factory is not None:
         kwargs["incident_candidate_factory"] = incident_candidate_factory
+    if incident_event_sink is not None:
+        kwargs["incident_event_sink"] = incident_event_sink
     return ConfigIngestionService(**kwargs)
 
 
@@ -847,3 +893,263 @@ def test_cross_vendor__cisco_and_arista_devices__produce_equivalent_missing_acl_
     assert cisco_incident.affected_resource != arista_incident.affected_resource
     assert cisco_incident.incident_id != arista_incident.incident_id
     assert cisco_incident.fingerprint != arista_incident.fingerprint
+
+
+# --- AC-10: structured incident events (Gate AC-10B) -------------------------
+
+
+def test_ac10__created_incident__emits_one_created_event() -> None:
+    store = InMemoryStore()
+    _seed_policies(store, _policy_a())
+    sink = _RecordingSink()
+    service = _make_service(store, snapshot_id_factory=lambda: "snap-1", incident_event_sink=sink)
+
+    service.ingest(_command(raw_config_text=_MISSING_ACL_RAW_CONFIG))
+
+    incident = InMemoryUnitOfWork(store).incidents.list_all()[0]
+    assert len(sink.calls) == 1
+    event = sink.calls[0]
+    assert event.incident_id == incident.incident_id
+    assert event.device_id == DEVICE_ID
+    assert event.rule_ref == "policy-a-acl-external-in"
+    assert event.severity == Severity.MEDIUM
+    assert event.status is IncidentStatus.OPEN
+    assert event.outcome is IncidentUpsertOutcome.CREATED
+    assert event.timestamp == incident.last_seen_at
+
+
+def test_ac10__updated_incident__emits_exactly_one_updated_event_for_that_ingestion() -> None:
+    store = InMemoryStore()
+    _seed_policies(store, _policy_a())
+    first_sink = _RecordingSink()
+    ids = iter(["snap-1", "snap-2"])
+    service = _make_service(
+        store, snapshot_id_factory=lambda: next(ids), incident_event_sink=first_sink
+    )
+    service.ingest(_command(raw_config_text=_MISSING_ACL_RAW_CONFIG, observed_at=T0))
+    assert len(first_sink.calls) == 1
+    assert first_sink.calls[0].outcome is IncidentUpsertOutcome.CREATED
+
+    # A fresh sink/service pair proves the second ingestion's emission
+    # independently, never conflated with the first ingestion's event.
+    second_sink = _RecordingSink()
+    second_service = ConfigIngestionService(
+        unit_of_work_factory=lambda: InMemoryUnitOfWork(store),
+        adapter_registry=AdapterRegistry([CiscoAdapter()]),
+        snapshot_id_factory=lambda: next(ids),
+        incident_event_sink=second_sink,
+    )
+
+    second_service.ingest(_command(raw_config_text=_MISSING_ACL_RAW_CONFIG, observed_at=T1))
+
+    incident = InMemoryUnitOfWork(store).incidents.list_all()[0]
+    assert len(second_sink.calls) == 1
+    event = second_sink.calls[0]
+    assert event.outcome is IncidentUpsertOutcome.UPDATED
+    assert event.incident_id == incident.incident_id
+    assert event.timestamp == incident.last_seen_at
+    assert event.timestamp == T1
+
+
+def test_ac10__event_emission__happens_strictly_after_commit() -> None:
+    store = InMemoryStore()
+    _seed_policies(store, _policy_a())
+    counts = _LifecycleCounts()
+    sink = _CommitOrderRecordingSink(counts=counts)
+    service = ConfigIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts),
+        adapter_registry=AdapterRegistry([CiscoAdapter()]),
+        snapshot_id_factory=lambda: "snap-1",
+        incident_event_sink=sink,
+    )
+
+    service.ingest(_command(raw_config_text=_MISSING_ACL_RAW_CONFIG))
+
+    assert sink.snapshots == [(1, 0)]
+
+
+def test_ac10__no_violations__emits_no_event() -> None:
+    store = InMemoryStore()
+    sink = _RecordingSink()
+    service = _make_service(store, snapshot_id_factory=lambda: "snap-1", incident_event_sink=sink)
+
+    result = service.ingest(_command())
+
+    assert result.violations_detected == 0
+    assert sink.calls == []
+
+
+def test_ac10__multiple_violations__emits_one_event_per_result_in_order_after_one_commit() -> None:
+    store = InMemoryStore()
+    _seed_policies(store, _policy_a(), _policy_b())
+    counts = _LifecycleCounts()
+    sink = _CommitOrderRecordingSink(counts=counts)
+    service = ConfigIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts),
+        adapter_registry=AdapterRegistry([CiscoAdapter()]),
+        snapshot_id_factory=lambda: "snap-1",
+        incident_event_sink=sink,
+    )
+
+    service.ingest(_command(raw_config_text=_MULTI_VIOLATION_RAW_CONFIG))
+
+    assert counts.commit == 1
+    # Both events observed the same single commit having already happened,
+    # and neither observed a rollback.
+    assert sink.snapshots == [(1, 0), (1, 0)]
+
+
+def test_ac10__multiple_violations__event_rule_refs_match_deterministic_upsert_order() -> None:
+    store = InMemoryStore()
+    _seed_policies(store, _policy_a(), _policy_b())
+    sink = _RecordingSink()
+    service = _make_service(store, snapshot_id_factory=lambda: "snap-1", incident_event_sink=sink)
+
+    service.ingest(_command(raw_config_text=_MULTI_VIOLATION_RAW_CONFIG))
+
+    assert [event.rule_ref for event in sink.calls] == [
+        "policy-a-acl-external-in",
+        "policy-b-acl-mgmt-in",
+    ]
+    assert all(event.outcome is IncidentUpsertOutcome.CREATED for event in sink.calls)
+
+
+def test_failure__policy_evaluator_failure__emits_no_event() -> None:
+    store = InMemoryStore()
+    sink = _RecordingSink()
+
+    def failing_evaluator(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("evaluator boom")
+
+    service = _make_service(
+        store,
+        snapshot_id_factory=lambda: "snap-1",
+        policy_evaluator=failing_evaluator,
+        incident_event_sink=sink,
+    )
+
+    with pytest.raises(RuntimeError, match="evaluator boom"):
+        service.ingest(_command())
+
+    assert sink.calls == []
+
+
+def test_failure__incident_factory_failure__emits_no_event() -> None:
+    store = InMemoryStore()
+    _seed_policies(store, _policy_a())
+    sink = _RecordingSink()
+
+    def failing_factory(violation: Any) -> Any:
+        raise RuntimeError("incident factory boom")
+
+    service = _make_service(
+        store,
+        snapshot_id_factory=lambda: "snap-1",
+        incident_candidate_factory=failing_factory,
+        incident_event_sink=sink,
+    )
+
+    with pytest.raises(RuntimeError, match="incident factory boom"):
+        service.ingest(_command(raw_config_text=_MISSING_ACL_RAW_CONFIG))
+
+    assert sink.calls == []
+
+
+def test_failure__incident_upsert_failure__rolls_back_and_emits_no_event() -> None:
+    store = InMemoryStore()
+    _seed_policies(store, _policy_a())
+    sink = _RecordingSink()
+
+    def mismatched_observed_at_factory(violation: Any) -> Any:
+        candidate = IncidentFactory.build_candidate(violation)
+        return replace(candidate, observed_at=candidate.observed_at - timedelta(seconds=1))
+
+    service = _make_service(
+        store,
+        snapshot_id_factory=lambda: "snap-1",
+        incident_candidate_factory=mismatched_observed_at_factory,
+        incident_event_sink=sink,
+    )
+
+    with pytest.raises(ValueError, match="observed_at"):
+        service.ingest(_command(raw_config_text=_MISSING_ACL_RAW_CONFIG))
+
+    assert sink.calls == []
+    assert InMemoryUnitOfWork(store).incidents.list_all() == ()
+
+
+def test_failure__commit_failure__emits_no_event() -> None:
+    store = InMemoryStore()
+    _seed_policies(store, _policy_a())
+    counts = _LifecycleCounts()
+    commit_error = RuntimeError("commit boom")
+    sink = _RecordingSink()
+    service = ConfigIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(
+            InMemoryUnitOfWork(store), counts, _fail_commit=commit_error
+        ),
+        adapter_registry=AdapterRegistry([CiscoAdapter()]),
+        snapshot_id_factory=lambda: "snap-1",
+        incident_event_sink=sink,
+    )
+
+    with pytest.raises(RuntimeError, match="commit boom"):
+        service.ingest(_command(raw_config_text=_MISSING_ACL_RAW_CONFIG))
+
+    assert sink.calls == []
+
+
+def test_ac10__sink_failure_after_commit__is_swallowed_and_does_not_affect_result() -> None:
+    store = InMemoryStore()
+    _seed_policies(store, _policy_a())
+    counts = _LifecycleCounts()
+
+    class _AlwaysFailingSink:
+        def emit(self, event: IncidentLogEvent) -> None:
+            raise RuntimeError("sink boom")
+
+    service = ConfigIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts),
+        adapter_registry=AdapterRegistry([CiscoAdapter()]),
+        snapshot_id_factory=lambda: "snap-1",
+        incident_event_sink=_AlwaysFailingSink(),
+    )
+
+    result = service.ingest(_command(raw_config_text=_MISSING_ACL_RAW_CONFIG))
+
+    assert result.violations_detected == 1
+    assert result.incidents_created == 1
+    assert result.incidents_updated == 0
+    assert counts.commit == 1
+    assert counts.rollback == 0
+    assert counts.close == 1
+    incidents = InMemoryUnitOfWork(store).incidents.list_all()
+    assert len(incidents) == 1
+    assert incidents[0].status is IncidentStatus.OPEN
+
+
+def test_ac10__sink_fails_for_one_of_several_events__continues_and_isolates_the_failure() -> None:
+    store = InMemoryStore()
+    _seed_policies(store, _policy_a(), _policy_b())
+    counts = _LifecycleCounts()
+    sink = _SelectivelyFailingSink(fail_on_indices=frozenset({0}))
+    service = ConfigIngestionService(
+        unit_of_work_factory=lambda: _LifecycleSpyUnitOfWork(InMemoryUnitOfWork(store), counts),
+        adapter_registry=AdapterRegistry([CiscoAdapter()]),
+        snapshot_id_factory=lambda: "snap-1",
+        incident_event_sink=sink,
+    )
+
+    result = service.ingest(_command(raw_config_text=_MULTI_VIOLATION_RAW_CONFIG))
+
+    assert result.violations_detected == 2
+    assert result.incidents_created == 2
+    assert counts.commit == 1
+    assert counts.rollback == 0
+    # Both events were attempted, in deterministic order, despite the first
+    # one raising; only the second (non-failing) one is in `succeeded`.
+    assert [event.rule_ref for event in sink.attempted] == [
+        "policy-a-acl-external-in",
+        "policy-b-acl-mgmt-in",
+    ]
+    assert [event.rule_ref for event in sink.succeeded] == ["policy-b-acl-mgmt-in"]

@@ -10,6 +10,7 @@ late application-layer failure.
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,8 +25,9 @@ from meta_rne.application.config_ingestion import ConfigIngestionService
 from meta_rne.application.models import IngestConfigurationCommand
 from meta_rne.detection.incident_factory import IncidentFactory
 from meta_rne.domain.config import AclDirection, NormalizedBgpNeighbor, VendorType
-from meta_rne.domain.incident import IncidentStatus
+from meta_rne.domain.incident import IncidentStatus, IncidentUpsertOutcome
 from meta_rne.domain.policy import ConfigurationPolicy, RequiredAclRule, Severity
+from meta_rne.observability import IncidentLogEvent
 from meta_rne.persistence.seeds import build_slice1_policies
 from meta_rne.persistence.sqlalchemy.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -106,6 +108,7 @@ def _service(
     *,
     snapshot_id_factory: Callable[[], str],
     incident_candidate_factory: Callable[..., Any] | None = None,
+    incident_event_sink: Any = None,
 ) -> ConfigIngestionService:
     kwargs: dict[str, Any] = {
         "unit_of_work_factory": lambda: SqlAlchemyUnitOfWork(session_factory),
@@ -114,7 +117,21 @@ def _service(
     }
     if incident_candidate_factory is not None:
         kwargs["incident_candidate_factory"] = incident_candidate_factory
+    if incident_event_sink is not None:
+        kwargs["incident_event_sink"] = incident_event_sink
     return ConfigIngestionService(**kwargs)
+
+
+@dataclass
+class _RecordingSink:
+    """A plain recording double for ``IncidentEventSink`` — structural
+    typing only, matching the unit-test suite's convention (Gate AC-10D:
+    PostgreSQL application-service acceptance, local to this file only)."""
+
+    calls: list[IncidentLogEvent] = field(default_factory=list)
+
+    def emit(self, event: IncidentLogEvent) -> None:
+        self.calls.append(event)
 
 
 def test_config_ingestion_postgres__missing_acl__atomically_commits_device_snapshot_and_incident(
@@ -284,4 +301,171 @@ def test_config_ingestion_postgres__arista_leaf02_policy__creates_real_open_inci
     assert leaf_incident.severity == Severity.MEDIUM
     assert leaf_incident.evidence.expected_acl_name == "ACL-EXTERNAL-IN"
     assert leaf_incident.evidence.direction == AclDirection.IN
+    verify_uow.close()
+
+
+# --- AC-10D: structured incident events through real PostgreSQL -------------
+
+
+def test_config_ingestion_postgres__missing_acl__emits_one_created_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_policies(sqlalchemy_session_factory, _policy_a())
+    sink = _RecordingSink()
+    service = _service(
+        sqlalchemy_session_factory, snapshot_id_factory=lambda: "snap-1", incident_event_sink=sink
+    )
+
+    result = service.ingest(_command())
+
+    assert result.violations_detected == 1
+    assert result.incidents_created == 1
+    assert result.incidents_updated == 0
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
+    incident = incidents[0]
+    verify_uow.close()
+
+    assert len(sink.calls) == 1
+    event = sink.calls[0]
+    assert event.incident_id == incident.incident_id
+    assert event.device_id == DEVICE_ID
+    assert event.rule_ref == incident.rule_ref
+    assert event.severity == incident.severity
+    assert event.status is incident.status
+    assert event.outcome is IncidentUpsertOutcome.CREATED
+    assert event.timestamp == incident.last_seen_at
+
+
+def test_config_ingestion_postgres__repeated_ingestion__emits_one_updated_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_policies(sqlalchemy_session_factory, _policy_a())
+    ids = iter(["snap-1", "snap-2"])
+    first_sink = _RecordingSink()
+    first_service = _service(
+        sqlalchemy_session_factory,
+        snapshot_id_factory=lambda: next(ids),
+        incident_event_sink=first_sink,
+    )
+    first_service.ingest(_command(observed_at=T0))
+    assert len(first_sink.calls) == 1
+    assert first_sink.calls[0].outcome is IncidentUpsertOutcome.CREATED
+
+    # A fresh sink/service pair scopes the second ingestion's emitted events
+    # independently, never conflated with the first ingestion's event.
+    second_sink = _RecordingSink()
+    second_service = _service(
+        sqlalchemy_session_factory,
+        snapshot_id_factory=lambda: next(ids),
+        incident_event_sink=second_sink,
+    )
+
+    result = second_service.ingest(_command(observed_at=T1))
+
+    assert result.incidents_created == 0
+    assert result.incidents_updated == 1
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
+    incident = incidents[0]
+    assert incident.occurrence_count == 2
+    verify_uow.close()
+
+    assert len(second_sink.calls) == 1
+    event = second_sink.calls[0]
+    assert event.outcome is IncidentUpsertOutcome.UPDATED
+    assert event.incident_id == incident.incident_id
+    assert event.timestamp == incident.last_seen_at
+    assert event.timestamp == T1
+
+
+def test_config_ingestion_postgres__no_applicable_policy__emits_no_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    sink = _RecordingSink()
+    service = _service(
+        sqlalchemy_session_factory, snapshot_id_factory=lambda: "snap-1", incident_event_sink=sink
+    )
+
+    result = service.ingest(_command())
+
+    assert result.violations_detected == 0
+    assert sink.calls == []
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    device = verify_uow.devices.get_by_id(DEVICE_ID)
+    assert device is not None
+    assert device.current_snapshot_id == "snap-1"
+    snapshot = verify_uow.configuration_snapshots.get_by_id("snap-1")
+    assert snapshot is not None
+    verify_uow.close()
+
+
+def test_config_ingestion_postgres__late_failure_after_incident_staged__emits_no_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_policies(sqlalchemy_session_factory, _policy_a(), _policy_b())
+    call_count = 0
+
+    def flaky_factory(violation: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("forced late failure on second violation")
+        return IncidentFactory.build_candidate(violation)
+
+    sink = _RecordingSink()
+    service = _service(
+        sqlalchemy_session_factory,
+        snapshot_id_factory=lambda: "snap-1",
+        incident_candidate_factory=flaky_factory,
+        incident_event_sink=sink,
+    )
+
+    with pytest.raises(RuntimeError, match="forced late failure"):
+        service.ingest(_command(raw_config_text=_MULTI_VIOLATION_RAW_CONFIG))
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    assert verify_uow.devices.get_by_id(DEVICE_ID) is None
+    assert verify_uow.configuration_snapshots.get_by_id("snap-1") is None
+    assert verify_uow.incidents.list_all() == ()
+    verify_uow.close()
+
+    assert sink.calls == []
+
+
+def test_config_ingestion_postgres__sink_failure_after_commit__result_remains_durable(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_policies(sqlalchemy_session_factory, _policy_a())
+
+    class _AlwaysFailingSink:
+        def emit(self, event: IncidentLogEvent) -> None:
+            raise RuntimeError("sink boom")
+
+    service = _service(
+        sqlalchemy_session_factory,
+        snapshot_id_factory=lambda: "snap-1",
+        incident_event_sink=_AlwaysFailingSink(),
+    )
+
+    result = service.ingest(_command())
+
+    assert result.violations_detected == 1
+    assert result.incidents_created == 1
+    assert result.incidents_updated == 0
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    device = verify_uow.devices.get_by_id(DEVICE_ID)
+    assert device is not None
+    assert device.current_snapshot_id == "snap-1"
+    snapshot = verify_uow.configuration_snapshots.get_by_id("snap-1")
+    assert snapshot is not None
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
+    assert incidents[0].status is IncidentStatus.OPEN
     verify_uow.close()

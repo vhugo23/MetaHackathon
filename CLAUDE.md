@@ -171,6 +171,86 @@ consumption remain explicitly deferred — see "Still prohibited" below.
 
 ---
 
+**Day 10 — Structured incident event logging (AC-10), implemented across
+gates AC-10A through AC-10G, all approved, built on top of the Day 9c
+anomaly-incident checkpoint; passes the full backend verification matrix
+(1,081 non-PostgreSQL + 281 PostgreSQL tests, 1,362 combined) and supersedes
+Day 9c's "AC-10 remains deferred" statement below.**
+
+`meta_rne.observability.incident_events` (previously an empty stub) now
+defines `IncidentLogEvent` — a frozen, slotted value object with exactly
+seven fields, in this exact order: `incident_id`, `device_id`, `rule_ref`,
+`severity`, `status`, `outcome`, `timestamp`. No other field (`source`,
+`affected_resource`, `evidence`, `fingerprint`, `recommendation`,
+`occurrence_count`, `created_at`, `last_seen_at`, `resolved_at`) is ever
+included. `timestamp` is exactly the persisted `Incident.last_seen_at` —
+never a fresh clock read — serialized as canonical UTC ISO-8601 with a
+trailing `Z` (`.isoformat().replace("+00:00", "Z")`). `outcome` is exactly
+`CREATED` or `UPDATED` (the existing `IncidentUpsertOutcome` values); no
+`RESOLVED`/`DELETED`/`REOPENED` outcome exists or is ever emitted.
+`IncidentLogEvent.from_upsert_result(result: IncidentUpsertResult)` builds
+the event directly from the already-persisted `Incident` and its upsert
+outcome — no second repository query, no additional clock read.
+
+`IncidentEventSink` (a `typing.Protocol` with one `emit(event) -> None`
+method) is the injectable abstraction; `StdoutIncidentEventSink` is the
+production default — it writes one compact JSON object per `emit()` call,
+followed by one newline, then flushes, reading `sys.stdout` fresh at call
+time (never cached at construction) so test capture (`capfd`) and
+production output both work correctly. Serialization uses only the
+standard-library `json` module — no `logging` module usage, no global
+logging configuration, and no new dependency was added anywhere.
+
+Both `ConfigIngestionService` and `TelemetryIngestionService`
+(`application/config_ingestion.py`, `application/telemetry_ingestion.py`)
+gained one new, optional, append-only constructor parameter,
+`incident_event_sink: IncidentEventSink | None = None`, resolved to
+`StdoutIncidentEventSink()` via an explicit `is None` check (never
+truthiness) — no existing parameter was reordered or removed, and
+`create_app`/API composition needed no change at all, since the default
+sink already writes to real stdout automatically. Each service preserves
+every `IncidentUpsertResult` produced during its transaction (in existing
+upsert order — for telemetry, the engine's fixed `RULE-CPU-HIGH` →
+`RULE-LINK-FLAP` → `RULE-BGP-DOWN` order) and, only in the existing
+successful `else:` branch — strictly after `uow.commit()` succeeds, never
+before, never on the rollback/exception path, never from a `finally`
+block — emits one event per preserved result via a new private
+`_emit_incident_events` helper. Emission is best-effort: each event's
+construction and delivery is wrapped in its own `try/except Exception:
+pass`, so one failing event never stops later events, is never retried,
+never propagates to the caller, and never affects the already-committed
+database state, the returned `ConfigIngestionResult`/
+`TelemetryIngestionResult`, or the HTTP response. `POLICY_VIOLATION` and
+`ANOMALY` incidents share the identical seven-field event schema — no
+`source` field distinguishes them in the event itself.
+
+**No API schema or route changed.** `POST /devices/{device_id}/config`,
+`POST /devices/{device_id}/telemetry`, `GET /incidents`, and
+`POST /incidents/{incident_id}/resolve` all return exactly the same bodies
+as before — AC-10 events are a stdout-only side effect, never exposed in
+any response. **Incident resolution itself emits no AC-10 event** — proven
+directly (Gate AC-10F) by capturing zero output around a real
+`POST /incidents/{incident_id}/resolve` call; only a later recurrence (a
+fresh `upsert_open_incident` call after the prior incident was resolved)
+emits a `CREATED` event carrying the new, different `incident_id`.
+
+Verified across four layers: unit tests against a real `InMemoryUnitOfWork`
+(event model/serialization, both services' emission/ordering/rollback/
+best-effort-failure behavior); PostgreSQL application-service acceptance
+(the same behaviors against a real `SqlAlchemyUnitOfWork`, using an
+injected recording `IncidentEventSink`); in-memory HTTP acceptance (via
+`FastAPI TestClient` and pytest's `capfd`, against the real, unmodified
+default `StdoutIncidentEventSink`); and PostgreSQL HTTP acceptance (the
+same `capfd` technique through real HTTP and a real database, including
+the three-anomaly-ordering and resolved-recurrence scenarios). No
+migration was needed. Delivery retries, guaranteed/at-least-once delivery,
+fallback queues, background workers, external log aggregation, metrics,
+and logging-health monitoring remain deferred — logging is best-effort
+only. A deterministic telemetry simulator and frontend telemetry
+consumption also remain deferred, unchanged from Day 9b/9c.
+
+---
+
 **Day 9c — Anomaly-to-incident mapping and API acceptance (AC-07/AC-08/
 AC-09), implemented across gates H1 through H4A, all approved, built on
 top of the Day 9b telemetry checkpoint; passes the full backend
@@ -1236,7 +1316,9 @@ detail; drift-triggered incident creation remains prohibited/deferred.
 full detail. **Anomaly-to-incident mapping now exists as of Day 9c** —
 `GET /incidents` returns `ANOMALY` incidents alongside `POLICY_VIOLATION`
 ones, proving AC-07/AC-08/AC-09; see "Current Phase" above for the full
-detail; AC-10 (structured logging) remains deferred.
+detail. **Structured incident event logging (AC-10) now exists as of Day
+10** — see "Current Phase" above for the full detail; it is no longer
+deferred.
 All remaining items are later days, against the domain model, architecture,
 and ports already documented, with tests written first per the Development
 Rules above.

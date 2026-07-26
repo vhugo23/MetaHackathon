@@ -10,6 +10,7 @@ These prove what only a real database transaction, reached via real HTTP,
 can prove.
 """
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -31,6 +32,21 @@ from meta_rne.persistence.sqlalchemy.policy_repository import (
 from meta_rne.persistence.sqlalchemy.unit_of_work import SqlAlchemyUnitOfWork
 
 pytestmark = pytest.mark.postgres
+
+_EXPECTED_EVENT_KEY_ORDER = [
+    "incident_id",
+    "device_id",
+    "rule_ref",
+    "severity",
+    "status",
+    "outcome",
+    "timestamp",
+]
+
+
+def _json_lines(stdout: str) -> list[dict[str, object]]:
+    return [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
 
 DEVICE_ID = "spine-01"
 T0 = datetime(2026, 7, 18, 10, 0, 0, tzinfo=UTC)
@@ -706,3 +722,319 @@ def test_api_postgres__lazy_database_url_composition__creates_and_disposes_engin
         response = client.get("/incidents")
 
     assert response.status_code == 200
+
+
+# --- AC-10F: structured incident events through real HTTP + real PostgreSQL -
+
+
+def test_post_postgres__missing_acl__emits_one_created_stdout_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    _seed_slice1_policy_directly(sqlalchemy_session_factory)
+    client = _app(sqlalchemy_session_factory)
+
+    capfd.readouterr()
+    response = client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body.keys()) == {
+        "device_id",
+        "snapshot_id",
+        "normalized_config",
+        "violations_detected",
+        "incidents_created",
+        "incidents_updated",
+    }
+    assert body["incidents_created"] == 1
+    assert body["incidents_updated"] == 0
+
+    events = _json_lines(captured.out)
+    assert len(events) == 1
+    event = events[0]
+    assert list(event.keys()) == _EXPECTED_EVENT_KEY_ORDER
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
+    incident = incidents[0]
+    verify_uow.close()
+
+    assert event["incident_id"] == incident.incident_id
+    assert event["device_id"] == DEVICE_ID
+    assert event["rule_ref"] == incident.rule_ref
+    assert event["severity"] == incident.severity.value
+    assert event["status"] == "OPEN"
+    assert event["outcome"] == "CREATED"
+    assert event["timestamp"] == incident.last_seen_at.isoformat().replace("+00:00", "Z")
+
+
+def test_post_postgres__repeated_submission__emits_one_updated_stdout_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    _seed_slice1_policy_directly(sqlalchemy_session_factory)
+    ids = iter(["snap-1", "snap-2"])
+    client = _app(
+        sqlalchemy_session_factory, snapshot_id_factory=lambda: next(ids), clock=lambda: T0
+    )
+    client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    capfd.readouterr()  # discard the first request's own captured output
+
+    client2 = _app(
+        sqlalchemy_session_factory, snapshot_id_factory=lambda: "snap-2", clock=lambda: T1
+    )
+    capfd.readouterr()  # clear immediately before the second request
+
+    response = client2.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["incidents_created"] == 0
+    assert body["incidents_updated"] == 1
+
+    events = _json_lines(captured.out)
+    assert len(events) == 1
+    event = events[0]
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
+    incident = incidents[0]
+    verify_uow.close()
+
+    assert incident.occurrence_count == 2
+    assert incident.created_at == T0
+    assert incident.last_seen_at == T1
+
+    assert event["outcome"] == "UPDATED"
+    assert event["incident_id"] == incident.incident_id
+    assert event["timestamp"] == incident.last_seen_at.isoformat().replace("+00:00", "Z")
+
+
+def test_get_incidents_postgres__cpu_anomaly__emits_one_created_stdout_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    _seed_device_for_telemetry(sqlalchemy_session_factory)
+    client = _app(sqlalchemy_session_factory)
+
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=T0.isoformat(), cpu_utilization_pct=95.0),
+    )
+    capfd.readouterr()  # discard the first request's own captured output (no anomaly yet)
+
+    response = client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=T0_PLUS_30S.isoformat(), cpu_utilization_pct=96.0),
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    assert set(response.json().keys()) == {"sample", "anomalies"}
+
+    events = _json_lines(captured.out)
+    assert len(events) == 1
+    event = events[0]
+    assert list(event.keys()) == _EXPECTED_EVENT_KEY_ORDER
+    assert event["rule_ref"] == "RULE-CPU-HIGH"
+    assert event["outcome"] == "CREATED"
+    assert event["severity"] == "High"
+    assert event["status"] == "OPEN"
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    incidents = [i for i in verify_uow.incidents.list_all() if i.rule_ref == "RULE-CPU-HIGH"]
+    assert len(incidents) == 1
+    incident = incidents[0]
+    verify_uow.close()
+
+    assert event["incident_id"] == incident.incident_id
+    assert event["timestamp"] == incident.last_seen_at.isoformat().replace("+00:00", "Z")
+
+
+def test_get_incidents_postgres__repeated_cpu_anomaly__emits_one_updated_stdout_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    _seed_device_for_telemetry(sqlalchemy_session_factory)
+    clock_values = iter([T0, T0_PLUS_30S, T0_PLUS_30S + timedelta(minutes=1)])
+    client = _app(sqlalchemy_session_factory, clock=lambda: next(clock_values))
+
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=T0.isoformat(), cpu_utilization_pct=95.0),
+    )
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=T0_PLUS_30S.isoformat(), cpu_utilization_pct=96.0),
+    )
+    capfd.readouterr()  # discard everything captured before the repeated-detection request
+
+    t2 = T0_PLUS_30S + timedelta(minutes=1)
+    response = client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=t2.isoformat(), cpu_utilization_pct=97.0),
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    assert set(response.json().keys()) == {"sample", "anomalies"}
+
+    events = _json_lines(captured.out)
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "UPDATED"
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    incidents = [i for i in verify_uow.incidents.list_all() if i.rule_ref == "RULE-CPU-HIGH"]
+    assert len(incidents) == 1
+    incident = incidents[0]
+    verify_uow.close()
+
+    assert incident.occurrence_count == 2
+    assert event["incident_id"] == incident.incident_id
+    assert event["timestamp"] == incident.last_seen_at.isoformat().replace("+00:00", "Z")
+
+
+def test_telemetry_postgres__all_three_rules_trigger__emits_three_ordered_events(
+    sqlalchemy_session_factory: Callable[[], Session],
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    _seed_device_for_telemetry(sqlalchemy_session_factory)
+    client = _app(sqlalchemy_session_factory)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+
+    for offset, state in enumerate(["up", "down", "up", "down"]):
+        client.post(
+            f"/devices/{DEVICE_ID}/telemetry",
+            json=_telemetry_payload(
+                sampled_at=(T0 + timedelta(seconds=10 * offset)).isoformat(),
+                cpu_utilization_pct=50.0,
+                interface_states=[{"name": interface, "oper_state": state}],
+            ),
+        )
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(
+            sampled_at=(T0 + timedelta(seconds=40)).isoformat(),
+            cpu_utilization_pct=95.0,
+            bgp_sessions=[{"neighbor_ip": neighbor, "state": "Established"}],
+        ),
+    )
+    capfd.readouterr()  # discard everything captured before the firing request
+
+    response = client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(
+            sampled_at=(T0 + timedelta(seconds=50)).isoformat(),
+            cpu_utilization_pct=95.0,
+            interface_states=[{"name": interface, "oper_state": "up"}],
+            bgp_sessions=[{"neighbor_ip": neighbor, "state": "Idle"}],
+        ),
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    assert set(response.json().keys()) == {"sample", "anomalies"}
+
+    events = _json_lines(captured.out)
+    assert len(events) == 3
+    assert [event["rule_ref"] for event in events] == [
+        "RULE-CPU-HIGH",
+        "RULE-LINK-FLAP",
+        "RULE-BGP-DOWN",
+    ]
+    assert all(event["outcome"] == "CREATED" for event in events)
+
+    # Every event is matched to its durable incident by incident_id rather
+    # than trusting `list_all()`'s positional order for tied timestamps.
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    incidents_by_id = {
+        incident.incident_id: incident for incident in verify_uow.incidents.list_all()
+    }
+    verify_uow.close()
+    assert {event["incident_id"] for event in events} == set(incidents_by_id)
+    for event in events:
+        persisted = incidents_by_id[event["incident_id"]]
+        assert event["rule_ref"] == persisted.rule_ref
+        assert event["device_id"] == DEVICE_ID
+        assert event["status"] == "OPEN"
+        assert event["timestamp"] == persisted.last_seen_at.isoformat().replace("+00:00", "Z")
+
+
+def test_telemetry_postgres__resolved_recurrence__emits_created_event_with_new_incident_id(
+    sqlalchemy_session_factory: Callable[[], Session],
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    _seed_device_for_telemetry(sqlalchemy_session_factory)
+    t_resolve = T0_PLUS_30S + timedelta(minutes=1)
+    t_recur = T0_PLUS_30S + timedelta(minutes=2)
+    clock_values = iter([T0, T0_PLUS_30S, t_resolve, t_recur])
+    client = _app(sqlalchemy_session_factory, clock=lambda: next(clock_values))
+
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=T0.isoformat(), cpu_utilization_pct=95.0),
+    )
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=T0_PLUS_30S.isoformat(), cpu_utilization_pct=96.0),
+    )
+    resolved_incident = next(
+        i for i in client.get("/incidents").json() if i["rule_ref"] == "RULE-CPU-HIGH"
+    )
+    assert resolved_incident["status"] == "OPEN"
+
+    capfd.readouterr()  # clear immediately before the resolution request
+    resolve_response = client.post(f"/incidents/{resolved_incident['incident_id']}/resolve")
+    resolve_captured = capfd.readouterr()
+
+    assert resolve_response.status_code == 200
+    assert resolve_response.json()["status"] == "RESOLVED"
+    # Resolution is out of AC-10 scope (Gate AC-10C binding decision) — it
+    # must never emit a structured incident event.
+    assert resolve_captured.out == ""
+
+    capfd.readouterr()  # clear immediately before the recurrence request
+    response = client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_telemetry_payload(sampled_at=t_recur.isoformat(), cpu_utilization_pct=97.0),
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+
+    events = _json_lines(captured.out)
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "CREATED"
+    assert event["incident_id"] != resolved_incident["incident_id"]
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    cpu_incidents = [i for i in verify_uow.incidents.list_all() if i.rule_ref == "RULE-CPU-HIGH"]
+    verify_uow.close()
+    assert len(cpu_incidents) == 2
+    resolved = next(i for i in cpu_incidents if i.incident_id == resolved_incident["incident_id"])
+    new_incident = next(
+        i for i in cpu_incidents if i.incident_id != resolved_incident["incident_id"]
+    )
+    assert resolved.status.value == "RESOLVED"
+    assert new_incident.status.value == "OPEN"
+    assert new_incident.fingerprint == resolved.fingerprint
+
+    assert event["incident_id"] == new_incident.incident_id
+    assert event["timestamp"] == new_incident.last_seen_at.isoformat().replace("+00:00", "Z")

@@ -32,11 +32,13 @@ from meta_rne.domain.errors import ParseError
 from meta_rne.domain.incident import (
     IncidentCandidate,
     IncidentUpsertOutcome,
+    IncidentUpsertResult,
     compute_fingerprint,
 )
 from meta_rne.domain.policy import ConfigurationViolation
 from meta_rne.domain.ports import UnitOfWork
 from meta_rne.domain.snapshot import ConfigurationSnapshot, compute_raw_text_hash
+from meta_rne.observability import IncidentEventSink, IncidentLogEvent, StdoutIncidentEventSink
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,12 +64,16 @@ class ConfigIngestionService:
         incident_candidate_factory: Callable[
             [ConfigurationViolation], IncidentCandidate
         ] = IncidentFactory.build_candidate,
+        incident_event_sink: IncidentEventSink | None = None,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._adapter_registry = adapter_registry
         self._snapshot_id_factory = snapshot_id_factory
         self._policy_evaluator = policy_evaluator
         self._incident_candidate_factory = incident_candidate_factory
+        self._incident_event_sink = (
+            incident_event_sink if incident_event_sink is not None else StdoutIncidentEventSink()
+        )
 
     def _prepare(self, command: IngestConfigurationCommand) -> _PreparedIngestion:
         adapter = self._adapter_registry.resolve(command.vendor)
@@ -140,7 +146,7 @@ class ConfigIngestionService:
 
     def _evaluate_and_upsert_incidents(
         self, uow: UnitOfWork, prepared: _PreparedIngestion, observed_at: datetime
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, list[IncidentUpsertResult]]:
         policies = uow.configuration_policies.get_applicable_to_device(prepared.device_id)
         violations = self._policy_evaluator(
             prepared.device_id,
@@ -152,6 +158,7 @@ class ConfigIngestionService:
 
         created = 0
         updated = 0
+        results: list[IncidentUpsertResult] = []
         for violation in violations:
             candidate = self._incident_candidate_factory(violation)
             fingerprint = compute_fingerprint(
@@ -165,8 +172,22 @@ class ConfigIngestionService:
                 created += 1
             else:
                 updated += 1
+            results.append(result)
 
-        return len(violations), created, updated
+        return len(violations), created, updated, results
+
+    def _emit_incident_events(self, results: list[IncidentUpsertResult]) -> None:
+        """Best-effort, post-commit only (docs/architecture.md Section 13,
+        AC-10). Each result is emitted independently: one failing
+        construction/emission never stops later results from being
+        attempted, is never retried, and never propagates — structured
+        logging must not affect an already-committed outcome."""
+        for result in results:
+            try:
+                event = IncidentLogEvent.from_upsert_result(result)
+                self._incident_event_sink.emit(event)
+            except Exception:
+                pass
 
     def ingest(self, command: IngestConfigurationCommand) -> ConfigIngestionResult:
         prepared = self._prepare(command)
@@ -174,8 +195,8 @@ class ConfigIngestionService:
         uow = self._unit_of_work_factory()
         try:
             self._persist_device_and_snapshot(uow, prepared, command.observed_at)
-            violations_detected, created, updated = self._evaluate_and_upsert_incidents(
-                uow, prepared, command.observed_at
+            violations_detected, created, updated, upsert_results = (
+                self._evaluate_and_upsert_incidents(uow, prepared, command.observed_at)
             )
             uow.commit()
         except Exception as original_error:
@@ -191,6 +212,7 @@ class ConfigIngestionService:
 
             raise
         else:
+            self._emit_incident_events(upsert_results)
             uow.close()
             return ConfigIngestionResult(
                 device_id=prepared.device_id,

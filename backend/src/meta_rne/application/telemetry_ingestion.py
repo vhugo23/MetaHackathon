@@ -71,9 +71,10 @@ from meta_rne.application.models import TelemetryIngestionCommand, TelemetryInge
 from meta_rne.detection.anomaly_incident_mapper import AnomalyIncidentMapper
 from meta_rne.detection.rule_engine import RuleEngine
 from meta_rne.domain.anomaly import Anomaly
-from meta_rne.domain.incident import compute_fingerprint
+from meta_rne.domain.incident import IncidentUpsertResult, compute_fingerprint
 from meta_rne.domain.ports import UnitOfWork
 from meta_rne.domain.telemetry import TelemetrySample
+from meta_rne.observability import IncidentEventSink, IncidentLogEvent, StdoutIncidentEventSink
 
 _RETENTION_WINDOW = timedelta(minutes=5)
 _RETENTION_CAP = 100
@@ -128,9 +129,13 @@ class TelemetryIngestionService:
         self,
         unit_of_work_factory: Callable[[], UnitOfWork],
         rule_engine: _RuleEngineLike = RuleEngine,
+        incident_event_sink: IncidentEventSink | None = None,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._rule_engine = rule_engine
+        self._incident_event_sink = (
+            incident_event_sink if incident_event_sink is not None else StdoutIncidentEventSink()
+        )
 
     def ingest(self, command: TelemetryIngestionCommand) -> TelemetryIngestionResult:
         current_sample = command.sample
@@ -158,6 +163,7 @@ class TelemetryIngestionService:
 
             anomalies = self._rule_engine.evaluate(command.observed_at, evaluation_sequence)
 
+            upsert_results: list[IncidentUpsertResult] = []
             for anomaly in anomalies:
                 candidate = AnomalyIncidentMapper.build_candidate(anomaly)
                 fingerprint = compute_fingerprint(
@@ -166,7 +172,10 @@ class TelemetryIngestionService:
                     candidate.rule_ref,
                     candidate.affected_resource,
                 )
-                uow.incidents.upsert_open_incident(candidate, fingerprint, candidate.observed_at)
+                result = uow.incidents.upsert_open_incident(
+                    candidate, fingerprint, candidate.observed_at
+                )
+                upsert_results.append(result)
 
             uow.commit()
         except Exception as original_error:
@@ -182,5 +191,19 @@ class TelemetryIngestionService:
 
             raise
         else:
+            self._emit_incident_events(upsert_results)
             uow.close()
             return TelemetryIngestionResult(sample=current_sample, anomalies=tuple(anomalies))
+
+    def _emit_incident_events(self, results: list[IncidentUpsertResult]) -> None:
+        """Best-effort, post-commit only (docs/architecture.md Section 13,
+        AC-10). Each result is emitted independently: one failing
+        construction/emission never stops later results from being
+        attempted, is never retried, and never propagates — structured
+        logging must not affect an already-committed outcome."""
+        for result in results:
+            try:
+                event = IncidentLogEvent.from_upsert_result(result)
+                self._incident_event_sink.emit(event)
+            except Exception:
+                pass

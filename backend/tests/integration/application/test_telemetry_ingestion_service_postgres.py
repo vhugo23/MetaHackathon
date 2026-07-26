@@ -11,8 +11,10 @@ rows the in-memory backend would already have pruned.
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from dataclasses import fields as dataclasses_fields
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy.orm import Session
@@ -24,7 +26,7 @@ from meta_rne.detection.anomaly_incident_mapper import AnomalyIncidentMapper
 from meta_rne.domain.anomaly import RuleId
 from meta_rne.domain.config import VendorType
 from meta_rne.domain.device import Device
-from meta_rne.domain.incident import IncidentSource, compute_fingerprint
+from meta_rne.domain.incident import IncidentSource, IncidentUpsertOutcome, compute_fingerprint
 from meta_rne.domain.telemetry import (
     BgpSession,
     BgpState,
@@ -32,6 +34,7 @@ from meta_rne.domain.telemetry import (
     LinkState,
     TelemetrySample,
 )
+from meta_rne.observability import IncidentLogEvent
 from meta_rne.persistence.sqlalchemy.unit_of_work import SqlAlchemyUnitOfWork
 
 pytestmark = pytest.mark.postgres
@@ -97,10 +100,25 @@ def _seed_sample(session_factory: Callable[[], Session], sample: TelemetrySample
     uow.close()
 
 
-def _service(session_factory: Callable[[], Session]) -> TelemetryIngestionService:
-    return TelemetryIngestionService(
-        unit_of_work_factory=lambda: SqlAlchemyUnitOfWork(session_factory)
-    )
+def _service(
+    session_factory: Callable[[], Session], *, incident_event_sink: Any = None
+) -> TelemetryIngestionService:
+    kwargs: dict[str, Any] = {"unit_of_work_factory": lambda: SqlAlchemyUnitOfWork(session_factory)}
+    if incident_event_sink is not None:
+        kwargs["incident_event_sink"] = incident_event_sink
+    return TelemetryIngestionService(**kwargs)
+
+
+@dataclass
+class _RecordingSink:
+    """A plain recording double for ``IncidentEventSink`` — structural
+    typing only, matching the unit-test suite's convention (Gate AC-10D:
+    PostgreSQL application-service acceptance, local to this file only)."""
+
+    calls: list[IncidentLogEvent] = field(default_factory=list)
+
+    def emit(self, event: IncidentLogEvent) -> None:
+        self.calls.append(event)
 
 
 def test_telemetry_ingestion_postgres__missing_device__raises_and_persists_nothing(
@@ -591,3 +609,207 @@ def test_telemetry_ingestion_postgres__result_remains_sample_and_anomalies_only(
         "anomalies",
     }
     assert result.sample.cpu_utilization_pct == 95.0
+
+
+# --- AC-10D: structured incident events through real PostgreSQL -------------
+
+
+def test_telemetry_ingestion_postgres__cpu_anomaly__emits_one_created_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    _seed_sample(sqlalchemy_session_factory, _sample(sampled_at=T0, cpu=95.0))
+    sink = _RecordingSink()
+    service = _service(sqlalchemy_session_factory, incident_event_sink=sink)
+
+    result = service.ingest(
+        _command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0))
+    )
+
+    incidents = _incidents(sqlalchemy_session_factory)
+    assert len(incidents) == 1
+    incident = incidents[0]
+
+    assert len(sink.calls) == 1
+    event = sink.calls[0]
+    assert event.incident_id == incident.incident_id
+    assert event.rule_ref == "RULE-CPU-HIGH"
+    assert event.severity == incident.severity
+    assert event.status is incident.status
+    assert event.outcome is IncidentUpsertOutcome.CREATED
+    assert event.timestamp == incident.last_seen_at
+    assert {f.name for f in dataclasses_fields(TelemetryIngestionResult)} == {
+        "sample",
+        "anomalies",
+    }
+    assert len(result.anomalies) == 1
+
+
+def test_telemetry_ingestion_postgres__repeated_cpu_anomaly__emits_one_updated_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    _seed_sample(sqlalchemy_session_factory, _sample(sampled_at=T0, cpu=95.0))
+    first_sink = _RecordingSink()
+    first_service = _service(sqlalchemy_session_factory, incident_event_sink=first_sink)
+    first_service.ingest(_command(sample=_sample(sampled_at=T0 + timedelta(seconds=30), cpu=95.0)))
+    assert len(first_sink.calls) == 1
+    assert first_sink.calls[0].outcome is IncidentUpsertOutcome.CREATED
+
+    # A fresh sink/service pair scopes the second ingestion's emitted events
+    # independently, never conflated with the first ingestion's event.
+    second_sink = _RecordingSink()
+    second_service = _service(sqlalchemy_session_factory, incident_event_sink=second_sink)
+    recurrence_observed_at = T0 + timedelta(seconds=60)
+
+    second_service.ingest(
+        _command(
+            sample=_sample(sampled_at=recurrence_observed_at, cpu=95.0),
+            observed_at=recurrence_observed_at,
+        )
+    )
+
+    incidents = _incidents(sqlalchemy_session_factory)
+    assert len(incidents) == 1
+    incident = incidents[0]
+    assert incident.occurrence_count == 2
+    assert incident.created_at == T0
+
+    assert len(second_sink.calls) == 1
+    event = second_sink.calls[0]
+    assert event.outcome is IncidentUpsertOutcome.UPDATED
+    assert event.incident_id == incident.incident_id
+    assert event.timestamp == incident.last_seen_at
+    assert event.timestamp == recurrence_observed_at
+
+
+def test_telemetry_ingestion_postgres__no_anomaly__emits_no_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    sample = _sample()
+    sink = _RecordingSink()
+    service = _service(sqlalchemy_session_factory, incident_event_sink=sink)
+
+    result = service.ingest(_command(sample=sample))
+
+    assert result.anomalies == ()
+    assert sink.calls == []
+    assert _incidents(sqlalchemy_session_factory) == ()
+
+
+def test_telemetry_ingestion_postgres__multiple_anomalies__emits_three_ordered_events(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    for offset, state in enumerate([LinkState.UP, LinkState.DOWN, LinkState.UP, LinkState.DOWN]):
+        _seed_sample(
+            sqlalchemy_session_factory,
+            _sample(
+                sampled_at=T0 + timedelta(seconds=10 * offset),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=state),),
+            ),
+        )
+    _seed_sample(
+        sqlalchemy_session_factory,
+        _sample(
+            sampled_at=T0 + timedelta(seconds=40),
+            cpu=95.0,
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.ESTABLISHED),),
+        ),
+    )
+    sink = _RecordingSink()
+    service = _service(sqlalchemy_session_factory, incident_event_sink=sink)
+
+    service.ingest(
+        _command(
+            sample=_sample(
+                sampled_at=T0 + timedelta(seconds=50),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=LinkState.UP),),
+                bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.IDLE),),
+            )
+        )
+    )
+
+    assert len(sink.calls) == 3
+    assert [event.rule_ref for event in sink.calls] == [
+        "RULE-CPU-HIGH",
+        "RULE-LINK-FLAP",
+        "RULE-BGP-DOWN",
+    ]
+    assert all(event.outcome is IncidentUpsertOutcome.CREATED for event in sink.calls)
+
+    # Real PostgreSQL's `list_all()` ordering is not trusted as rule-eval
+    # order here (tied created_at values would make any positional zip
+    # against a differently-ordered sequence spurious) — every event is
+    # instead matched to its durable incident by incident_id.
+    incidents_by_id = {
+        incident.incident_id: incident for incident in _incidents(sqlalchemy_session_factory)
+    }
+    assert {event.incident_id for event in sink.calls} == set(incidents_by_id)
+    for event in sink.calls:
+        persisted = incidents_by_id[event.incident_id]
+        assert event.rule_ref == persisted.rule_ref
+        assert event.device_id == persisted.device_id
+        assert event.status is persisted.status
+        assert event.timestamp == persisted.last_seen_at
+
+
+def test_telemetry_ingestion_postgres__failure_during_incident_upsert__emits_no_event(
+    sqlalchemy_session_factory: Callable[[], Session],
+) -> None:
+    _seed_device(sqlalchemy_session_factory)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+    for offset, state in enumerate([LinkState.UP, LinkState.DOWN, LinkState.UP, LinkState.DOWN]):
+        _seed_sample(
+            sqlalchemy_session_factory,
+            _sample(
+                sampled_at=T0 + timedelta(seconds=10 * offset),
+                cpu=95.0,
+                interface_states=(InterfaceState(name=interface, oper_state=state),),
+            ),
+        )
+    _seed_sample(
+        sqlalchemy_session_factory,
+        _sample(
+            sampled_at=T0 + timedelta(seconds=40),
+            cpu=95.0,
+            bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.ESTABLISHED),),
+        ),
+    )
+    sink = _RecordingSink()
+
+    def factory() -> SqlAlchemyUnitOfWork:
+        uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+        uow.incidents = _FailingIncidentsWrapper(  # type: ignore[assignment]
+            uow.incidents, fail_on_call=2, fail_error=RuntimeError("second upsert boom")
+        )
+        return uow
+
+    service = TelemetryIngestionService(unit_of_work_factory=factory, incident_event_sink=sink)
+
+    with pytest.raises(RuntimeError, match="second upsert boom"):
+        service.ingest(
+            _command(
+                sample=_sample(
+                    sampled_at=T0 + timedelta(seconds=50),
+                    cpu=95.0,
+                    interface_states=(InterfaceState(name=interface, oper_state=LinkState.UP),),
+                    bgp_sessions=(BgpSession(neighbor_ip=neighbor, state=BgpState.IDLE),),
+                )
+            )
+        )
+
+    verify_uow = SqlAlchemyUnitOfWork(sqlalchemy_session_factory)
+    latest = verify_uow.telemetry_samples.get_latest(DEVICE_ID)
+    assert latest is not None
+    assert latest.sampled_at != T0 + timedelta(seconds=50)
+    assert verify_uow.incidents.list_all() == ()
+    verify_uow.close()
+
+    assert sink.calls == []

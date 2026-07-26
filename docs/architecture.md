@@ -216,14 +216,18 @@ device with a prior submission, it is wired into this same sequence
 (after step 9, before step 11) in the *next* slice (product-spec
 Section 11), reusing the same `uow`.
 
-**Structured logging (originally planned as step 10/13 here) is deferred
+**Structured logging (originally planned as step 10/13 here) was deferred
 past Day 5A**, along with the `POST /devices/{id}/config` HTTP layer
-itself (Day 5B) — `ConfigIngestionService` implements steps 1–12 above and
-nothing beyond them. When logging is added, the same rule already
-documented in Section 13 applies: a failure while writing the log after a
-successful commit must not roll back durable data or turn the response
-into a `PersistenceError` — the database commit is authoritative; logging
-is a best-effort side channel once that commit has already succeeded.
+itself (Day 5B) — at that point `ConfigIngestionService` implemented steps
+1–12 above and nothing beyond them. **As of Day 10, structured logging is
+implemented** as an additional best-effort step after step 12 (never
+renumbered into 1–12, since it never affects rollback or the returned
+result): the same rule already documented in Section 13 applies exactly as
+planned — a failure while writing the log after a successful commit does
+not roll back durable data or turn the response into a `PersistenceError`;
+the database commit is authoritative, and logging is a best-effort side
+channel once that commit has already succeeded. See Section 13 for the
+full implemented contract.
 
 ### 4.1 Clock (explicit time) — deferred past Day 5A
 
@@ -522,10 +526,14 @@ uow.incidents.upsert_open_incident(candidate, fingerprint, observed_at)
         a test exercises that specifically — test-strategy.md Section 9)
    │
    ▼  ONLY once the enclosing transaction COMMITS successfully:
-observability.emit_json_log(result)   — stdout, FR-09 / AC-10
+event = IncidentLogEvent.from_upsert_result(result)  — FR-09 / AC-10
+sink.emit(event)  # sink defaults to StdoutIncidentEventSink; one JSON line
    { "incident_id", "device_id", "rule_ref", "severity", "status", "outcome", "timestamp" }
-   # a rolled-back transaction (uow.rollback(), e.g. commit fails →
-   # PersistenceError) emits NO log line — see Section 13
+   # timestamp = incident.last_seen_at, canonical UTC with trailing "Z" —
+   # never a fresh clock read. A rolled-back transaction (uow.rollback(),
+   # e.g. commit fails → PersistenceError) emits NO log line — see Section 13.
+   # Emission is best-effort: a raising sink is caught and swallowed, never
+   # rolling back the already-committed result or affecting the caller.
 ```
 
 **Vertical-slice values** (missing required ACL on `spine-01`):
@@ -1067,33 +1075,63 @@ exist."
   one `UnitOfWork` transaction (Section 11), so a mid-flow failure rolls
   back cleanly rather than leaving partial state.
 - **A rolled-back transaction emits no structured log.** Section 13's
-  `emit_json_log` call happens strictly after `uow.commit()` succeeds
-  (Section 4 step 10, Section 9). If `PersistenceError` aborts the
-  transaction after a violation was already detected, no incident log line
-  is written for it — the log is a statement about durable state, never
-  about an in-memory intent that didn't survive. Conversely, a failure
-  *while writing that log*, after commit already succeeded, does not roll
-  back the (already-durable) database result or turn the HTTP response
-  into a `PersistenceError` — the response reflects what the database
-  actually holds.
+  `IncidentEventSink.emit(...)` call happens strictly after `uow.commit()`
+  succeeds (the best-effort step added after Section 4's step 12, Section
+  9). If `PersistenceError` aborts the transaction after a violation was
+  already detected, no incident log line is written for it — the log is a
+  statement about durable state, never about an in-memory intent that
+  didn't survive. Conversely, a failure *while writing that log*, after
+  commit already succeeded, does not roll back the (already-durable)
+  database result or turn the HTTP response into a `PersistenceError` —
+  the response reflects what the database actually holds.
 
 ---
 
 ## 13. Observability Strategy
 
-- **Structured incident log** (FR-09, AC-10) — one JSON line per
-  `IncidentUpsertResult`: `incident_id`, `device_id`, `rule_ref`,
-  `severity`, `status`, `outcome` (`"CREATED"` or `"UPDATED"`),
-  `timestamp`. The `outcome` field is what makes the two cases
-  distinguishable in the log stream, rather than requiring a reader to
-  infer creation-vs-update from surrounding context. Not batched or
-  delayed, but strictly **post-commit** (Section 9/12) — a failed or
-  rolled-back transaction never emits a log line. Verifying this is an
-  **integration-level** concern (test-strategy.md Section 13): it requires
-  inspecting what was actually logged for a given request, which a plain
-  HTTP round-trip (as in the E2E test, Section 7 of test-strategy.md)
-  cannot do without separately inspecting the container's stdout — the
-  E2E test proves the HTTP/DB path works, not the log line's presence.
+- **Structured incident log** (FR-09, AC-10 — **implemented as of Day
+  10**) — `meta_rne.observability.incident_events` defines
+  `IncidentLogEvent`, a frozen, slotted value object with exactly seven
+  fields, in this order: `incident_id`, `device_id`, `rule_ref`,
+  `severity`, `status`, `outcome` (`"CREATED"` or `"UPDATED"` only —
+  never `"RESOLVED"`/`"DELETED"`/`"REOPENED"`), `timestamp`. No other
+  field (`source`, `affected_resource`, `evidence`, `fingerprint`,
+  `recommendation`, `occurrence_count`, `created_at`, `last_seen_at`,
+  `resolved_at`) is ever included. `timestamp` is exactly the persisted
+  `Incident.last_seen_at` — never a fresh clock read — serialized as
+  canonical UTC ISO-8601 with a trailing `Z`
+  (`.isoformat().replace("+00:00", "Z")`). The `outcome` field is what
+  makes the two cases distinguishable in the log stream, rather than
+  requiring a reader to infer creation-vs-update from surrounding context.
+  `IncidentEventSink` (a `typing.Protocol` with one `emit(event) -> None`
+  method) is the injectable abstraction, accepted as an optional
+  constructor parameter (`incident_event_sink: IncidentEventSink | None =
+  None`) by both `ConfigIngestionService` and `TelemetryIngestionService`,
+  defaulting to `StdoutIncidentEventSink` — which writes one compact JSON
+  object per `emit()` call, followed by one newline, then flushes, using
+  only the standard-library `json` module (no `logging` module, no global
+  logging configuration). One event is emitted per `IncidentUpsertResult`
+  — for a telemetry ingestion firing multiple rules, in the engine's fixed
+  `RULE-CPU-HIGH` → `RULE-LINK-FLAP` → `RULE-BGP-DOWN` order. Not batched
+  or delayed, but strictly **post-commit** (Section 9/12) — a failed or
+  rolled-back transaction never emits a log line. Delivery is
+  **best-effort**: each event's construction and emission is wrapped in
+  its own `try/except Exception: pass`, so one failing event never blocks
+  later events, is never retried, and never propagates to the caller or
+  alters the already-committed database state, the service's returned
+  result, or the HTTP response. `POLICY_VIOLATION` and `ANOMALY`
+  incidents share this identical schema. Incident resolution
+  (`ResolveIncidentService`) is explicitly out of scope — resolving an
+  incident emits no event; only a later recurrence (a fresh
+  `upsert_open_incident` call) emits `CREATED` with a new `incident_id`.
+  No API schema, route, or response body was changed — this is a
+  stdout-only side effect. No new dependency or database migration was
+  needed. Verified at four layers (test-strategy.md Section 13): unit
+  tests against `InMemoryUnitOfWork`, PostgreSQL application-service
+  acceptance against `SqlAlchemyUnitOfWork` with an injected recording
+  sink, in-memory HTTP acceptance via `TestClient` and pytest's `capfd`
+  against the real default sink, and PostgreSQL HTTP acceptance using the
+  same `capfd` technique.
 - **Structured request log** — `api` logs each request (method, path,
   status, duration) as JSON, for local debugging.
 - **No metrics backend, tracing, or dashboards** in the backend. The
@@ -1486,8 +1524,9 @@ needs:
   path. **Telemetry ingestion and deterministic CPU/link-flap/BGP-down
   anomaly detection** (FR-05/FR-06) **are implemented as of Day 9b, and
   anomaly-to-incident mapping/persistence as of Day 9c** — AC-07, AC-08,
-  and AC-09 are proven end to end; AC-10 (structured logging), a
-  deterministic telemetry simulator, and frontend telemetry workflows
+  and AC-09 are proven end to end. **Structured incident event logging is
+  implemented as of Day 10** (Section 13) — AC-10 is no longer deferred. A
+  deterministic telemetry simulator and frontend telemetry workflows
   remain deferred.
 
 ### 17.1.1 Frontend ownership and data flow (Day 6C)

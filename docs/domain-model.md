@@ -1065,12 +1065,13 @@ config.
 ]
 ```
 
-**Target/future AC-10 behavior — not currently implemented, not currently
-emitted by the application.** No `observability`/structured-logging
-module exists yet (the `observability` package is an empty stub). The
-shape below documents the intended stdout log line (FR-09, AC-10) —
-`outcome` distinguishing creation from update — as design documentation
-only, retained for when AC-10 is eventually built:
+**Implemented AC-10 behavior, as of Day 10.** `meta_rne.observability`
+emits exactly this stdout log line — via `IncidentLogEvent` and the
+default `StdoutIncidentEventSink` — after every successful incident
+create/update commit (FR-09, AC-10), with `outcome` distinguishing
+creation from update. `timestamp` is exactly the persisted incident's
+`last_seen_at` (never a fresh clock read), serialized using the same
+canonical UTC trailing-`Z` format used throughout this model:
 
 ```json
 {"incident_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "device_id": "spine-01", "rule_ref": "policy-acl-external-in", "severity": "Medium", "status": "OPEN", "outcome": "CREATED", "timestamp": "2026-07-18T10:00:00Z"}

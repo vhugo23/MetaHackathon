@@ -1934,3 +1934,51 @@ telemetry simulator and frontend telemetry consumption also remain
 deferred. No frontend, Playwright, or CI change. Implemented across a
 series of reviewable gates, all approved, but not yet committed — see
 CLAUDE.md's "Current Phase".
+
+**Day 10 — Structured Incident Event Logging (AC-10).** Supersedes Day
+9c's "AC-10 remains deferred" statement above: `meta_rne.observability`
+now implements `IncidentLogEvent` and `StdoutIncidentEventSink`, giving
+every successful incident create/update a structured stdout JSON line.
+The event has exactly seven fields, in this order: `incident_id`,
+`device_id`, `rule_ref`, `severity`, `status`, `outcome` (`CREATED` or
+`UPDATED` only), and `timestamp` — the persisted incident's `last_seen_at`,
+never a fresh clock read, serialized as canonical UTC ISO-8601 with a
+trailing `Z`. No other field is ever included.
+
+Both `ConfigIngestionService` and `TelemetryIngestionService` gained one
+new, optional, append-only constructor parameter,
+`incident_event_sink: IncidentEventSink | None = None`, defaulting to
+`StdoutIncidentEventSink()` — no existing parameter changed, and no
+`create_app`/API composition change was needed, since production already
+uses the default stdout sink automatically. Emission happens once per
+`IncidentUpsertResult`, strictly after `uow.commit()` succeeds (never
+before, never on rollback, never from a `finally` block), in the existing
+upsert order — for telemetry, the fixed `RULE-CPU-HIGH` →
+`RULE-LINK-FLAP` → `RULE-BGP-DOWN` rule order. Delivery is best-effort:
+each event is isolated in its own `try/except Exception: pass`, so one
+failing event never blocks later events, is never retried, and never
+alters the committed database state, the service result, or the HTTP
+response. `POLICY_VIOLATION` and `ANOMALY` incidents share the identical
+seven-field schema.
+
+**No API response changed.** `POST /devices/{device_id}/config`,
+`POST /devices/{device_id}/telemetry`, `GET /incidents`, and
+`POST /incidents/{incident_id}/resolve` all return exactly the same
+bodies as before — AC-10 events are a stdout-only side effect, never
+exposed in any response. **Resolving an incident emits no AC-10 event**;
+only a later recurrence of a resolved finding (a fresh `upsert_open_incident`
+call) emits `CREATED` with a new `incident_id`, proven end to end through
+real HTTP and real PostgreSQL.
+
+Verified across four layers — unit tests against `InMemoryUnitOfWork`,
+PostgreSQL application-service acceptance against a real
+`SqlAlchemyUnitOfWork`, in-memory HTTP acceptance via `TestClient` and
+pytest's `capfd` against the real default sink, and PostgreSQL HTTP
+acceptance using the same `capfd` technique — backend `pytest` now passes
+**1,081** non-PostgreSQL and **281** PostgreSQL tests (**1,362** combined),
+`mypy src` clean across **64** source files, Ruff clean. No migration or
+new dependency was added. Delivery retries, guaranteed/at-least-once
+delivery, fallback queues, background workers, external log aggregation,
+metrics, and logging-health monitoring remain deferred. A deterministic
+telemetry simulator and frontend telemetry consumption also remain
+deferred, unchanged from Day 9b/9c.

@@ -11,10 +11,12 @@ against the codebase before ``create_app``/routes/schemas existed,
 producing a real ``ImportError`` — genuine red-green-refactor.
 """
 
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from meta_rne.adapters.cisco import CiscoAdapter
@@ -27,7 +29,9 @@ from meta_rne.domain.config import (
     NormalizedRouting,
     VendorType,
 )
+from meta_rne.domain.incident import IncidentStatus
 from meta_rne.domain.policy import ConfigurationPolicy, RequiredAclRule, Severity
+from meta_rne.observability import IncidentLogEvent, StdoutIncidentEventSink
 from meta_rne.persistence.errors import (
     PersistenceError,
 )
@@ -38,6 +42,21 @@ from meta_rne.persistence.memory.snapshot_repository import InMemoryConfiguratio
 from meta_rne.persistence.memory.store import InMemoryStore
 from meta_rne.persistence.memory.unit_of_work import InMemoryUnitOfWork
 from meta_rne.persistence.serialization import SerializationError
+
+_EXPECTED_EVENT_KEY_ORDER = [
+    "incident_id",
+    "device_id",
+    "rule_ref",
+    "severity",
+    "status",
+    "outcome",
+    "timestamp",
+]
+
+
+def _json_lines(stdout: str) -> list[dict[str, object]]:
+    return [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
 
 DEVICE_ID = "spine-01"
 T0 = datetime(2026, 7, 18, 10, 0, 0, tzinfo=UTC)
@@ -774,3 +793,175 @@ def test_submit_configuration__invalid_clock__returns_generic_500_and_persists_n
 
     assert response.status_code == 500
     assert InMemoryUnitOfWork(store).devices.get_by_id(DEVICE_ID) is None
+
+
+# --- AC-10E: structured incident events through real HTTP + real stdout -----
+
+
+def test_submit_configuration__missing_acl__emits_one_created_stdout_event(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    store = InMemoryStore()
+    _seed_policy(store)
+    client = _test_app(store=store)
+
+    capfd.readouterr()
+    response = client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body.keys()) == {
+        "device_id",
+        "snapshot_id",
+        "normalized_config",
+        "violations_detected",
+        "incidents_created",
+        "incidents_updated",
+    }
+    assert body["incidents_created"] == 1
+    assert body["incidents_updated"] == 0
+
+    events = _json_lines(captured.out)
+    assert len(events) == 1
+    event = events[0]
+    assert list(event.keys()) == _EXPECTED_EVENT_KEY_ORDER
+
+    verify_uow = InMemoryUnitOfWork(store)
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
+    incident = incidents[0]
+
+    assert event["incident_id"] == incident.incident_id
+    assert event["device_id"] == DEVICE_ID
+    assert event["rule_ref"] == incident.rule_ref
+    assert event["severity"] == incident.severity.value
+    assert event["status"] == "OPEN"
+    assert event["outcome"] == "CREATED"
+    assert event["timestamp"] == incident.last_seen_at.isoformat().replace("+00:00", "Z")
+
+
+def test_submit_configuration__repeated_submission__emits_one_updated_stdout_event(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    store = InMemoryStore()
+    _seed_policy(store)
+    client = _test_app(store=store, snapshot_id_factory=lambda: "snap-1", clock=lambda: T0)
+    client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    capfd.readouterr()  # discard the first request's own captured output
+
+    t1 = T0 + timedelta(hours=1)
+    client2 = _test_app(store=store, snapshot_id_factory=lambda: "snap-2", clock=lambda: t1)
+    capfd.readouterr()  # clear immediately before the second request
+
+    response = client2.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["incidents_created"] == 0
+    assert body["incidents_updated"] == 1
+
+    events = _json_lines(captured.out)
+    assert len(events) == 1
+    event = events[0]
+
+    verify_uow = InMemoryUnitOfWork(store)
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
+    incident = incidents[0]
+    assert incident.occurrence_count == 2
+    assert incident.created_at == T0
+    assert incident.last_seen_at == t1
+
+    assert event["outcome"] == "UPDATED"
+    assert event["incident_id"] == incident.incident_id
+    assert event["timestamp"] == incident.last_seen_at.isoformat().replace("+00:00", "Z")
+
+
+def test_submit_configuration__no_applicable_policy__emits_no_stdout_event(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    store = InMemoryStore()
+    client = _test_app(store=store, snapshot_id_factory=lambda: "snap-1")
+
+    capfd.readouterr()
+    response = client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _SATISFIED_RAW_CONFIG},
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["violations_detected"] == 0
+    assert body["incidents_created"] == 0
+    assert body["incidents_updated"] == 0
+    assert captured.out == ""
+
+    verify_uow = InMemoryUnitOfWork(store)
+    device = verify_uow.devices.get_by_id(DEVICE_ID)
+    assert device is not None
+    assert device.current_snapshot_id == "snap-1"
+    snapshot = verify_uow.configuration_snapshots.get_by_id("snap-1")
+    assert snapshot is not None
+
+
+def test_submit_configuration__persistence_failure__emits_no_stdout_event(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    store = InMemoryStore()
+    error = PersistenceError("underlying database detail that must not leak")
+    client = _test_app(
+        store=store, unit_of_work_factory=lambda: _FailingCommitUnitOfWork(store, error)
+    )
+
+    capfd.readouterr()
+    response = client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _SATISFIED_RAW_CONFIG},
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["code"] == "persistence_error"
+    assert "underlying database detail" not in body["detail"]
+    assert captured.out == ""
+
+
+def test_submit_configuration__sink_emit_raises__response_still_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raising_emit(self: StdoutIncidentEventSink, event: IncidentLogEvent) -> None:
+        raise RuntimeError("sink boom")
+
+    monkeypatch.setattr(StdoutIncidentEventSink, "emit", _raising_emit)
+
+    store = InMemoryStore()
+    _seed_policy(store)
+    client = _test_app(store=store)
+
+    response = client.post(
+        f"/devices/{DEVICE_ID}/config",
+        json={"vendor": "cisco-ios-xe", "raw_config_text": _MISSING_ACL_RAW_CONFIG},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["incidents_created"] == 1
+    assert body["incidents_updated"] == 0
+
+    verify_uow = InMemoryUnitOfWork(store)
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
+    assert incidents[0].status is IncidentStatus.OPEN

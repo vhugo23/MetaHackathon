@@ -9,9 +9,11 @@ not-yet-existing response schema classes, so the expected-red result is an
 HTTP routing failure (404, unregistered path), never an import error.
 """
 
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from meta_rne.adapters.cisco import CiscoAdapter
@@ -19,8 +21,24 @@ from meta_rne.adapters.registry import AdapterRegistry
 from meta_rne.api.app import create_app
 from meta_rne.domain.config import VendorType
 from meta_rne.domain.device import Device
+from meta_rne.observability import IncidentLogEvent, StdoutIncidentEventSink
 from meta_rne.persistence.memory.store import InMemoryStore
 from meta_rne.persistence.memory.unit_of_work import InMemoryUnitOfWork
+
+_EXPECTED_EVENT_KEY_ORDER = [
+    "incident_id",
+    "device_id",
+    "rule_ref",
+    "severity",
+    "status",
+    "outcome",
+    "timestamp",
+]
+
+
+def _json_lines(stdout: str) -> list[dict[str, object]]:
+    return [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
 
 DEVICE_ID = "spine-01"
 T0 = datetime(2026, 7, 18, 10, 0, 0, tzinfo=UTC)
@@ -503,3 +521,210 @@ def test_response_contains_no_incident_shaped_fields() -> None:
         "status",
     ):
         assert f'"{forbidden}"' not in body_text
+
+
+# --- AC-10E: structured incident events through real HTTP + real stdout -----
+
+
+def test_two_consecutive_cpu_high_submissions__second_request_emits_one_created_event(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    client = _test_app(store)
+
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_payload(sampled_at=T0.isoformat(), cpu_utilization_pct=95.0),
+    )
+    capfd.readouterr()  # discard the first request's own captured output (no anomaly yet)
+
+    response = client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_payload(sampled_at=(T0.replace(second=30)).isoformat(), cpu_utilization_pct=95.0),
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    body = response.json()
+    rule_ids = [a["rule_id"] for a in body["anomalies"]]
+    assert "RULE-CPU-HIGH" in rule_ids
+
+    events = _json_lines(captured.out)
+    assert len(events) == 1
+    event = events[0]
+    assert list(event.keys()) == _EXPECTED_EVENT_KEY_ORDER
+    assert event["rule_ref"] == "RULE-CPU-HIGH"
+    assert event["outcome"] == "CREATED"
+    assert event["severity"] == "High"
+    assert event["status"] == "OPEN"
+
+    verify_uow = InMemoryUnitOfWork(store)
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
+    incident = incidents[0]
+    assert event["incident_id"] == incident.incident_id
+    assert event["timestamp"] == incident.last_seen_at.isoformat().replace("+00:00", "Z")
+
+
+def test_repeated_cpu_high_detection__third_request_emits_one_updated_event(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    client = _test_app(store, clock=lambda: T0)
+
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_payload(sampled_at=T0.isoformat(), cpu_utilization_pct=95.0),
+    )
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_payload(sampled_at=T0.replace(second=30).isoformat(), cpu_utilization_pct=95.0),
+    )
+    capfd.readouterr()  # discard everything captured before the repeated-detection request
+
+    t1 = T0 + timedelta(hours=1)
+    client2 = _test_app(store, clock=lambda: t1)
+    response = client2.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_payload(
+            sampled_at=(T0 + timedelta(seconds=60)).isoformat(), cpu_utilization_pct=95.0
+        ),
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    assert set(response.json().keys()) == {"sample", "anomalies"}
+
+    events = _json_lines(captured.out)
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "UPDATED"
+
+    verify_uow = InMemoryUnitOfWork(store)
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
+    incident = incidents[0]
+    assert incident.occurrence_count == 2
+    assert incident.created_at == T0
+    assert incident.last_seen_at == t1
+    assert event["incident_id"] == incident.incident_id
+    assert event["timestamp"] == incident.last_seen_at.isoformat().replace("+00:00", "Z")
+
+
+def test_zero_anomaly_response__emits_no_stdout_event(capfd: pytest.CaptureFixture[str]) -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    client = _test_app(store)
+
+    capfd.readouterr()
+    response = client.post(f"/devices/{DEVICE_ID}/telemetry", json=_payload())
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    assert response.json()["anomalies"] == []
+    assert captured.out == ""
+
+    verify_uow = InMemoryUnitOfWork(store)
+    assert verify_uow.telemetry_samples.get_latest(DEVICE_ID) is not None
+
+
+def test_all_three_rules_trigger__final_request_emits_three_ordered_events(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    store = InMemoryStore()
+    _seed_device(store)
+    client = _test_app(store)
+    interface = "GigabitEthernet0/1"
+    neighbor = "10.0.0.2"
+
+    for offset, state in enumerate(["up", "down", "up", "down"]):
+        client.post(
+            f"/devices/{DEVICE_ID}/telemetry",
+            json=_payload(
+                sampled_at=T0.replace(second=10 * offset).isoformat(),
+                cpu_utilization_pct=50.0,
+                interface_states=[{"name": interface, "oper_state": state}],
+            ),
+        )
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_payload(
+            sampled_at=T0.replace(second=40).isoformat(),
+            cpu_utilization_pct=95.0,
+            bgp_sessions=[{"neighbor_ip": neighbor, "state": "Established"}],
+        ),
+    )
+    capfd.readouterr()  # discard everything captured before the firing request
+
+    response = client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_payload(
+            sampled_at=T0.replace(second=50).isoformat(),
+            cpu_utilization_pct=95.0,
+            interface_states=[{"name": interface, "oper_state": "up"}],
+            bgp_sessions=[{"neighbor_ip": neighbor, "state": "Idle"}],
+        ),
+    )
+    captured = capfd.readouterr()
+
+    assert response.status_code == 201
+    assert set(response.json().keys()) == {"sample", "anomalies"}
+
+    events = _json_lines(captured.out)
+    assert len(events) == 3
+    assert [event["rule_ref"] for event in events] == [
+        "RULE-CPU-HIGH",
+        "RULE-LINK-FLAP",
+        "RULE-BGP-DOWN",
+    ]
+    assert all(event["outcome"] == "CREATED" for event in events)
+
+    # Real ordering is asserted above from the event stream itself; durable
+    # verification maps each event to its incident by incident_id rather
+    # than trusting `list_all()`'s positional order for tied timestamps.
+    verify_uow = InMemoryUnitOfWork(store)
+    incidents_by_id = {
+        incident.incident_id: incident for incident in verify_uow.incidents.list_all()
+    }
+    assert {event["incident_id"] for event in events} == set(incidents_by_id)
+    for event in events:
+        persisted = incidents_by_id[event["incident_id"]]
+        assert event["rule_ref"] == persisted.rule_ref
+        assert event["device_id"] == DEVICE_ID
+        assert event["status"] == "OPEN"
+        assert event["timestamp"] == persisted.last_seen_at.isoformat().replace("+00:00", "Z")
+
+
+def test_cpu_high_submission__sink_emit_raises__response_still_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raising_emit(self: StdoutIncidentEventSink, event: IncidentLogEvent) -> None:
+        raise RuntimeError("sink boom")
+
+    monkeypatch.setattr(StdoutIncidentEventSink, "emit", _raising_emit)
+
+    store = InMemoryStore()
+    _seed_device(store)
+    client = _test_app(store)
+
+    client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_payload(sampled_at=T0.isoformat(), cpu_utilization_pct=95.0),
+    )
+    response = client.post(
+        f"/devices/{DEVICE_ID}/telemetry",
+        json=_payload(sampled_at=T0.replace(second=30).isoformat(), cpu_utilization_pct=95.0),
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body.keys()) == {"sample", "anomalies"}
+    rule_ids = [a["rule_id"] for a in body["anomalies"]]
+    assert "RULE-CPU-HIGH" in rule_ids
+
+    verify_uow = InMemoryUnitOfWork(store)
+    assert verify_uow.telemetry_samples.get_latest(DEVICE_ID) is not None
+    incidents = verify_uow.incidents.list_all()
+    assert len(incidents) == 1
