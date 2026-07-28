@@ -203,11 +203,15 @@ test.describe("telemetry workspace — complete anomaly scenario", () => {
     ).toBeVisible();
     await expect(
       telemetrySection.getByText(
-        new RegExp(`Interface ${INTERFACE_NAME.replace("/", "\\/")}: \\d+ recorded transition\\(s\\)\\.`),
+        new RegExp(
+          `Interface ${INTERFACE_NAME.replace("/", "\\/")}: \\d+ recorded transition\\(s\\)\\.`,
+        ),
       ),
     ).toBeVisible();
     await expect(
-      telemetrySection.getByText(new RegExp(`Neighbor ${BGP_NEIGHBOR.replace(".", "\\.")}: .+ -> Idle\\.`)),
+      telemetrySection.getByText(
+        new RegExp(`Neighbor ${BGP_NEIGHBOR.replace(".", "\\.")}: .+ -> Idle\\.`),
+      ),
     ).toBeVisible();
 
     // 14. No literal "undefined" anywhere in the telemetry workspace.
@@ -215,9 +219,7 @@ test.describe("telemetry workspace — complete anomaly scenario", () => {
 
     // 15. No duplicated resolve control inside the telemetry workspace —
     // resolution remains only in the separate global incident list.
-    await expect(
-      telemetrySection.getByRole("button", { name: "Resolve incident" }),
-    ).toHaveCount(0);
+    await expect(telemetrySection.getByRole("button", { name: "Resolve incident" })).toHaveCount(0);
   });
 });
 
@@ -272,8 +274,6 @@ test.describe("telemetry workspace — empty state and responsive layout", () =>
     // 7. The workspace remains visible and usable at the narrow viewport.
     await expect(telemetrySection).toBeVisible();
     await expect(telemetrySection.getByText(deviceId, { exact: true })).toBeVisible();
-    await expect(
-      telemetrySection.getByRole("button", { name: "Refresh telemetry" }),
-    ).toBeVisible();
+    await expect(telemetrySection.getByRole("button", { name: "Refresh telemetry" })).toBeVisible();
   });
 });

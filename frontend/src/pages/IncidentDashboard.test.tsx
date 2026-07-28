@@ -1216,9 +1216,7 @@ test("the configuration submission form still renders alongside the telemetry wo
 
   render(<IncidentDashboard />);
 
-  expect(
-    screen.getByRole("heading", { name: /submit device configuration/i }),
-  ).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: /submit device configuration/i })).toBeInTheDocument();
 });
 
 test("the existing global incident list still renders incidents unaffected by the telemetry workspace", async () => {

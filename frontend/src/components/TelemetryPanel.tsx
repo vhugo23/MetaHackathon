@@ -184,10 +184,7 @@ export function TelemetryPanel() {
                       <div>
                         <dt>Sampled at</dt>
                         <dd>
-                          <time
-                            dateTime={latestSample.sampled_at}
-                            title={latestSample.sampled_at}
-                          >
+                          <time dateTime={latestSample.sampled_at} title={latestSample.sampled_at}>
                             {formatTimestamp(latestSample.sampled_at)}
                           </time>
                         </dd>
@@ -235,9 +232,7 @@ export function TelemetryPanel() {
                               <span className="telemetry-state-list__name">
                                 {session.neighbor_ip}
                               </span>
-                              <span className="telemetry-state-list__value">
-                                {session.state}
-                              </span>
+                              <span className="telemetry-state-list__value">{session.state}</span>
                             </li>
                           ))}
                         </ul>

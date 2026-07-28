@@ -667,8 +667,7 @@ function rawLinkFlapIncidentPayload(
         { timestamp: "2026-07-18T10:00:24Z", oper_state: "up" },
       ],
     },
-    recommendation:
-      "Investigate unstable link state on spine-01 interface GigabitEthernet0/1.",
+    recommendation: "Investigate unstable link state on spine-01 interface GigabitEthernet0/1.",
     created_at: "2026-07-18T10:00:48Z",
     last_seen_at: "2026-07-18T10:00:48Z",
     occurrence_count: 1,
@@ -779,10 +778,7 @@ test("filterAnomalyIncidentsForDevice keeps only exact device_id + ANOMALY sourc
     device_id: "leaf-02",
   };
 
-  const result = filterAnomalyIncidentsForDevice(
-    [cpuIncident, otherDeviceCpuIncident],
-    "spine-01",
-  );
+  const result = filterAnomalyIncidentsForDevice([cpuIncident, otherDeviceCpuIncident], "spine-01");
 
   expect(result).toEqual([cpuIncident]);
 });
