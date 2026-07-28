@@ -171,6 +171,106 @@ consumption remain explicitly deferred — see "Still prohibited" below.
 
 ---
 
+**Day 11B — Frontend Telemetry Consumption, implemented across four
+reviewable gates (data contract/API client, static-compatibility patch,
+telemetry UI, and Playwright/live browser verification — Day 11B1/11B1A/
+11B2/11B3), built on top of the Day 11A simulator checkpoint; passes the
+full frontend verification matrix (11 Vitest files, 390 tests) plus 5
+Playwright browser tests (4 spec files); supersedes Day 11A's own "Frontend
+telemetry consumption also remains deferred" statement below and the
+"Still prohibited" master list's "Frontend telemetry consumption remains
+deferred" line at the end of this document.**
+
+The existing single-page incident dashboard
+(`frontend/src/pages/IncidentDashboard.tsx`) gained one new, read-only
+`Device telemetry` workspace section (`TelemetryPanel.tsx`), positioned
+after the existing configuration-submission form and before the existing,
+unchanged global incident list — no route, navigation redesign, or change
+to the existing configuration workflow or the `useIncidents`-backed
+incident list. The workspace is a pure *consumer* of already-persisted
+state: it never submits telemetry, never invokes Docker or
+`scripts/telemetry_simulator.py`, and never connects directly to
+PostgreSQL — device configuration and telemetry generation remain separate
+operator/developer workflows (the simulator CLI, or direct HTTP).
+
+A user enters a device ID into the accessible `Telemetry device` field and
+submits `Load telemetry`; the input is trimmed, and no request is made for
+an empty/whitespace-only value. `useTelemetryWorkspace`
+(`frontend/src/hooks/useTelemetryWorkspace.ts`) issues `GET
+/devices/{device_id}/telemetry/recent` (with the exported constant
+`TELEMETRY_HISTORY_SINCE = "1970-01-01T00:00:00Z"` — a fixed epoch value,
+never the browser's clock, chosen so the simulator's fixed historical
+timestamps are always included; not configurable through the UI) and `GET
+/incidents` concurrently, on one shared `AbortController`. `GET /incidents`
+results are filtered client-side (`filterAnomalyIncidentsForDevice`,
+`frontend/src/api/incidents.ts`) by exact `device_id` and `source ===
+"ANOMALY"` — the backend has no server-side incident filtering. Each
+request's success/failure is independent (`Promise.allSettled`): one side
+succeeding while the other fails leaves the failing side's own
+`role="alert"` message visible without hiding the other side's successful
+data. A monotonically increasing request ID plus the shared
+`AbortController` prevent a late response (a prior device, a superseded
+refresh) from ever overwriting newer state; loading a new device clears
+the previous device's samples/incidents immediately and aborts its
+in-flight request; unmount aborts any active request. `refresh()` reissues
+both requests for the already-selected device, keeps currently displayed
+data visible while pending, and updates the last-successful-refresh
+timestamp once at least one side succeeds — there is no automatic
+polling, no WebSockets, and no server-sent events.
+
+The workspace renders the latest sample's timestamp, CPU/memory
+utilization, and interface error rate (`<dl>`), the latest interface and
+BGP-session states as visible text (never color-only), and every returned
+recent sample in a semantic `<table>`/`<caption>` in the backend's own
+ascending order — no sorting, deduplication, client-side limiting, or
+threshold/severity calculation, and no charting dependency was added.
+Numeric values render using their parsed JavaScript number representation
+— e.g. a backend value of `95.0` displays as `95%` — never a promised
+fixed-decimal format, and this is not characterized as rounding.
+Device-filtered `ANOMALY` incidents render rule reference, severity,
+status, affected resource, occurrence count, last-seen time,
+recommendation, and an evidence summary for the three known rules
+(`RULE-CPU-HIGH`, `RULE-LINK-FLAP`, `RULE-BGP-DOWN`), using only the
+existing exported evidence-shape guards
+(`isCpuHighEvidenceResponse`/`isLinkFlapEvidenceResponse`/
+`isBgpDownEvidenceResponse`) — never an unsafe cast or property-presence
+guess. Both `OPEN` and `RESOLVED` incidents render; the workspace never
+duplicates the existing "Resolve incident" control, which remains only on
+the separate global incident list. **An unrecognized future `ANOMALY`
+rule_ref is handled safely by the component (a generic "Evidence details
+are unavailable." fallback) but is currently rejected earlier, at the
+API-client validation layer (`hasEvidenceConsistentWithRule`,
+`incidents.ts`) — unknown future anomaly rules are therefore not supported
+end-to-end today, only at the component's own defensive layer.** AC-10's
+structured stdout events remain API-process-only: the browser never
+requests, displays, or parses them.
+
+Labeled input/`<form>` submission, semantic headings, `role="status"`/
+`aria-live` refresh announcements, independent `role="alert"` errors,
+`<time dateTime>` timestamps, and a horizontally-contained history table
+on narrow screens were all verified, including at a 390×844 viewport with
+no document-level horizontal overflow in the verified empty-state flow —
+not a complete formal WCAG audit.
+
+Verified: **11** Vitest files / **390** tests passed (0 failed, 0 skipped;
++62 over the Day 11B1 pre-work baseline of 328), TypeScript typecheck
+clean, ESLint clean, production build clean. Playwright: **4** spec files /
+**5** tests (+1 spec, +2 tests over the pre-existing 3-file/3-test
+baseline), all passing in a disposable, isolated live Docker Compose run
+(exit code 0, resources fully cleaned up afterward) — the six-sample
+deterministic all-anomalies sequence, submitted through the real public
+HTTP API, produced the exact final anomaly order `RULE-CPU-HIGH` →
+`RULE-LINK-FLAP` → `RULE-BGP-DOWN`; the workspace rendered all six history
+rows in ascending order and all three resulting `OPEN` anomaly incidents
+with their evidence summaries; a second, telemetry-free device at the
+narrow viewport showed both non-error empty-state messages.
+
+No backend, dependency, router, charting library, polling mechanism,
+telemetry-simulator, or direct-database code was added or changed for any
+of this.
+
+---
+
 **Day 11A — Deterministic Telemetry Simulator, implemented and live-
 verified against a disposable Docker Compose stack; supersedes Day 10's
 "a deterministic telemetry simulator ... remain[s] deferred" statement
@@ -1410,8 +1510,14 @@ detail. **Structured incident event logging (AC-10) now exists as of Day
 10** — see "Current Phase" above for the full detail; it is no longer
 deferred. **A deterministic telemetry simulator now exists as of Day
 11A** — `scripts/telemetry_simulator.py`, see "Current Phase" above for
-the full detail; it is no longer deferred. Frontend telemetry consumption
-remains deferred.
+the full detail; it is no longer deferred. **Frontend telemetry
+consumption now exists as of Day 11B** — a read-only `Device telemetry`
+workspace consuming `GET /devices/{device_id}/telemetry/recent` and
+device-filtered `ANOMALY` incidents from `GET /incidents`; see "Current
+Phase" above for the full detail; it is no longer deferred. End-to-end
+support for an unrecognized future `ANOMALY` rule_ref remains deferred —
+current API-client validation rejects it before the component's own safe
+fallback would ever render it.
 All remaining items are later days, against the domain model, architecture,
 and ports already documented, with tests written first per the Development
 Rules above.

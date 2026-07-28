@@ -4,6 +4,7 @@ import { test, expect, vi, beforeEach } from "vitest";
 import { IncidentDashboard } from "./IncidentDashboard";
 import { ApiRequestError } from "../api/client";
 import * as configurationsModule from "../api/configurations";
+import { isPolicyViolationIncidentEvidenceResponse } from "../api/types";
 import type { ConfigurationSubmissionResponse, IncidentResponse } from "../api/types";
 
 vi.mock("../api/configurations", () => ({
@@ -79,6 +80,34 @@ const incidentAcknowledged: IncidentResponse = {
   incident_id: "acknowledged-incident-id",
   fingerprint: "acknowledged-fingerprint",
   status: "ACKNOWLEDGED",
+};
+
+// Day 11B1A compatibility regression fixture: a valid ANOMALY incident,
+// whose evidence shape (CPU samples) is deliberately not the policy-
+// violation shape `incidentA` above uses. Rendering CPU-evidence detail is
+// out of scope for this gate (Day 11B2) — this fixture only proves the
+// dashboard accepts and safely renders such an incident's generic fields.
+const cpuAnomalyIncident: IncidentResponse = {
+  incident_id: "cpu-anomaly-incident-id",
+  fingerprint: "cpu-anomaly-fingerprint",
+  device_id: "spine-01",
+  source: "ANOMALY",
+  rule_ref: "RULE-CPU-HIGH",
+  affected_resource: "device",
+  severity: "High",
+  status: "OPEN",
+  evidence: {
+    samples: [
+      { timestamp: "2026-07-18T10:00:00Z", cpu_utilization_pct: 95.0 },
+      { timestamp: "2026-07-18T10:00:30Z", cpu_utilization_pct: 96.0 },
+    ],
+  },
+  recommendation: "Investigate sustained high CPU utilization on spine-01.",
+  created_at: "2026-07-18T10:00:30Z",
+  last_seen_at: "2026-07-18T10:00:30Z",
+  occurrence_count: 1,
+  updated_at: "2026-07-18T10:00:30Z",
+  resolved_at: null,
 };
 
 function resolvedIncident(overrides: Partial<IncidentResponse> = {}): IncidentResponse {
@@ -187,9 +216,28 @@ test("exposes fingerprint and evidence in an accessible details region", async (
   const details = screen.getByText("Evidence").closest("details");
   expect(details).not.toBeNull();
   expect(within(details as HTMLElement).getByText(incidentA.fingerprint)).toBeInTheDocument();
+  if (!isPolicyViolationIncidentEvidenceResponse(incidentA.evidence)) {
+    throw new Error("expected incidentA to carry policy-violation evidence");
+  }
   expect(
     within(details as HTMLElement).getByText(incidentA.evidence.expected_acl_name),
   ).toBeInTheDocument();
+});
+
+test("a valid ANOMALY incident renders generic fields, shows no policy evidence block, and does not crash (Day 11B1A compatibility regression)", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse([cpuAnomalyIncident])));
+
+  render(<IncidentDashboard />);
+
+  const article = await screen.findByRole("article");
+  expect(within(article).getByText("spine-01")).toBeInTheDocument();
+  expect(within(article).getByText("device")).toBeInTheDocument();
+  expect(within(article).getByText("RULE-CPU-HIGH")).toBeInTheDocument();
+  expect(within(article).getByText("High")).toBeInTheDocument();
+  expect(within(article).getByText("OPEN")).toBeInTheDocument();
+  expect(within(article).queryByText("Evidence")).not.toBeInTheDocument();
+  expect(within(article).queryByText("Violation type")).not.toBeInTheDocument();
+  expect(within(article).queryByText("undefined")).not.toBeInTheDocument();
 });
 
 test("renders occurrence_count even when it equals 1", async () => {
@@ -1138,4 +1186,76 @@ test("Refresh renders in a populated state after Submit configuration in documen
   await waitFor(() => {
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callCountBeforeClick);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Day 11B2: telemetry workspace integration
+// ---------------------------------------------------------------------------
+
+test("the telemetry workspace section appears after the configuration form and before the existing incident list section", () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse([])));
+
+  render(<IncidentDashboard />);
+
+  const formHeading = screen.getByRole("heading", { name: /submit device configuration/i });
+  const telemetryHeading = screen.getByRole("heading", { name: /device telemetry/i });
+  expect(
+    formHeading.compareDocumentPosition(telemetryHeading) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+
+  const incidentSection = document.querySelector(".incident-dashboard__section");
+  expect(incidentSection).not.toBeNull();
+  expect(
+    telemetryHeading.compareDocumentPosition(incidentSection as Node) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+
+test("the configuration submission form still renders alongside the telemetry workspace", () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse([])));
+
+  render(<IncidentDashboard />);
+
+  expect(
+    screen.getByRole("heading", { name: /submit device configuration/i }),
+  ).toBeInTheDocument();
+});
+
+test("the existing global incident list still renders incidents unaffected by the telemetry workspace", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse([incidentA, incidentB])));
+
+  render(<IncidentDashboard />);
+
+  const cards = await screen.findAllByRole("article");
+  expect(cards).toHaveLength(2);
+});
+
+test("existing incident resolution still works with the telemetry workspace present", async () => {
+  const user = userEvent.setup();
+  const router = createFetchRouter();
+  router.queueGet(() => Promise.resolve(jsonResponse([incidentA])));
+  const deferred = createDeferred<Response>();
+  router.setResolveHandler(incidentA.incident_id, () => deferred.promise);
+  vi.stubGlobal("fetch", router.fetchMock);
+
+  render(<IncidentDashboard />);
+  const article = await screen.findByRole("article");
+  await user.click(within(article).getByRole("button", { name: /resolve incident/i }));
+
+  deferred.resolve(jsonResponse(resolvedIncident()));
+  await waitFor(() => {
+    expect(within(article).getByText("RESOLVED")).toBeInTheDocument();
+  });
+});
+
+test("the telemetry workspace issues no request merely because the dashboard mounts", () => {
+  const fetchMock = vi.fn().mockResolvedValue(jsonResponse([]));
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<IncidentDashboard />);
+
+  // Only the single initial GET /incidents (from useIncidents) fires — the
+  // telemetry workspace's own hook makes no request until a device is
+  // loaded through its own form.
+  expect(fetchMock).toHaveBeenCalledTimes(1);
 });

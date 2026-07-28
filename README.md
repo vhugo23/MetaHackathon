@@ -264,8 +264,11 @@ deterministic scenario runner, not a daemon or continuous traffic
 generator: automatic background telemetry generation, long-running
 continuous simulation, arbitrary/random traffic, prediction/forecasting,
 confidence scoring, notification delivery, guaranteed AC-10 delivery, and
-external log aggregation are all out of scope. Frontend telemetry
-consumption also remains deferred.
+external log aggregation are all out of scope. The frontend now consumes
+already-persisted telemetry and anomaly incidents (Day 11B) — see
+["Frontend Telemetry Workspace"](#frontend-telemetry-workspace) below —
+but never runs this simulator, submits telemetry, or reads AC-10 logs
+itself.
 
 ### CORS (Day 6A)
 
@@ -355,6 +358,50 @@ incident resolution, each proving persistence across a page reload).
 | ![Mobile dashboard, light theme](./docs/assets/day-8b/mobile-light.png) | ![Mobile dashboard, dark theme](./docs/assets/day-8b/mobile-dark.png) |
 
 </details>
+
+## Frontend Telemetry Workspace
+
+The dashboard described above now also includes a read-only `Device
+telemetry` workspace (Day 11B), positioned after configuration submission
+and before the global incident list.
+
+1. Start the application through the existing documented development or
+   Compose workflow — see ["Start / stop the stack"](#start--stop-the-stack-docker-compose)
+   and ["Frontend (Day 6C)"](#frontend-day-6c) above.
+2. Generate or submit telemetry **separately**, through the
+   [deterministic simulator](#deterministic-telemetry-simulator) or the
+   public telemetry API (`POST /devices/{device_id}/telemetry`) — never
+   from the browser.
+3. Open the dashboard.
+4. Enter the simulator-generated (or otherwise seeded) device ID in the
+   field labeled **`Telemetry device`**.
+5. Select **`Load telemetry`**.
+6. Use **`Refresh telemetry`** for a manual refresh at any time — there is
+   no automatic polling.
+
+The workspace shows the latest telemetry sample (timestamp, CPU/memory
+utilization, interface error rate), the latest interface states, the
+latest BGP-session states, the complete recent-sample history as a
+semantic table (in the backend's own persisted order — never re-sorted),
+and the persisted `ANOMALY` incidents for that exact device, each with an
+evidence summary for `RULE-CPU-HIGH`/`RULE-LINK-FLAP`/`RULE-BGP-DOWN`.
+
+- The browser does not run the simulator.
+- The browser does not `POST` telemetry.
+- The browser does not read AC-10 stdout logs.
+- Repeated simulator runs generate new device IDs each time (`sim-{run_id}-{scenario}`)
+  — enter the **exact** device ID the simulator printed; an old or guessed
+  ID will simply show the "no telemetry has been recorded" empty state.
+
+**Verification evidence (Day 11B).** 11 Vitest files / 390 tests passed (0
+failed, 0 skipped), TypeScript typecheck clean, ESLint clean, production
+build clean. Playwright: 4 spec files / 5 tests, all passing in a
+disposable, isolated live Docker Compose run (exit code 0, resources fully
+cleaned up afterward) — a six-sample deterministic telemetry sequence,
+submitted through the real public HTTP API, produced anomaly incidents for
+all three rules in the exact order `RULE-CPU-HIGH` → `RULE-LINK-FLAP` →
+`RULE-BGP-DOWN`; see CLAUDE.md's "Current Phase" (Day 11B) for the
+complete measured inventory.
 
 ### Current Day 6C scope
 
@@ -2096,3 +2143,40 @@ HTTP requests issued, 9 durable incidents (8 `OPEN` / 1 `RESOLVED`) and 10
 AC-10 structured stdout events (9 `CREATED` / 1 `UPDATED`) independently
 confirmed, then fully torn down. No API, schema, database, frontend, or
 migration file changed. Frontend telemetry consumption remains deferred.
+
+**Day 11B — Frontend Telemetry Consumption.** Supersedes Day 11A's
+"Frontend telemetry consumption remains deferred" statement above: the
+existing single-page dashboard gained a read-only `Device telemetry`
+workspace, consuming `GET /devices/{device_id}/telemetry/recent` and
+device-filtered `ANOMALY` incidents from `GET /incidents` — see
+["Frontend Telemetry Workspace"](#frontend-telemetry-workspace) above for
+usage and CLAUDE.md's "Current Phase" (Day 11B) for the complete
+implementation and verification detail. The workspace requests telemetry
+and incidents concurrently with independent success/error handling, uses a
+fixed, internal `since` boundary (`TELEMETRY_HISTORY_SINCE =
+"1970-01-01T00:00:00Z"`, never the browser clock, not UI-configurable),
+protects against stale responses via a monotonic request ID plus
+`AbortController`, and refreshes manually only — no polling, WebSockets,
+or server-sent events. It never submits telemetry, invokes the simulator
+or Docker, connects to PostgreSQL, or reads AC-10 logs; an unrecognized
+future `ANOMALY` rule reference is currently rejected by the frontend's
+own API-client validation before the component's safe generic fallback
+would ever render it, so end-to-end support for such a rule does not yet
+exist.
+
+Verified: **11** Vitest files / **390** tests passed (0 failed, 0
+skipped; +62 over the Day 11B1 pre-work baseline of 328), TypeScript
+typecheck clean, ESLint clean, production build clean. Playwright: **4**
+spec files / **5** tests (+1 spec, +2 tests over the pre-existing 3-file/
+3-test baseline), all passing in a disposable, isolated live Docker
+Compose run (exit code 0, resources fully cleaned up afterward) — a
+six-sample deterministic all-anomalies telemetry sequence, submitted
+through the real public HTTP API, produced the exact final anomaly order
+`RULE-CPU-HIGH` → `RULE-LINK-FLAP` → `RULE-BGP-DOWN`; the workspace
+rendered all six history rows in ascending order and all three resulting
+`OPEN` anomaly incidents with their evidence summaries; a second,
+telemetry-free device at a 390×844 viewport showed both non-error
+empty-state messages with no document-level horizontal overflow. No
+backend, dependency, router, charting library, polling mechanism,
+telemetry-simulator, or direct-database code was added or changed for any
+of this.

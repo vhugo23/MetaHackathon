@@ -13,6 +13,45 @@ export interface PolicyViolationIncidentEvidenceResponse {
   direction: Direction | (string & {});
 }
 
+// ---------------------------------------------------------------------------
+// ANOMALY incident evidence (rule_ref-discriminated: RULE-CPU-HIGH /
+// RULE-LINK-FLAP / RULE-BGP-DOWN) — see docs/frontend-api-contract.md
+// Section 6. The backend discriminates which shape applies via the
+// incident's own `source`/`rule_ref` fields; no synthetic discriminator
+// field exists inside `evidence` itself.
+// ---------------------------------------------------------------------------
+
+export interface CpuSampleEvidenceResponse {
+  timestamp: string;
+  cpu_utilization_pct: number;
+}
+
+export interface CpuHighEvidenceResponse {
+  samples: CpuSampleEvidenceResponse[];
+}
+
+export interface InterfaceTransitionEvidenceResponse {
+  timestamp: string;
+  oper_state: string;
+}
+
+export interface LinkFlapEvidenceResponse {
+  interface_name: string;
+  transitions: InterfaceTransitionEvidenceResponse[];
+}
+
+export interface BgpDownEvidenceResponse {
+  neighbor_ip: string;
+  previous_state: string;
+  state: string;
+}
+
+export type IncidentEvidenceResponse =
+  | PolicyViolationIncidentEvidenceResponse
+  | CpuHighEvidenceResponse
+  | LinkFlapEvidenceResponse
+  | BgpDownEvidenceResponse;
+
 export interface IncidentResponse {
   incident_id: string;
   fingerprint: string;
@@ -22,7 +61,7 @@ export interface IncidentResponse {
   affected_resource: string;
   severity: Severity | (string & {});
   status: IncidentStatus | (string & {});
-  evidence: PolicyViolationIncidentEvidenceResponse;
+  evidence: IncidentEvidenceResponse;
   recommendation: string;
   created_at: string;
   last_seen_at: string;
@@ -97,6 +136,30 @@ export interface ConfigurationSubmissionResponse {
   incidents_updated: number;
 }
 
+// ---------------------------------------------------------------------------
+// GET /devices/{device_id}/telemetry/recent
+// ---------------------------------------------------------------------------
+
+export interface InterfaceStateResponse {
+  name: string;
+  oper_state: string;
+}
+
+export interface BgpSessionResponse {
+  neighbor_ip: string;
+  state: string;
+}
+
+export interface TelemetrySampleResponse {
+  device_id: string;
+  sampled_at: string;
+  cpu_utilization_pct: number;
+  memory_utilization_pct: number;
+  interface_error_rate: number;
+  interface_states: InterfaceStateResponse[];
+  bgp_sessions: BgpSessionResponse[];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -119,6 +182,10 @@ function isInteger(value: unknown): value is number {
 
 function isNullableInteger(value: unknown): value is number | null {
   return value === null || isInteger(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 /**
@@ -144,6 +211,74 @@ export function isPolicyViolationIncidentEvidenceResponse(
   );
 }
 
+/** Structural only, per `CpuSampleEvidenceResponse`'s own fields. */
+export function isCpuSampleEvidenceResponse(value: unknown): value is CpuSampleEvidenceResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return isNonEmptyString(value.timestamp) && isFiniteNumber(value.cpu_utilization_pct);
+}
+
+export function isCpuHighEvidenceResponse(value: unknown): value is CpuHighEvidenceResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return Array.isArray(value.samples) && value.samples.every(isCpuSampleEvidenceResponse);
+}
+
+export function isInterfaceTransitionEvidenceResponse(
+  value: unknown,
+): value is InterfaceTransitionEvidenceResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return isNonEmptyString(value.timestamp) && isNonEmptyString(value.oper_state);
+}
+
+export function isLinkFlapEvidenceResponse(value: unknown): value is LinkFlapEvidenceResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    isNonEmptyString(value.interface_name) &&
+    Array.isArray(value.transitions) &&
+    value.transitions.every(isInterfaceTransitionEvidenceResponse)
+  );
+}
+
+export function isBgpDownEvidenceResponse(value: unknown): value is BgpDownEvidenceResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    isNonEmptyString(value.neighbor_ip) &&
+    isNonEmptyString(value.previous_state) &&
+    isNonEmptyString(value.state)
+  );
+}
+
+/**
+ * Structural-only union membership check — accepts a value that matches
+ * *any* of the four known evidence shapes, without regard to the sibling
+ * `source`/`rule_ref` fields on the containing incident. This keeps
+ * `isIncidentResponse` a pure shape check, consistent with its existing
+ * treatment of `severity`/`status`/`source` as non-empty strings rather
+ * than closed enums. Confirming that a *specific* rule_ref's evidence
+ * actually matches its expected shape (e.g. rejecting a RULE-CPU-HIGH
+ * incident carrying link-flap evidence) is a stricter, source/rule_ref-aware
+ * check layered on top in `incidents.ts` — mirroring how `resolveIncident`
+ * already layers its own stricter semantic check on top of this same
+ * function.
+ */
+function isIncidentEvidenceResponse(value: unknown): value is IncidentEvidenceResponse {
+  return (
+    isPolicyViolationIncidentEvidenceResponse(value) ||
+    isCpuHighEvidenceResponse(value) ||
+    isLinkFlapEvidenceResponse(value) ||
+    isBgpDownEvidenceResponse(value)
+  );
+}
+
 export function isIncidentResponse(value: unknown): value is IncidentResponse {
   if (!isRecord(value)) {
     return false;
@@ -157,7 +292,7 @@ export function isIncidentResponse(value: unknown): value is IncidentResponse {
     isNonEmptyString(value.affected_resource) &&
     isNonEmptyString(value.severity) &&
     isNonEmptyString(value.status) &&
-    isPolicyViolationIncidentEvidenceResponse(value.evidence) &&
+    isIncidentEvidenceResponse(value.evidence) &&
     typeof value.recommendation === "string" &&
     isNonEmptyString(value.created_at) &&
     isNonEmptyString(value.last_seen_at) &&
@@ -255,5 +390,43 @@ export function isConfigurationSubmissionResponse(
     isNonNegativeInteger(value.violations_detected) &&
     isNonNegativeInteger(value.incidents_created) &&
     isNonNegativeInteger(value.incidents_updated)
+  );
+}
+
+/**
+ * Structural only, matching this document's forward-compatible convention:
+ * `oper_state` is validated as a non-empty string, not the closed `"up" |
+ * "down"` union, so an unrecognized future link-state value is still
+ * accepted rather than rejecting the whole sample.
+ */
+export function isInterfaceStateResponse(value: unknown): value is InterfaceStateResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return isNonEmptyString(value.name) && isNonEmptyString(value.oper_state);
+}
+
+/** Structural only — `state` is a non-empty string, not a closed BGP-state union. */
+export function isBgpSessionResponse(value: unknown): value is BgpSessionResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return isNonEmptyString(value.neighbor_ip) && isNonEmptyString(value.state);
+}
+
+export function isTelemetrySampleResponse(value: unknown): value is TelemetrySampleResponse {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    isNonEmptyString(value.device_id) &&
+    isNonEmptyString(value.sampled_at) &&
+    isFiniteNumber(value.cpu_utilization_pct) &&
+    isFiniteNumber(value.memory_utilization_pct) &&
+    isFiniteNumber(value.interface_error_rate) &&
+    Array.isArray(value.interface_states) &&
+    value.interface_states.every(isInterfaceStateResponse) &&
+    Array.isArray(value.bgp_sessions) &&
+    value.bgp_sessions.every(isBgpSessionResponse)
   );
 }

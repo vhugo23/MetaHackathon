@@ -3,6 +3,7 @@ import { IncidentCard } from "../components/IncidentCard";
 import { IncidentEmptyState } from "../components/IncidentEmptyState";
 import { IncidentErrorState } from "../components/IncidentErrorState";
 import { LoadingState } from "../components/LoadingState";
+import { TelemetryPanel } from "../components/TelemetryPanel";
 import { useIncidents } from "../hooks/useIncidents";
 
 function incidentCountLabel(count: number): string {
@@ -28,6 +29,8 @@ export function IncidentDashboard() {
           refresh();
         }}
       />
+
+      <TelemetryPanel />
 
       <div className="incident-dashboard__section">
         {state.status === "loading" && <LoadingState />}

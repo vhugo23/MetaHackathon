@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { fetchIncidents, resolveIncident } from "./incidents";
+import { fetchIncidents, filterAnomalyIncidentsForDevice, resolveIncident } from "./incidents";
 import { ApiRequestError } from "./client";
+import type { IncidentResponse, PolicyViolationIncidentEvidenceResponse } from "./types";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -206,7 +207,8 @@ test("preserves an unknown future violation_type value as text", async () => {
 
   const result = await fetchIncidents();
 
-  expect(result[0]?.evidence.violation_type).toBe("UNEXPECTED_BGP_NEIGHBOR");
+  const evidence = result[0]?.evidence as PolicyViolationIncidentEvidenceResponse;
+  expect(evidence.violation_type).toBe("UNEXPECTED_BGP_NEIGHBOR");
 });
 
 test("preserves an unknown future direction value as text", async () => {
@@ -218,7 +220,8 @@ test("preserves an unknown future direction value as text", async () => {
 
   const result = await fetchIncidents();
 
-  expect(result[0]?.evidence.direction).toBe("both");
+  const evidence = result[0]?.evidence as PolicyViolationIncidentEvidenceResponse;
+  expect(evidence.direction).toBe("both");
 });
 
 test("preserves backend order across multiple valid incidents", async () => {
@@ -613,4 +616,229 @@ test("propagates an abort as an AbortError, unwrapped", async () => {
     expect(error).toBeInstanceOf(DOMException);
     expect((error as DOMException).name).toBe("AbortError");
   }
+});
+
+// --- ANOMALY evidence validation (Day 11B1) --------------------------------
+
+function rawCpuHighIncidentPayload(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    incident_id: "cpu-incident-1",
+    fingerprint: "f".repeat(40),
+    device_id: "spine-01",
+    source: "ANOMALY",
+    rule_ref: "RULE-CPU-HIGH",
+    affected_resource: "device",
+    severity: "High",
+    status: "OPEN",
+    evidence: {
+      samples: [
+        { timestamp: "2026-07-18T10:00:00Z", cpu_utilization_pct: 95.0 },
+        { timestamp: "2026-07-18T10:00:30Z", cpu_utilization_pct: 96.0 },
+      ],
+    },
+    recommendation: "Investigate sustained high CPU utilization on spine-01.",
+    created_at: "2026-07-18T10:00:30Z",
+    last_seen_at: "2026-07-18T10:00:30Z",
+    occurrence_count: 1,
+    updated_at: "2026-07-18T10:00:30Z",
+    resolved_at: null,
+    ...overrides,
+  };
+}
+
+function rawLinkFlapIncidentPayload(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    incident_id: "link-incident-1",
+    fingerprint: "f".repeat(40),
+    device_id: "spine-01",
+    source: "ANOMALY",
+    rule_ref: "RULE-LINK-FLAP",
+    affected_resource: "interface:GigabitEthernet0/1",
+    severity: "High",
+    status: "OPEN",
+    evidence: {
+      interface_name: "GigabitEthernet0/1",
+      transitions: [
+        { timestamp: "2026-07-18T10:00:12Z", oper_state: "down" },
+        { timestamp: "2026-07-18T10:00:24Z", oper_state: "up" },
+      ],
+    },
+    recommendation:
+      "Investigate unstable link state on spine-01 interface GigabitEthernet0/1.",
+    created_at: "2026-07-18T10:00:48Z",
+    last_seen_at: "2026-07-18T10:00:48Z",
+    occurrence_count: 1,
+    updated_at: "2026-07-18T10:00:48Z",
+    resolved_at: null,
+    ...overrides,
+  };
+}
+
+function rawBgpDownIncidentPayload(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    incident_id: "bgp-incident-1",
+    fingerprint: "f".repeat(40),
+    device_id: "spine-01",
+    source: "ANOMALY",
+    rule_ref: "RULE-BGP-DOWN",
+    affected_resource: "bgp-neighbor:10.0.0.2",
+    severity: "Critical",
+    status: "OPEN",
+    evidence: {
+      neighbor_ip: "10.0.0.2",
+      previous_state: "Established",
+      state: "Idle",
+    },
+    recommendation: "Investigate BGP session down on spine-01 neighbor 10.0.0.2.",
+    created_at: "2026-07-18T10:00:30Z",
+    last_seen_at: "2026-07-18T10:00:30Z",
+    occurrence_count: 1,
+    updated_at: "2026-07-18T10:00:30Z",
+    resolved_at: null,
+    ...overrides,
+  };
+}
+
+test("accepts a valid RULE-CPU-HIGH anomaly incident", async () => {
+  const payload = rawCpuHighIncidentPayload();
+  stubIncidentsResponse([payload]);
+
+  const result = await fetchIncidents();
+
+  expect(result).toEqual([payload]);
+});
+
+test("accepts a valid RULE-LINK-FLAP anomaly incident", async () => {
+  const payload = rawLinkFlapIncidentPayload();
+  stubIncidentsResponse([payload]);
+
+  const result = await fetchIncidents();
+
+  expect(result).toEqual([payload]);
+});
+
+test("accepts a valid RULE-BGP-DOWN anomaly incident", async () => {
+  const payload = rawBgpDownIncidentPayload();
+  stubIncidentsResponse([payload]);
+
+  const result = await fetchIncidents();
+
+  expect(result).toEqual([payload]);
+});
+
+test("rejects a RULE-CPU-HIGH incident carrying non-CPU evidence", async () => {
+  const payload = rawCpuHighIncidentPayload({
+    evidence: { interface_name: "GigabitEthernet0/1", transitions: [] },
+  });
+  stubIncidentsResponse([payload]);
+
+  await expect(fetchIncidents()).rejects.toThrow(ApiRequestError);
+});
+
+test("rejects a RULE-LINK-FLAP incident with a malformed transition entry", async () => {
+  const payload = rawLinkFlapIncidentPayload({
+    evidence: {
+      interface_name: "GigabitEthernet0/1",
+      transitions: [{ timestamp: "2026-07-18T10:00:12Z", oper_state: "" }],
+    },
+  });
+  stubIncidentsResponse([payload]);
+
+  await expect(fetchIncidents()).rejects.toThrow(ApiRequestError);
+});
+
+test("rejects a RULE-BGP-DOWN incident missing the current state", async () => {
+  const payload = rawBgpDownIncidentPayload({
+    evidence: { neighbor_ip: "10.0.0.2", previous_state: "Established", state: "" },
+  });
+  stubIncidentsResponse([payload]);
+
+  await expect(fetchIncidents()).rejects.toThrow(ApiRequestError);
+});
+
+test("an existing POLICY_VIOLATION incident remains accepted (Day 11B1 regression check)", async () => {
+  stubIncidentsResponse([validIncident]);
+
+  const result = await fetchIncidents();
+
+  expect(result).toEqual([validIncident]);
+});
+
+// --- filterAnomalyIncidentsForDevice (Day 11B1) -----------------------------
+
+test("filterAnomalyIncidentsForDevice keeps only exact device_id + ANOMALY source matches", () => {
+  const cpuIncident = rawCpuHighIncidentPayload() as unknown as IncidentResponse;
+  const otherDeviceCpuIncident = {
+    ...cpuIncident,
+    device_id: "leaf-02",
+  };
+
+  const result = filterAnomalyIncidentsForDevice(
+    [cpuIncident, otherDeviceCpuIncident],
+    "spine-01",
+  );
+
+  expect(result).toEqual([cpuIncident]);
+});
+
+test("filterAnomalyIncidentsForDevice excludes POLICY_VIOLATION incidents for the same device", () => {
+  const cpuIncident = rawCpuHighIncidentPayload() as unknown as IncidentResponse;
+  const policyIncident = validIncident as unknown as IncidentResponse;
+
+  const result = filterAnomalyIncidentsForDevice([cpuIncident, policyIncident], "spine-01");
+
+  expect(result).toEqual([cpuIncident]);
+});
+
+test("filterAnomalyIncidentsForDevice retains both OPEN and RESOLVED anomaly incidents", () => {
+  const openIncident = rawCpuHighIncidentPayload() as unknown as IncidentResponse;
+  const resolvedIncident = rawLinkFlapIncidentPayload({
+    status: "RESOLVED",
+    resolved_at: "2026-07-18T11:00:00Z",
+    updated_at: "2026-07-18T11:00:00Z",
+  }) as unknown as IncidentResponse;
+
+  const result = filterAnomalyIncidentsForDevice([openIncident, resolvedIncident], "spine-01");
+
+  expect(result).toEqual([openIncident, resolvedIncident]);
+});
+
+test("filterAnomalyIncidentsForDevice preserves input ordering", () => {
+  const first = rawCpuHighIncidentPayload({ incident_id: "id-1" }) as unknown as IncidentResponse;
+  const second = rawBgpDownIncidentPayload({ incident_id: "id-2" }) as unknown as IncidentResponse;
+  const third = rawLinkFlapIncidentPayload({
+    incident_id: "id-3",
+  }) as unknown as IncidentResponse;
+
+  const result = filterAnomalyIncidentsForDevice([third, first, second], "spine-01");
+
+  expect(result.map((incident) => incident.incident_id)).toEqual(["id-3", "id-1", "id-2"]);
+});
+
+test("filterAnomalyIncidentsForDevice does not mutate the input array", () => {
+  const incidents = [
+    rawCpuHighIncidentPayload() as unknown as IncidentResponse,
+    validIncident as unknown as IncidentResponse,
+  ];
+  const original = [...incidents];
+
+  filterAnomalyIncidentsForDevice(incidents, "spine-01");
+
+  expect(incidents).toEqual(original);
+});
+
+test("filterAnomalyIncidentsForDevice returns an empty array when there is no match", () => {
+  const cpuIncident = rawCpuHighIncidentPayload({
+    device_id: "leaf-02",
+  }) as unknown as IncidentResponse;
+
+  const result = filterAnomalyIncidentsForDevice([cpuIncident], "spine-01");
+
+  expect(result).toEqual([]);
 });

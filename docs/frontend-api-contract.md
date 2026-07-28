@@ -20,7 +20,13 @@ addition of the resolve endpoint. **Day 9b added two more endpoints,
 /devices/{device_id}/telemetry/recent` (Section 9), also backend-only with
 no frontend consumer yet.** **Day 9c added no new endpoint — `GET
 /incidents` (Section 6) now also returns `"ANOMALY"`-sourced incidents,
-still with no frontend consumer.**
+still with no frontend consumer.** **Day 11B added the frontend's fourth
+and fifth consumers: `GET /devices/{device_id}/telemetry/recent` (Section
+9) and `"ANOMALY"`-sourced incidents from `GET /incidents` (Section 6),
+both rendered in a new, read-only `Device telemetry` workspace on the
+existing dashboard — see README.md's "Frontend Telemetry Workspace"
+section. `POST /devices/{device_id}/telemetry` remains backend-only; the
+frontend never submits telemetry.**
 **Derived from:** `backend/src/meta_rne/api/schemas.py`, `api/routes.py`,
 `api/errors.py`, `api/cors.py` (current source, not a planning aspiration)
 
@@ -257,9 +263,29 @@ An `"ANOMALY"` incident's `severity` is always `"High"`
 (`RULE-CPU-HIGH`/`RULE-LINK-FLAP`) or `"Critical"` (`RULE-BGP-DOWN`), and
 `affected_resource` is `"device"`, `"interface:{interface_name}"`, or
 `"bgp-neighbor:{neighbor_ip}"` respectively — fixed per rule, never
-computed per-instance. No frontend consumer of `"ANOMALY"`-sourced
-incidents exists yet; the dashboard currently only renders the
-`"POLICY_VIOLATION"` evidence shape.
+computed per-instance.
+
+**Frontend consumption notes (Day 11B).** The telemetry workspace
+(`TelemetryPanel.tsx`) consumes this same, unfiltered `GET /incidents`
+response — no server-side filtering exists — and filters it client-side
+(`filterAnomalyIncidentsForDevice`, `src/api/incidents.ts`) to exactly the
+incidents matching the selected `device_id` and `source === "ANOMALY"`;
+both `OPEN` and `RESOLVED` matches render. The existing global incident
+list (`IncidentCard.tsx`) is unchanged and still renders only the
+`"POLICY_VIOLATION"` evidence shape; the workspace does not duplicate its
+"Resolve incident" control, and resolution remains available only there.
+Evidence rendering for all three `"ANOMALY"` shapes
+(`RULE-CPU-HIGH`/`RULE-LINK-FLAP`/`RULE-BGP-DOWN`) uses the existing
+exported structural guards (`isCpuHighEvidenceResponse`/
+`isLinkFlapEvidenceResponse`/`isBgpDownEvidenceResponse`), never an unsafe
+cast. **An incident whose `source` is `"ANOMALY"` but whose `rule_ref` is
+not one of these three known values is rejected by the frontend's own
+runtime validation (`hasEvidenceConsistentWithRule`,
+`src/api/incidents.ts`) before it ever reaches the UI** — the component
+itself has a safe generic fallback for an unrecognized rule, but that
+fallback is currently unreachable given the stricter client-side
+validation; end-to-end support for a future, unrecognized `ANOMALY` rule
+does not yet exist.
 
 **`updated_at`/`resolved_at` (Day 7A).** `updated_at` is a required
 `datetime` field — the most recent persisted mutation to this incident of
@@ -418,16 +444,18 @@ Comparison scope: interfaces (by name; scalar fields `description`,
 `static_routes` are not compared. No severity, recommendation, or incident
 is ever produced by this endpoint.
 
-## 9. `POST /devices/{device_id}/telemetry` and `GET /devices/{device_id}/telemetry/recent` (Day 9b, backend-only)
+## 9. `POST /devices/{device_id}/telemetry` (Day 9b, backend-only) and `GET /devices/{device_id}/telemetry/recent` (Day 9b backend; Day 11B frontend)
 
 Ingests telemetry samples and runs three deterministic anomaly rules
-against them. **No frontend consumer exists yet** — the current React
-dashboard does not call either endpoint, and neither response contains any
-incident field (no `incident_id`, `severity`, `recommendation`, or
-`fingerprint`). **As of Day 9c, a fired anomaly does create or update an
-incident** — as an internal side effect of the same atomic `POST`
-operation, never reflected in this endpoint's own response. The resulting
-incident is visible only through `GET /incidents` (Section 6).
+against them. Neither response contains any incident field (no
+`incident_id`, `severity`, `recommendation`, or `fingerprint`). **As of
+Day 9c, a fired anomaly does create or update an incident** — as an
+internal side effect of the same atomic `POST` operation, never reflected
+in this endpoint's own response. The resulting incident is visible only
+through `GET /incidents` (Section 6). **`POST` remains backend-only — the
+frontend never submits telemetry, invokes the simulator, or invokes
+Docker. `GET /devices/{device_id}/telemetry/recent` now has a frontend
+consumer as of Day 11B** — see below.
 
 **`POST /devices/{device_id}/telemetry`** — `device_id` (path) is
 authoritative; `observed_at` is always server-generated, never accepted in
@@ -502,6 +530,26 @@ GET /devices/{device_id}/telemetry/recent?since=2026-07-18T09:55:00Z
 Both endpoints share the existing `device_not_found`/404 and
 `invalid_request`/422 error mapping (Section 10) — no new error class or
 API code was introduced for telemetry.
+
+**Frontend consumption notes (Day 11B).** `fetchRecentTelemetry`
+(`src/api/telemetry.ts`) calls `GET
+/devices/{device_id}/telemetry/recent` with a fixed, internal
+`since` value — the exported constant `TELEMETRY_HISTORY_SINCE =
+"1970-01-01T00:00:00Z"` (`src/hooks/useTelemetryWorkspace.ts`), never the
+browser's current clock, and not currently exposed as a UI input. The
+response's bare-array shape, empty-array-is-valid-success semantics, and
+persisted (ascending) ordering are all consumed unmodified —
+`fetchRecentTelemetry` performs no client-side sorting, deduplication, or
+row limiting. `selectLatestTelemetrySample` selects the final array
+element as the latest sample, per this section's documented ascending
+order. Every sample is validated at runtime by `isTelemetrySampleResponse`
+before the frontend trusts it, following the same forward-compatible,
+structural-only convention as the rest of this document (interface/BGP
+state values are checked as non-empty strings, not closed enums). The
+telemetry workspace (`TelemetryPanel.tsx`) requests this endpoint and `GET
+/incidents` (Section 6) concurrently, on one shared `AbortSignal`, and
+handles their success/failure independently — see README.md's "Frontend
+Telemetry Workspace" section for the full user-facing behavior.
 
 ## 10. Errors
 
@@ -591,13 +639,26 @@ Do not build frontend features assuming any of the following exist:
   dashboard's "Resolve incident" control for exact `OPEN` incidents only
 - `GET /devices`, `GET /devices/{id}`, `GET /incidents/{id}`
 - A frontend consumer of configuration drift detection
-  (`GET /devices/{device_id}/drift`, Section 8, implemented as of Day 9),
-  of telemetry ingestion/anomaly detection (`POST
-  /devices/{device_id}/telemetry` and `GET
-  /devices/{device_id}/telemetry/recent`, Section 9, implemented as of Day
-  9b), or of `"ANOMALY"`-sourced incidents now returned by `GET /incidents`
-  (Section 6, implemented as of Day 9c) — all backend-only; the dashboard
-  does not yet render anomaly evidence
+  (`GET /devices/{device_id}/drift`, Section 8, implemented as of Day 9)
+  — still backend-only; the dashboard does not call this endpoint
+- Frontend telemetry **submission** — `POST
+  /devices/{device_id}/telemetry` remains backend-only; the browser never
+  submits telemetry, invokes the simulator, or invokes Docker
+- Automatic polling, WebSockets, or server-sent events anywhere in the
+  telemetry workspace — refresh is manual only (Day 11B)
+- Server-side filtering of `GET /incidents` by device or source — the
+  telemetry workspace filters the existing unfiltered response client-side
+  (Day 11B)
+- A chart, sparkline, or any other data-visualization dependency for
+  telemetry — the recent-sample history renders as a semantic table only
+  (Day 11B)
+- Display of AC-10's structured incident-event log lines through the
+  browser — those remain API-process stdout only, never requested or
+  parsed by the frontend
+- End-to-end frontend support for an unrecognized future `ANOMALY`
+  `rule_ref` — the frontend's own API-client validation rejects it before
+  the telemetry workspace's safe generic fallback would ever render it
+  (Day 11B; see Section 6's Day 11B consumption notes)
 - Any vendor besides `cisco-ios-xe`/`arista-eos` (both now supported as of
   Day 8A — see Section 5's `vendor` row and CLAUDE.md's "Current Phase")
 - Wildcard or shared policy applicability, and policy authoring/CRUD

@@ -1,4 +1,8 @@
-import type { IncidentResponse } from "../api/types";
+import {
+  isPolicyViolationIncidentEvidenceResponse,
+  type IncidentResponse,
+  type PolicyViolationIncidentEvidenceResponse,
+} from "../api/types";
 
 interface IncidentCardProps {
   incident: IncidentResponse;
@@ -32,8 +36,18 @@ export function IncidentCard({
   resolveError,
   onResolve,
 }: IncidentCardProps) {
-  const { evidence } = incident;
   const isOpen = incident.status === "OPEN";
+  // `IncidentResponse.evidence` is a rule_ref-discriminated union (Day
+  // 11B1) — only a POLICY_VIOLATION incident whose evidence actually
+  // passes the shared runtime guard is narrowed to the policy-specific
+  // shape this component already knows how to render. Day 11B2 will add
+  // CPU/link-flap/BGP evidence rendering; until then, a non-POLICY_VIOLATION
+  // incident simply renders no evidence-details block.
+  const policyEvidence: PolicyViolationIncidentEvidenceResponse | undefined =
+    incident.source === "POLICY_VIOLATION" &&
+    isPolicyViolationIncidentEvidenceResponse(incident.evidence)
+      ? incident.evidence
+      : undefined;
 
   return (
     <article
@@ -116,39 +130,41 @@ export function IncidentCard({
         </div>
       )}
 
-      <details>
-        <summary>Evidence</summary>
-        <dl className="incident-card__fields">
-          <div>
-            <dt>Violation type</dt>
-            <dd>{humanize(evidence.violation_type, VIOLATION_TYPE_LABELS)}</dd>
-          </div>
-          <div>
-            <dt>Expected ACL</dt>
-            <dd>{evidence.expected_acl_name}</dd>
-          </div>
-          <div>
-            <dt>Actual ACL</dt>
-            <dd>{evidence.actual_acl_name ?? "None"}</dd>
-          </div>
-          <div>
-            <dt>Interface</dt>
-            <dd>{evidence.interface_name}</dd>
-          </div>
-          <div>
-            <dt>Direction</dt>
-            <dd>{humanize(evidence.direction, DIRECTION_LABELS)}</dd>
-          </div>
-          <div>
-            <dt>Source snapshot</dt>
-            <dd>{evidence.source_snapshot_id}</dd>
-          </div>
-          <div>
-            <dt>Fingerprint</dt>
-            <dd>{incident.fingerprint}</dd>
-          </div>
-        </dl>
-      </details>
+      {policyEvidence && (
+        <details>
+          <summary>Evidence</summary>
+          <dl className="incident-card__fields">
+            <div>
+              <dt>Violation type</dt>
+              <dd>{humanize(policyEvidence.violation_type, VIOLATION_TYPE_LABELS)}</dd>
+            </div>
+            <div>
+              <dt>Expected ACL</dt>
+              <dd>{policyEvidence.expected_acl_name}</dd>
+            </div>
+            <div>
+              <dt>Actual ACL</dt>
+              <dd>{policyEvidence.actual_acl_name ?? "None"}</dd>
+            </div>
+            <div>
+              <dt>Interface</dt>
+              <dd>{policyEvidence.interface_name}</dd>
+            </div>
+            <div>
+              <dt>Direction</dt>
+              <dd>{humanize(policyEvidence.direction, DIRECTION_LABELS)}</dd>
+            </div>
+            <div>
+              <dt>Source snapshot</dt>
+              <dd>{policyEvidence.source_snapshot_id}</dd>
+            </div>
+            <div>
+              <dt>Fingerprint</dt>
+              <dd>{incident.fingerprint}</dd>
+            </div>
+          </dl>
+        </details>
+      )}
     </article>
   );
 }

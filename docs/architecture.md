@@ -1525,9 +1525,20 @@ needs:
   anomaly detection** (FR-05/FR-06) **are implemented as of Day 9b, and
   anomaly-to-incident mapping/persistence as of Day 9c** — AC-07, AC-08,
   and AC-09 are proven end to end. **Structured incident event logging is
-  implemented as of Day 10** (Section 13) — AC-10 is no longer deferred. A
-  deterministic telemetry simulator and frontend telemetry workflows
-  remain deferred.
+  implemented as of Day 10** (Section 13) — AC-10 is no longer deferred.
+  **A deterministic telemetry simulator is implemented as of Day 11A**
+  (`scripts/telemetry_simulator.py`) — an operator/developer-invoked CLI
+  scenario runner driving the real public HTTP API only, never a daemon
+  and never invoked from the browser. **Read-only frontend telemetry
+  consumption is implemented as of Day 11B** — a `Device telemetry`
+  workspace on the existing dashboard consumes
+  `GET /devices/{device_id}/telemetry/recent` and persisted `ANOMALY`
+  incidents through the existing `GET /incidents`; the browser never
+  submits telemetry, never invokes the simulator or Docker, and never
+  accesses the database directly. AC-10 events remain API-process stdout
+  only, never requested or displayed by the frontend. No automatic
+  polling, WebSockets, server-sent events, frontend charting, or
+  prediction/forecasting exists.
 
 ### 17.1.1 Frontend ownership and data flow (Day 6C)
 
