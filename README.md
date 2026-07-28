@@ -130,15 +130,114 @@ ruff check .             # linting
 mypy src                 # static type checking
 ```
 
-### Start / stop the stack (Docker Compose)
+### One-command portfolio demo (Day 11C2)
+
+The fastest way to see the whole system — PostgreSQL, the API, and the
+containerized frontend, seeded with one complete anomaly scenario — is the
+standard-library operator helper, from the repository root:
+
+```
+python scripts/demo.py start
+```
+
+It:
+
+- creates a unique, isolated Compose project by default (so it can never
+  collide with another run or a developer's own `docker compose up`)
+- reserves three distinct loopback ports (database, API, frontend) held
+  simultaneously until Compose needs them
+- builds and starts PostgreSQL, the API, and the Nginx-served frontend
+  (`docker compose up --build --detach --wait`)
+- checks real API (`GET /health`) and frontend (`GET /`) readiness over
+  public HTTP
+- runs the existing deterministic simulator's `all-anomalies` scenario as a
+  separate subprocess (`scripts/telemetry_simulator.py` — never in-process,
+  never from the browser)
+- prints the browser URL, the API URL, and the exact telemetry device ID
+- leaves the stack running and prints the exact stop command
+
+A reproducible example with explicit, fixed identifiers:
+
+```powershell
+python scripts/demo.py start `
+  --project-name meta-rne-demo-local `
+  --run-id local-demo `
+  --timeout-seconds 600
+```
+
+That example always produces telemetry device ID `sim-local-demo-all-anomalies`
+(the device ID is always `sim-<run-id>-all-anomalies` for the `all-anomalies`
+scenario). Open the printed browser URL, enter that device ID in the
+`Telemetry device` field, and select `Load telemetry` — see
+["Frontend Telemetry Workspace"](#frontend-telemetry-workspace) below.
+
+When you are done:
+
+```
+python scripts/demo.py stop --project-name meta-rne-demo-local
+```
+
+`stop` removes only that exact project's containers, network, and volume —
+never anything belonging to another Compose project, and never a Docker
+prune. Run `python scripts/demo.py --help`, `start --help`, or `stop --help`
+for the complete option list.
+
+**Verified evidence (Day 11C).** 47 isolated unit tests pass
+(`scripts/test_demo.py` — no real Docker, network, browser, simulator, or
+real sleeping); Ruff format/lint and `mypy` are clean. A live, disposable run
+built and started all three containers, passed public API/frontend
+readiness, ran the `all-anomalies` scenario, and was independently verified
+through the public HTTP API, the API's own AC-10 stdout, and a real headless
+Chromium session against the containerized frontend — then `stop` fully
+removed the project's containers/network/volume, leaving unrelated Docker
+resources untouched. See CLAUDE.md's "Current Phase" (Day 11C) for the
+complete measured inventory.
+
+### Manual development workflow: start / stop the stack (Docker Compose)
+
+Use this workflow when actively editing backend or frontend code — the
+one-command demo above always rebuilds a fresh static frontend bundle, which
+is right for a portable demo but slower to iterate against than a live Vite
+dev server (see ["Frontend"](#frontend-day-6c) below for frontend
+development).
 
 From the repository root:
 
 ```bash
-docker compose up --build -d   # build the API image, start PostgreSQL + API
-docker compose ps               # both services should report "healthy"
+docker compose up --build -d   # build the API/frontend images, start PostgreSQL + API + frontend
+docker compose ps               # all three services should report "healthy"
 docker compose down -v          # stop and remove containers + the PostgreSQL volume
 ```
+
+`docker compose up` also builds and starts the containerized Nginx frontend
+service (`http://localhost:5173` by default) alongside PostgreSQL and the
+API — useful to sanity-check the production frontend image without the
+one-command demo's automatic port selection and simulator seeding. For
+day-to-day frontend development, run `docker compose up --build -d db api`
+(database + API only) and use `npm run dev` instead — see
+["Frontend"](#frontend-day-6c) below.
+
+### Deployment scope and security boundaries
+
+Every workflow in this README — the one-command demo and the manual Compose
+workflow alike — targets a **local portfolio/demo deployment only**. It is
+**not production-ready**, and none of the following should be read as a
+production hardening claim:
+
+- No authentication or authorization anywhere in the API (see
+  ["MVP Boundaries"](#mvp-boundaries)).
+- The default PostgreSQL credentials (`meta_rne`/`meta_rne`) are committed,
+  plaintext, and unchanged across every workflow.
+- No TLS anywhere — every URL in this README is plain HTTP.
+- No reverse proxy exists; the frontend and API remain cross-origin,
+  coordinated only through CORS configuration.
+- The database port is published to the host by default (overridable via
+  `META_RNE_DB_HOST_PORT`), the same as any other locally exposed service.
+- Docker Desktop and network access to pull base images
+  (`python:3.12-slim`, `node:24-alpine`, `nginx:alpine`, `postgres:16`) and
+  install packages are required for the first build of any workflow;
+  subsequent runs may reuse Docker's build cache and need no further
+  network access for images already pulled.
 
 ### Health endpoint
 
@@ -272,12 +371,16 @@ itself.
 
 ### CORS (Day 6A)
 
-Disabled by default. To enable for a local frontend dev server, set
-`META_RNE_CORS_ALLOWED_ORIGINS` (comma-separated origins) before starting
-the API — `docker-compose.yml` already defaults it to
-`http://localhost:5173` (the Vite dev server origin) for local Compose
-development. See [docs/frontend-api-contract.md](./docs/frontend-api-contract.md)
-for the full frontend-facing contract.
+Disabled by default. The frontend origin must be listed exactly in
+`META_RNE_CORS_ALLOWED_ORIGINS` (comma-separated origins) for the browser to
+be able to call the API at all — `docker-compose.yml` already defaults it to
+`http://localhost:5173`, matching both the Vite dev server's default port
+and the containerized Nginx frontend service's default published port, so
+either frontend runtime works against Compose's default `api` service with
+no extra configuration. `scripts/demo.py` (Day 11C2) sets this automatically
+to match its own dynamically selected frontend port on every run. See
+[docs/frontend-api-contract.md](./docs/frontend-api-contract.md) for the
+full frontend-facing contract.
 
 ### Frontend (Day 6C)
 
@@ -285,7 +388,10 @@ A React/TypeScript/Vite dashboard lives at `frontend/`. It now supports two
 frontend business operations: viewing the current incidents list
 (`GET /incidents`, Day 6B) and submitting one Cisco IOS-XE device
 configuration (`POST /devices/{device_id}/config`, Day 6C). Requires
-Node.js (verified locally against **Node v24.11.1, npm 11.6.2**).
+Node.js (verified locally against **Node v24.11.1, npm 11.6.2**) for local
+development — Node/npm are not required merely to run the containerized
+frontend service or the one-command demo, both of which build the frontend
+image inside Docker.
 
 ```bash
 cd frontend
@@ -303,8 +409,26 @@ VITE_API_BASE_URL=http://localhost:8080
 Defaults to `http://localhost:8080` (the Compose `api` service's default
 host port) when unset. `docker-compose.yml`'s `META_RNE_CORS_ALLOWED_ORIGINS`
 default (`http://localhost:5173`) already matches Vite's default dev port,
-so `docker compose up -d` (backend) + `npm run dev` (frontend) work together
-with no extra configuration.
+so `docker compose up -d db api` (backend only) + `npm run dev` (frontend)
+work together with no extra configuration.
+
+**Vite dev server vs. containerized frontend.** These are two different
+frontend runtimes for two different purposes — use whichever fits the task:
+
+| | Vite dev server (`npm run dev`) | Containerized frontend (Compose `frontend` service / `scripts/demo.py`) |
+|---|---|---|
+| Purpose | Frontend development (hot reload) | Portable demo / production-shaped verification |
+| Runtime | Node process on the host | Nginx serving a static build, in a container |
+| `VITE_API_BASE_URL` | Read from `frontend/.env` at dev-server start | **Build-time only** — baked into the static bundle when the frontend image is built; changing it requires rebuilding the image (`docker compose build frontend` or a fresh `scripts/demo.py start`) |
+| Requires Node/npm locally | Yes | No |
+
+`VITE_API_BASE_URL` is never read at runtime by either the Nginx-served
+static bundle or the browser — there is no runtime JavaScript configuration
+injection and no reverse proxy in this repository. The API URL the browser
+actually calls, and the frontend origin CORS must permit, are always host
+addresses (e.g. `http://127.0.0.1:<port>` or `http://localhost:8080`) —
+never the internal Compose DNS name `api`, which the host browser cannot
+resolve.
 
 The dashboard (`IncidentDashboard`) renders four incident-section states —
 loading, empty (`GET /incidents` returns `[]`), a controlled error state
@@ -365,8 +489,23 @@ The dashboard described above now also includes a read-only `Device
 telemetry` workspace (Day 11B), positioned after configuration submission
 and before the global incident list.
 
-1. Start the application through the existing documented development or
-   Compose workflow — see ["Start / stop the stack"](#start--stop-the-stack-docker-compose)
+**Easiest path — the one-command demo's printed device ID (Day 11C):**
+
+1. Run [`python scripts/demo.py start`](#one-command-portfolio-demo-day-11c2).
+2. Open the printed browser URL.
+3. Copy the printed telemetry device ID.
+4. Enter it into the field labeled **`Telemetry device`**.
+5. Select **`Load telemetry`**.
+6. Observe the six seeded samples and the three expected anomaly incidents
+   (`RULE-CPU-HIGH`, `RULE-LINK-FLAP`, `RULE-BGP-DOWN`).
+7. When done, use the printed stop command.
+
+**Manual path — any other Compose/dev-server session and a separately
+generated device ID:**
+
+1. Start the application through the existing documented manual/Compose
+   workflow — see
+   ["Manual development workflow"](#manual-development-workflow-start--stop-the-stack-docker-compose)
    and ["Frontend (Day 6C)"](#frontend-day-6c) above.
 2. Generate or submit telemetry **separately**, through the
    [deterministic simulator](#deterministic-telemetry-simulator) or the
@@ -384,14 +523,24 @@ utilization, interface error rate), the latest interface states, the
 latest BGP-session states, the complete recent-sample history as a
 semantic table (in the backend's own persisted order — never re-sorted),
 and the persisted `ANOMALY` incidents for that exact device, each with an
-evidence summary for `RULE-CPU-HIGH`/`RULE-LINK-FLAP`/`RULE-BGP-DOWN`.
+evidence summary for `RULE-CPU-HIGH`/`RULE-LINK-FLAP`/`RULE-BGP-DOWN`. The
+frontend renders `GET /incidents` results in whatever order the backend
+returns them — the API does not document or guarantee any particular
+ordering of anomaly-rule incidents, and the frontend never re-sorts them;
+only the presence of all three expected incidents is guaranteed.
 
 - The browser does not run the simulator.
 - The browser does not `POST` telemetry.
 - The browser does not read AC-10 stdout logs.
-- Repeated simulator runs generate new device IDs each time (`sim-{run_id}-{scenario}`)
-  — enter the **exact** device ID the simulator printed; an old or guessed
-  ID will simply show the "no telemetry has been recorded" empty state.
+- The browser never invokes `scripts/demo.py` either — the operator runs
+  it as a separate command and manually copies the printed device ID into
+  the browser.
+- No polling, WebSocket, or Server-Sent-Events behavior exists anywhere in
+  this workspace.
+- Repeated simulator/demo-helper runs generate new device IDs each time
+  (`sim-{run_id}-{scenario}`) — enter the **exact** device ID printed; an
+  old or guessed ID will simply show the "no telemetry has been recorded"
+  empty state.
 
 **Verification evidence (Day 11B).** 11 Vitest files / 390 tests passed (0
 failed, 0 skipped), TypeScript typecheck clean, ESLint clean, production

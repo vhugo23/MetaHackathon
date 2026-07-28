@@ -1774,3 +1774,106 @@ at-least-once delivery, fallback queues, background workers, external log
 aggregation, metrics, logging-health monitoring, a deterministic telemetry
 simulator, and frontend rendering of AC-10 events (out of scope — this is
 a stdout-only backend side effect with no frontend consumer).
+
+---
+
+## 26. Demo Deployment Hardening Verification (Day 11C)
+
+Covers the frontend container + Compose runtime contract, the
+`scripts/demo.py` operator helper, and a disposable live-validation run —
+Day 11C1/11C2/11C3 — built on top of the Day 11B checkpoint.
+
+### 26.1 Demo-helper unit coverage (`scripts/test_demo.py`)
+
+47 tests, all standard-library `unittest`, no real Docker, network,
+browser, simulator, or real sleeping — every readiness/timing dependency
+(clock, sleep, HTTP GET) is injected. Covers:
+
+- project-name and run-ID generation/validation (unique, Compose-safe,
+  unsafe values rejected)
+- explicit-port range/duplicate/occupied-port validation
+- the simultaneous three-port reservation scheme (held together, released
+  only immediately before Compose needs them)
+- child-environment construction (the caller's `os.environ` never mutated
+  in place; exactly the five documented overrides present)
+- exact Compose `up`/`down` command assembly (project-scoped, no prune, no
+  Git command anywhere)
+- injectable HTTP readiness for both the API (`{"status": "ok"}` liveness
+  contract) and the frontend (non-empty HTML body)
+- the exact simulator subprocess command and computed device ID
+- success output content (project, URLs, device ID, UI instruction, stop
+  command) and that a successful start never runs cleanup
+- cleanup triggered by Compose failure, API/frontend readiness failure,
+  simulator failure, and `KeyboardInterrupt` — and that a cleanup failure
+  never replaces the original failure message
+- unsafe-name rejection for `stop`, before any subprocess call
+
+### 26.2 Static verification
+
+| Check | Result |
+|---|---|
+| Ruff format (`scripts/demo.py`, `scripts/test_demo.py`) | Clean |
+| Ruff lint | All checks passed |
+| `mypy scripts/demo.py` | Clean |
+
+### 26.3 Live validation (Day 11C3)
+
+A real, disposable, isolated Compose run — explicit project name and run
+ID, automatic simultaneous port selection for all three services — proved
+the real three-container topology end to end:
+
+- `docker ps`/`docker compose ps`, filtered by the run's own project
+  label: exactly three containers, all healthy, published ports matching
+  the helper's own printed URLs
+- public HTTP: `GET /health` (exact liveness contract) and `GET /`
+  (non-empty HTML, served by the containerized Nginx, confirmed via the
+  `Server` response header — not Vite)
+- the seeded `all-anomalies` scenario verified through the public API:
+  exactly six ascending telemetry samples, exactly three `ANOMALY`-source
+  incidents (`RULE-CPU-HIGH`/`RULE-LINK-FLAP`/`RULE-BGP-DOWN`), each
+  `OPEN` with `occurrence_count == 1`
+- AC-10 stdout verified via `docker compose logs api`, filtered to the
+  helper's own device ID: exactly three `"outcome":"CREATED"` events, no
+  `UPDATED` event
+- direct browser assertions (a real headless Chromium session against the
+  already-running containerized frontend) independently re-proved the same
+  facts through the rendered UI, plus UI-specific checks (six history
+  rows, no literal `undefined`, no duplicate `Resolve incident` control
+  inside the telemetry workspace)
+- the complete pre-existing Playwright suite
+  (`PLAYWRIGHT_BASE_URL=<live frontend origin> npx playwright test`, no
+  `scripts/browser_e2e.py` orchestration involved) ran against the same
+  live stack: 5 tests, 4 spec files, 5 passed, 0 failed, 0 skipped
+- project-scoped cleanup (`stop --project-name <name>`) fully removed the
+  project's containers, volume, and network — independently re-verified
+  by label-filtered queries returning empty
+- a before/after comparison of every other Docker resource on the host
+  showed zero change — no unrelated container, volume, network, or image
+  was stopped, removed, or otherwise touched
+
+**Order caveat, explicit.** The live filtered `GET /incidents` response
+returned the three seeded anomaly incidents in the order `RULE-CPU-HIGH`,
+`RULE-BGP-DOWN`, `RULE-LINK-FLAP` — a different order than the simulator's
+own reported scenario result and the AC-10 stdout events, both of which
+appeared in `RULE-CPU-HIGH` → `RULE-LINK-FLAP` → `RULE-BGP-DOWN` order.
+`GET /incidents` is not documented, tested, or relied upon anywhere as
+guaranteeing anomaly-rule order; only that the three expected incidents
+are present is asserted. The frontend preserves whatever order the
+backend returns without re-sorting (unchanged from Day 11B).
+
+### 26.4 CI status
+
+- CI #42 passed the Day 11B/CI-F2 formatting-repair commit
+  (`2371180...`, "chore: format frontend telemetry files").
+- The Day 11C commit (frontend container, `docker-compose.yml`,
+  `scripts/demo.py`, and this documentation) had not yet been tested by CI
+  at the time this section was written — CI confirmation is required after
+  pushing `main`, and is tracked separately, not predeclared here.
+- No `.github/workflows/**` file was modified anywhere in Day 11C.
+- **Remaining CI gap.** The existing workflow's five jobs (`ci`,
+  `postgres-tests`, `compose-smoke`, `frontend`, `browser-e2e`) do not
+  include a dedicated job that runs `scripts/demo.py`'s full live
+  start/seed/verify/stop lifecycle — that lifecycle is currently proven
+  only by the disposable, manually-run validation in Section 26.3 above,
+  not by an automated CI gate. Closing that gap is out of scope for Day
+  11C and is not claimed as done here.

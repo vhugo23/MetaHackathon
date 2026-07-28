@@ -598,8 +598,9 @@ entrypoint's `META_RNE_CORS_ALLOWED_ORIGINS` environment variable
 `CORSMiddleware` is registered with the exact given origin list (never a
 wildcard), `allow_credentials=False`, `allow_methods=["GET", "POST",
 "OPTIONS"]`, `allow_headers=["Content-Type"]`. `docker-compose.yml`'s
-local-development default sets it to `http://localhost:5173` — the future
-Vite dev server's origin (FR-10 dashboard, not yet built) — so CORS stays
+local-development default sets it to `http://localhost:5173` — the Vite
+dev server's default origin, also the containerized Nginx frontend
+service's default published port (Section 15.4, Day 11C1) — so CORS stays
 disabled everywhere else composition doesn't explicitly opt in.
 
 **Endpoints, first vertical slice + full MVP:**
@@ -1161,8 +1162,20 @@ No authentication/authorization in the MVP (product-spec Section 7):
 
 ## 15. Deployment Architecture (Docker Compose)
 
+As of Day 11C1, `docker-compose.yml` is real and matches the block below —
+not illustrative. `db`, `api`, and `frontend` form a strict startup
+dependency chain, each gated on the previous service's own Compose
+healthcheck (`depends_on: condition: service_healthy`):
+
+```
+db healthy
+  → api migration (Alembic, Section 11.2) + startup + health
+    → frontend Nginx startup + health
+```
+
 ```yaml
-# docker-compose.yml (illustrative — build details are an implementation choice)
+# docker-compose.yml (current — see the repository file for the exact,
+# fully overridable/annotated version)
 services:
   db:
     image: postgres:16
@@ -1172,35 +1185,41 @@ services:
       - POSTGRES_PASSWORD=meta_rne
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports: ["5432:5432"]
+    ports: ["${META_RNE_DB_HOST_PORT:-5432}:5432"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U meta_rne -d meta_rne"] }
 
   api:
-    build: .
-    depends_on: [db]
+    build: ./backend
+    depends_on: { db: { condition: service_healthy } }
     environment:
-      - DATABASE_URL=postgresql://meta_rne:meta_rne@db:5432/meta_rne
+      - DATABASE_URL=postgresql+psycopg://meta_rne:meta_rne@db:5432/meta_rne
       - LOG_LEVEL=info
-    ports: ["8080:8080"]
+      - META_RNE_CORS_ALLOWED_ORIGINS=${META_RNE_CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+    ports: ["${META_RNE_API_HOST_PORT:-8080}:8080"]
+    # healthcheck inherited from backend/Dockerfile (Python stdlib, no curl)
 
-  # frontend:                     # later vertical slice (FR-10)
-  #   build: ./frontend
-  #   depends_on: [api]
-  #   ports: ["5173:5173"]
+  frontend:                      # Day 11C1 — real, not illustrative
+    build:
+      context: ./frontend
+      args: { VITE_API_BASE_URL: "${VITE_API_BASE_URL:-http://localhost:8080}" }
+    depends_on: { api: { condition: service_healthy } }
+    ports: ["${META_RNE_FRONTEND_HOST_PORT:-5173}:80"]
+    # healthcheck inherited from frontend/Dockerfile (nginx:alpine's own wget)
 
 volumes:
   pgdata:
 ```
 
 ```
-┌───────────────────────────────────────────────────────────┐
-│                        docker-compose                          │
-│  ┌─────────────┐   SQL   ┌─────────────┐   (later slice)      │
-│  │  api          │◄───────►│  db           │   ┌─────────────┐  │
-│  │  (backend,    │         │  (postgres)   │   │  frontend    │  │
-│  │   1 process)  │         └─────────────┘   │  (react/vite) │  │
-│  └─────────────┘                              └─────────────┘  │
-└───────────────────────────────────────────────────────────┘
-        host: localhost:8080 (api)   localhost:5173 (frontend, later)
+┌───────────────────────────────────────────────────────────────────┐
+│                            docker-compose                            │
+│  ┌─────────────┐   SQL   ┌─────────────┐    HTTP    ┌─────────────┐ │
+│  │  db           │◄───────►│  api          │◄──cross──│  frontend    │ │
+│  │  (postgres)   │         │  (backend,    │   origin │  (nginx,     │ │
+│  │               │         │   1 process)  │  fetch() │   static)    │ │
+│  └─────────────┘         └─────────────┘          └─────────────┘ │
+└───────────────────────────────────────────────────────────────────┘
+   host: localhost:5432 (db)  localhost:8080 (api)   localhost:5173 (frontend)
 ```
 
 - `pgdata` is a named volume: Postgres state **does** survive a container
@@ -1208,16 +1227,28 @@ volumes:
   -v` discards it; `docker compose down` alone does not. This is the
   **local development / production shape** — a persistent volume is
   correct there.
-- The `frontend` service is commented out until FR-10 is built (later
-  slice) — the compose file's shape already reserves its place so adding
-  it later is additive, not a restructuring.
-- `docker compose up` (backend + db only, for the first slice) is
-  sufficient to run the vertical slice end-to-end.
-- **Overridable host ports (Day 6A).** `db`'s and `api`'s host-side ports
-  are `${META_RNE_DB_HOST_PORT:-5432}`/`${META_RNE_API_HOST_PORT:-8080}` —
-  defaults unchanged for ordinary use; a repeatable, isolated smoke run
-  (below) overrides both so it never collides with a developer's own
-  Postgres or a prior `docker compose up` session.
+- **The `frontend` service is real (Day 11C1)** — a multi-stage image (Node
+  builder → Nginx static runtime) that serves the production Vite build.
+  `VITE_API_BASE_URL` is supplied as a Compose build argument and baked
+  into the static bundle at build time; it is never read at runtime, and
+  there is no runtime JavaScript configuration injection anywhere in this
+  repository. The frontend remains **cross-origin** from the API — no
+  reverse proxy exists, so the browser always calls the API's published
+  host port directly. The browser-facing API URL can never be the internal
+  Compose DNS name `api` (e.g. `http://api:8080`): that name only resolves
+  inside the Compose network, not from a host browser.
+- `docker compose up` (all three services) is sufficient to run the full
+  stack end-to-end; `docker compose up db api` runs the backend alone for
+  frontend development against a live Vite dev server instead (see
+  test-strategy.md and README.md).
+
+- **Overridable host ports (Day 6A, extended Day 11C1).** All three
+  services' host-side ports are overridable —
+  `${META_RNE_DB_HOST_PORT:-5432}` / `${META_RNE_API_HOST_PORT:-8080}` /
+  `${META_RNE_FRONTEND_HOST_PORT:-5173}` — defaults unchanged for ordinary
+  use; a repeatable, isolated run (below, or `scripts/demo.py`, Day 11C2)
+  overrides all three so it never collides with a developer's own
+  Postgres, a prior `docker compose up` session, or another isolated run.
 
 **Compose smoke validation (Day 6A, distinct from the E2E suite in
 Section 15.1 below).** `scripts/compose_smoke.py` (repo root,
@@ -1344,12 +1375,15 @@ scripts/browser_e2e.py
   → verify no project-scoped container or volume remains
 ```
 
-**Explicitly not containerized.** The frontend is never built into a Docker
-image and no `frontend` Compose service was added — `docker-compose.yml`
-(Section 15) is reused as-is, exactly as `scripts/compose_smoke.py` already
-reuses it; only `db` and `api` run under Docker, while the frontend runs as
-a plain `vite preview` Node process on the host, matching how a developer
-would actually run it locally.
+**This orchestrator deliberately does not use the frontend container.**
+`scripts/browser_e2e.py` never builds or starts the `frontend` Compose
+service that exists as of Day 11C1 (Section 15.4) — it reuses
+`docker-compose.yml`'s `db`/`api` services as-is (exactly as
+`scripts/compose_smoke.py` already reuses them) and runs the frontend as a
+plain `vite preview` Node process on the host instead, so this suite keeps
+proving the plain-Node developer workflow independently of the container
+image. `scripts/demo.py` (Section 15.4) is the orchestrator that exercises
+the real containerized frontend end to end.
 
 **Observation, never fulfillment.** Both Playwright specs
 (`frontend/e2e/config-submission-refresh.spec.ts`, and, as of Day 7C,
@@ -1455,6 +1489,57 @@ three real orchestrated runs passed with cleanup verified.
 `frontend/src/`/`backend/` file and no API contract
 (`docs/frontend-api-contract.md` is unchanged) — every request/response
 shape Section 15.3 exercises was already established by Day 7A/7B.
+
+---
+
+### 15.4 Frontend Containerization and the Demo-Helper Lifecycle (Day 11C, binding)
+
+Section 15's three-service topology (`db` → `api` → `frontend`) and
+`scripts/demo.py` together give this repository a **portable local demo**,
+distinct from both the manual Compose workflow (Section 15) and the
+Playwright orchestrators (Sections 15.1–15.3):
+
+```
+db healthy
+  → api migration (Alembic) + startup + health
+    → frontend Nginx startup + health
+```
+
+- **No SPA fallback is required.** The frontend has no client-side router
+  (confirmed: no router dependency in `frontend/package.json`), so the
+  Nginx runtime image needs no `try_files`-style fallback configuration —
+  every route the application actually serves is the single `index.html`
+  entry point already.
+- **No reverse proxy exists anywhere in this repository.** The browser and
+  API remain on separate origins; CORS (Section 14, `api/cors.py`) is the
+  only mechanism coordinating them. `VITE_API_BASE_URL` is a Compose build
+  argument, baked into the static bundle at image-build time — never read
+  at runtime, and never injected via a served JavaScript config file.
+- **Demo-helper lifecycle (`scripts/demo.py`, Day 11C2).** `start`
+  reserves three loopback ports simultaneously, builds and starts all
+  three services (`up --build --detach --wait`), proves API/frontend
+  readiness over real public HTTP, runs the existing deterministic
+  simulator's `all-anomalies` scenario as an external subprocess (never
+  in-process, never from the browser), and prints the browser URL, API
+  URL, and telemetry device ID. **Success leaves the stack running** —
+  the helper process exits 0 without tearing anything down, so the
+  presenter can open the printed URL immediately. **Failure performs
+  exact-project cleanup** (`down --volumes --remove-orphans`, scoped to
+  that run's own Compose project only) before a nonzero exit. `stop
+  --project-name <name>` removes exactly that project's containers,
+  volume, and network — never another project's resources, and never a
+  Docker prune command.
+- **The simulator and AC-10 remain fully external to the browser,
+  unchanged from Section 15.2/telemetry sections above.** The demo helper
+  invokes `scripts/telemetry_simulator.py` as a subprocess exactly the way
+  an operator would from the command line; AC-10 events remain API-process
+  stdout only, observed via `docker compose logs api`, never surfaced to
+  or read by the browser.
+- **Local-demo security boundary (Section 14, unchanged, extended).** The
+  frontend container adds no new security posture beyond what Section 14
+  already documents — no authentication, plain HTTP, a locally exposed
+  database port, and default committed PostgreSQL credentials. Nothing in
+  this section should be read as a production-readiness claim.
 
 ---
 

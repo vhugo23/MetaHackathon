@@ -1,20 +1,40 @@
 # Local development / production shape (architecture.md Section 15).
-# The first vertical slice (Slice 1) is real and running here: Alembic
-# migrations run before Uvicorn starts (backend/Dockerfile CMD), and the
-# FastAPI lifespan performs idempotent Slice 1 policy seeding once
-# migrations have completed (architecture.md Section 11.2). The api
-# service exposes GET /health, POST /devices/{device_id}/config,
-# GET /incidents, POST /incidents/{incident_id}/resolve, and (Day 9)
-# GET /devices/{device_id}/drift.
+# Three services: db, api, frontend. Startup order is a dependency chain —
+# db must report healthy before api starts, and api must report healthy
+# before frontend starts (each `depends_on: condition: service_healthy`
+# below). The api container runs Alembic migrations before Uvicorn starts
+# (backend/Dockerfile CMD), and the FastAPI lifespan performs idempotent
+# Slice 1 policy seeding once migrations have completed (architecture.md
+# Section 11.2). The api service exposes GET /health,
+# POST /devices/{device_id}/config, GET /incidents,
+# POST /incidents/{incident_id}/resolve, GET /devices/{device_id}/drift,
+# POST /devices/{device_id}/telemetry, and GET
+# /devices/{device_id}/telemetry/recent.
 #
-# Host ports are overridable so a repeatable, isolated smoke run
-# (scripts/compose_smoke.py, Day 6A) can avoid colliding with a native
-# PostgreSQL install on 5432 or any other local service, without changing
-# behavior for an ordinary `docker compose up` (defaults unchanged).
+# frontend (Day 11C1) builds the React/Vite dashboard and serves the
+# resulting static bundle through Nginx — never Vite or Node at runtime.
+# VITE_API_BASE_URL is a build-time-only setting baked into the bundle by
+# the Vite build step; changing it requires rebuilding the frontend image.
+# The frontend remains cross-origin from the API (no reverse proxy exists),
+# so the browser always calls the api service's published host port
+# directly — never the internal Compose DNS name `api` — and
+# META_RNE_CORS_ALLOWED_ORIGINS must exactly match the frontend's origin.
 #
-# E2E uses a separate, disposable compose.e2e.yml (Section 15.1) — not
-# created yet; it depends on the Playwright HTTP-mode suite, which is
-# still deferred (see CLAUDE.md "Current Phase").
+# Host ports are overridable (all three services) so a repeatable, isolated
+# run — scripts/compose_smoke.py (Day 6A), scripts/browser_e2e.py (Day 6D),
+# or scripts/demo.py (Day 11C2, the standard-library operator helper that
+# starts this isolated stack, waits for readiness, seeds one deterministic
+# all-anomalies telemetry scenario, and tears down only its own project) —
+# can avoid colliding with a native PostgreSQL install on 5432, a
+# developer's own `docker compose up` session, or another isolated run,
+# without changing behavior for an ordinary `docker compose up` (defaults
+# unchanged).
+#
+# scripts/browser_e2e.py (Day 6D) deliberately does not use this frontend
+# service — it runs `vite preview` directly on the host instead, to prove
+# the plain-Node developer workflow independently of the container image;
+# see architecture.md Section 15.2. A separate, disposable compose.e2e.yml
+# for an HTTP-only Playwright suite (Section 15.1) remains unbuilt.
 services:
   db:
     image: postgres:16
@@ -42,10 +62,11 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://meta_rne:meta_rne@db:5432/meta_rne
       LOG_LEVEL: info
-      # Local Compose-development default: the Vite dev server origin the
-      # React dashboard (`frontend/`, built as of Day 6B) runs on when
-      # started separately (not as a Compose service — no frontend image
-      # or Compose service exists). Empty/unset means CORS stays disabled
+      # Local Compose-development default: the Vite dev server's origin,
+      # for a developer running `npm run dev` against this API separately
+      # (the frontend Compose service below publishes a different default
+      # host port, 5173, matching this same origin when both are started
+      # together with default ports). Empty/unset means CORS stays disabled
       # (api/cors.py's own Python-level default) — this only takes effect
       # because it's set here.
       META_RNE_CORS_ALLOWED_ORIGINS: ${META_RNE_CORS_ALLOWED_ORIGINS:-http://localhost:5173}
@@ -53,6 +74,25 @@ services:
       - "${META_RNE_API_HOST_PORT:-8080}:8080"
     # Dockerfile's HEALTHCHECK (Python stdlib, no curl) is inherited from
     # the image; not redeclared here.
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8080}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${META_RNE_FRONTEND_HOST_PORT:-5173}:80"
+    # Dockerfile's HEALTHCHECK (nginx:alpine's own wget) is inherited from
+    # the image; not redeclared here. The frontend stays cross-origin from
+    # the API — VITE_API_BASE_URL is baked in at build time above and the
+    # browser calls that URL directly (no reverse proxy in this image); the
+    # default host port keeps the browser origin at http://localhost:5173,
+    # matching the api service's existing META_RNE_CORS_ALLOWED_ORIGINS
+    # default.
 
 volumes:
   pgdata:

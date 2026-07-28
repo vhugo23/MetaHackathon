@@ -45,6 +45,142 @@ For each task:
 
 ## Current Phase
 
+**Day 11C — Demo deployment hardening, implemented across three reviewable
+implementation/validation gates (frontend container + Compose runtime
+contract, demo-workflow operator helper, disposable live validation —
+Day 11C1/11C2/11C3) plus this documentation/publication gate (11C4A), built
+on top of the Day 11B frontend-telemetry-consumption checkpoint.**
+
+**Implementation.** `frontend/Dockerfile` (Day 11C1) is a two-stage,
+production frontend image: a Node 24 Alpine builder stage running
+`npm ci` against the repository's committed lockfile and `tsc -b && vite
+build`, and a separate Nginx Alpine runtime stage that copies only the
+built `dist/` output — no source, tests, Playwright files, `node_modules`,
+package files, or TypeScript configuration reach the final image, and
+neither Node nor Vite exists at runtime. The image declares a Python-
+stdlib-style health check using nginx:alpine's own bundled `wget` (no
+package installed for this). `docker-compose.yml` gained a third service,
+`frontend`, completing a three-service topology (`db` → `api` → `frontend`,
+each gated on the previous service's healthcheck via
+`depends_on: condition: service_healthy`); its host port defaults to 5173
+via the new `META_RNE_FRONTEND_HOST_PORT` override, and `VITE_API_BASE_URL`
+is supplied as a Compose build argument, defaulting to
+`http://localhost:8080` — a build-time-only setting baked into the static
+bundle, never read at runtime. The frontend remains cross-origin from the
+API; no reverse proxy or same-origin `/api` routing was added.
+
+`scripts/demo.py` (Day 11C2) is a Windows-first, standard-library-only
+operator helper with two subcommands. `start` resolves or generates a
+Compose-safe project name and run ID, reserves three loopback ports
+simultaneously (released only immediately before Compose needs them, the
+same discipline as `scripts/browser_e2e.py`'s own port reservation),
+constructs an isolated child environment (never mutating the caller's
+`os.environ` in place) carrying exactly the five overrides
+`docker-compose.yml`'s three services consume, runs
+`docker compose --project-name <name> up --build --detach --wait
+--wait-timeout <n>`, checks real API (`GET /health`, requiring the exact
+`{"status": "ok"}` liveness body) and frontend (`GET /`, requiring a
+non-empty HTML body) readiness over public HTTP, invokes the existing
+`scripts/telemetry_simulator.py` as a separate subprocess with
+`--scenario all-anomalies`, computes the resulting device ID
+(`sim-<run-id>-all-anomalies`, mirroring the simulator's own convention
+exactly), and prints the browser URL, API URL, device ID, and the exact
+project-scoped stop command — then exits 0, leaving the stack running. Any
+failure (Compose build/start, readiness timeout, simulator failure, or
+`KeyboardInterrupt`) triggers cleanup of only that exact project
+(`down --volumes --remove-orphans`) before a nonzero exit; a cleanup
+failure never masks the original failure. `stop --project-name <name>`
+validates the project name before any subprocess call and runs the same
+project-scoped `down`. Neither command ever uses a Docker prune command,
+wildcard cleanup, or touches Git state; no state file is written.
+
+**Unit/static evidence.** `scripts/test_demo.py`: 47 tests passed (no real
+Docker, network, browser, simulator, or real sleeping — every
+readiness/timing dependency is injected). Pre-existing orchestration/
+simulator suites remain green and unmodified: `scripts/test_browser_e2e.py`
+19 passed, `scripts/test_telemetry_simulator.py` 21 passed. Ruff format and
+lint are clean on both new files; direct `mypy` is clean on
+`scripts/demo.py`. Frontend regression, unaffected by this gate: 11 Vitest
+files / 390 tests passed, TypeScript typecheck clean, ESLint clean,
+production build clean (no source maps). Playwright collection: 4 spec
+files / 5 tests (collection only, no browser/server started).
+
+**Image evidence.** The frontend image built successfully from
+`frontend/Dockerfile` — Node builder stage completed `npm ci` and
+`tsc -b && vite build`, then the Nginx runtime stage copied only `dist/`.
+`docker image inspect` confirms the final runtime uses Nginx, not
+Node/Vite (`Cmd: nginx -g daemon off;`, `Entrypoint:
+/docker-entrypoint.sh`), exposes `80/tcp`, and carries the declared health
+check. `docker images` reported a display size of **93 MB**;
+`docker image inspect`'s own `.Size` field separately reported
+**26,140,521 bytes** for the same image. These two numbers come from
+different Docker CLI display conventions (one a human-rounded summary
+across the image's full layer/manifest presentation, the other a specific
+JSON field) — they describe the same build, not a discrepancy.
+
+**Live evidence (Day 11C3).** A real, disposable, isolated Compose run:
+project `meta-rne-demo-live-20260728t193405z`, run ID
+`live-20260728t193405z`, automatic ports — database 65249, API 65250,
+frontend 65251. `python scripts/demo.py start --project-name
+meta-rne-demo-live-20260728t193405z --run-id live-20260728t193405z
+--timeout-seconds 600` completed in **~42.75 seconds**, exit code 0, all
+three containers healthy. Public HTTP: `GET /health` → 200,
+`{"status":"ok"}`; `GET /` → 200, `Content-Type: text/html`, served by
+`nginx/1.31.3` (proving the containerized Nginx, not Vite, served it).
+Telemetry: `GET /devices/<device>/telemetry/recent?since=...` returned
+exactly six samples in ascending order; the latest sample matched the
+deterministic all-anomalies sequence exactly — CPU 95.0, memory 50.0,
+interface error rate 0.0, interface `GigabitEthernet0/1` state `up`, BGP
+neighbor `10.0.0.2` state `Idle`. `GET /incidents`, filtered by device and
+`source == ANOMALY`, returned exactly three incidents
+(`RULE-CPU-HIGH`/`RULE-LINK-FLAP`/`RULE-BGP-DOWN`), each `OPEN` with
+`occurrence_count == 1`. The API's own AC-10 stdout carried exactly three
+`"outcome":"CREATED"` JSON events for the device, in the order
+`RULE-CPU-HIGH` → `RULE-LINK-FLAP` → `RULE-BGP-DOWN` (matching the
+simulator's own reported scenario order) — **the live filtered
+`GET /incidents` response itself returned the same three incidents in a
+different observed order (`RULE-CPU-HIGH`, `RULE-BGP-DOWN`,
+`RULE-LINK-FLAP`)**, so `GET /incidents` is not documented anywhere as
+guaranteeing anomaly-rule order; only that all three expected incidents
+are present is guaranteed, and the frontend preserves whatever order the
+backend returns without re-sorting. A headless-Chromium script driven
+against the already-running containerized frontend independently verified
+every one of the same facts through the real UI (device ID, latest
+CPU/memory/interface/BGP values, a six-row history table, all three rule
+references, exactly three workspace anomaly items, no literal
+`undefined`, no duplicate `Resolve incident` control) — all assertions
+passed. The complete pre-existing Playwright suite
+(`PLAYWRIGHT_BASE_URL=http://127.0.0.1:65251 npx playwright test`) then
+passed all 5 tests against the same live stack, with no
+`scripts/browser_e2e.py` orchestration involved (that script starts its
+own separate stack and a host `vite preview` process, deliberately not
+this containerized frontend). `python scripts/demo.py stop
+--project-name meta-rne-demo-live-20260728t193405z` removed the project's
+containers, network, and volume completely (independently re-verified by
+label-filtered `docker ps -a`/`docker volume ls`/`docker network ls`
+queries returning empty); a before/after comparison of every other Docker
+resource on the host (`meta-rne-platform-api-1`/`-db-1`,
+`meta-rne-test-db`, an unrelated exited container, and all pre-existing
+volumes/networks) showed zero change.
+
+**Explicit boundaries.** No reverse proxy or same-origin `/api` route
+exists. No authentication or TLS was added. The simulator is never
+triggered from the browser, and no continuous/daemon simulator mode
+exists. No public or cloud deployment is claimed or implemented.
+`scripts/demo.py --timeout-seconds` bounds each stage (Compose
+`--wait-timeout`, API readiness, frontend readiness, the simulator
+subprocess) independently, not as one shared global end-to-end deadline —
+a slow individual stage cannot silently steal budget from a later one, but
+neither is there a single hard ceiling on total wall-clock time. The
+frontend image's `npm ci` build stage reported one high-severity npm
+advisory (`npm audit` informational output during `RUN npm ci`); no
+`npm audit fix` was run in this gate, and the finding is unresolved.
+Node/npm dependencies (`node_modules`, package manifests) are never copied
+into the final Nginx runtime image — confirmed by the Dockerfile's
+multi-stage `COPY --from=build /app/dist` and by `frontend/.dockerignore`.
+
+---
+
 **Day 9 — Fixed-baseline configuration drift detection (FR-04, AC-05,
 AC-06), implemented across four reviewable gates (domain value objects,
 pure `DriftDetector`, an on-demand application service, and the HTTP
