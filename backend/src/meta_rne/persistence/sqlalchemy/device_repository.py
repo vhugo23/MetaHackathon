@@ -9,6 +9,7 @@ lifecycle transition is validated *before* any ORM mutation and raises
 
 from datetime import UTC, datetime
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from meta_rne.domain.config import VendorType
@@ -99,3 +100,7 @@ class SqlAlchemyDeviceRepository:
             model.baseline_snapshot_id = device.baseline_snapshot_id
             model.updated_at = device.updated_at
         self._session.flush()
+
+    def list_all(self) -> tuple[Device, ...]:
+        stmt = select(_DeviceModel).order_by(_DeviceModel.created_at, _DeviceModel.device_id)
+        return tuple(_to_domain(model) for model in self._session.scalars(stmt).all())

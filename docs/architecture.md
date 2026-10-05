@@ -610,15 +610,15 @@ disabled everywhere else composition doesn't explicitly opt in.
 | `POST` | `/devices/{id}/config` | Ingest a vendor config | FR-01–03 | **1** |
 | `GET` | `/incidents` | List incidents, filter by `device_id`/`severity` | FR-07, FR-08 | **1** |
 | `POST` | `/incidents/{id}/resolve` | Explicitly resolve one `OPEN` incident (`OPEN -> RESOLVED` only, idempotent) | FR-08 | Day 7A |
-| `GET` | `/devices` | List devices + current normalized config | FR-08 | Later |
-| `GET` | `/devices/{id}` | One device's current normalized config | FR-08 | Later |
+| `GET` | `/devices` | List registered devices (summary fields, no config) | FR-08 | Day 12 |
+| `GET` | `/devices/{id}` | One device's metadata + current normalized config | FR-08 | Day 12 |
 | `GET` | `/incidents/{id}` | One incident | FR-08 | Later |
 | `GET` | `/devices/{id}/drift` | Drift report vs. baseline | FR-04, FR-08 | 2 |
 | `POST` | `/devices/{id}/telemetry` | Ingest a telemetry sample | FR-05 | 2 |
 | `GET` | `/devices/{id}/telemetry/recent` | Recent telemetry window | FR-05, FR-08 | 2 |
 
 **Only the two rows marked Slice 1 are required to demonstrate the first
-vertical slice** (product-spec Section 11). The three "Later" rows are not
+vertical slice** (product-spec Section 11). The "Later" rows (and the two Day 12 rows, see Section 21) are not
 needed yet: `POST /devices/{id}/config`'s response body (Section 10.1)
 already returns the full normalized configuration, so no follow-up
 `GET /devices/{id}` is needed to test normalization, and `GET /incidents`
@@ -680,7 +680,8 @@ callers only ever see the aggregated counts.
 `incidents_created + incidents_updated == violations_detected` always
 holds for the policy path. This response shape is also how Slice 1 tests
 verify normalization (test-strategy.md Section 19, test 5) — never via
-`GET /devices/{id}`, which is deferred.
+`GET /devices/{id}`, which is outside Slice 1 (implemented later, Day 12 —
+Section 21).
 
 ### 10.2 `POST /incidents/{id}/resolve` — Success Response (binding, Day 7A)
 
@@ -2061,3 +2062,49 @@ assignment and recommendations; drift-triggered incident creation;
 drift acknowledgment or remediation; frontend rendering of drift data;
 telemetry ingestion and anomaly detection (FR-05/FR-06, unrelated to this
 gate).
+
+---
+
+## 21. Registered-Device Queries — Implementation (Day 12)
+
+Two read-only REST queries, both `api → application → persistence → api`
+(no domain/detection step), in `application/device_queries.py`.
+
+**Collection path — `GET /devices`.** `ListDevicesService.list_all()` opens
+one `UnitOfWork`, calls `DeviceRepository.list_all()` once, and returns the
+tuple of `Device`s. Ordering is deterministic and enforced in both
+implementations: `created_at` ascending, then `device_id` ascending
+(in-memory sorts on that key; SQLAlchemy uses
+`ORDER BY created_at, device_id`). `api` maps each to
+`DeviceSummaryResponse` (no configuration).
+
+**Detail path — `GET /devices/{device_id}`.**
+`GetDeviceDetailService.get(device_id)`:
+
+1. `DeviceRepository.get_by_id(device_id)`; `None` → `DeviceNotFoundError`
+   (existing mapping: 404 `device_not_found`).
+2. Read `device.current_snapshot_id`; `None` → `RuntimeError`.
+3. `ConfigurationSnapshotRepository.get_by_id(current_snapshot_id)`;
+   `None` → `RuntimeError`.
+4. Integrity checks: `snapshot.device_id == device.device_id` and
+   `snapshot.vendor == device.vendor`; either violation → `RuntimeError`.
+5. Return `DeviceDetailResult(device, normalized_config)`;
+   `DeviceDetailResponse` flattens the device fields and adds
+   `normalized_config`.
+
+Only the **current** snapshot is loaded; the baseline pointer is returned
+as an ID but the baseline configuration is never read. The `RuntimeError`
+cases are broken persistence invariants (not business cases) and fall
+through to the framework's generic 500, exactly as in Section 20's drift
+query.
+
+**No new repository or migration.** Detail lookup reuses the two existing
+repository methods; the only port change in Day 12 is
+`DeviceRepository.list_all()` for the collection.
+
+**UnitOfWork lifecycle (both services).** One `UnitOfWork` per call, never
+`commit()`; on failure `rollback()` then `close()` are each attempted once
+with the original exception preserved (secondary failures attached as
+notes); on success only `close()`. Modular-monolith boundaries are
+unchanged: `api` stays a thin adapter and no persistence type crosses into
+the response schemas.

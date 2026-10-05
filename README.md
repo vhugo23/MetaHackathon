@@ -1737,6 +1737,30 @@ dashboard, `compose.e2e.yml`, and the Playwright E2E suite. These begin
 on a later day, against the architecture and domain model already
 documented, tests written first.
 
+### Device query endpoints (Day 12, backend-only)
+
+Two read-only endpoints expose registered devices. **The frontend does not
+consume either endpoint yet.**
+
+**`GET /devices`** (`operation_id="list_devices"`) — returns a bare array
+of `DeviceSummaryResponse`, no envelope and no query parameters. Fields:
+`device_id`, `vendor`, `current_snapshot_id`, `baseline_snapshot_id`,
+`created_at`, `updated_at`. Ordering: `created_at` ascending, then
+`device_id` ascending.
+
+**`GET /devices/{device_id}`** (`operation_id="get_device"`) — returns
+`DeviceDetailResponse`. Fields: `device_id`, `vendor`,
+`current_snapshot_id`, `baseline_snapshot_id`, `created_at`, `updated_at`,
+`normalized_config`.
+
+- `normalized_config` is the device's **current** normalized
+  configuration (the snapshot named by `current_snapshot_id`).
+- `baseline_snapshot_id` remains the fixed pointer to the device's first
+  successful submission; the baseline configuration itself is not
+  returned.
+- An unknown device returns `404` with `{"code": "device_not_found", ...}`.
+- No raw configuration text is returned.
+
 ## Planning Documents
 
 - [docs/problem-statement.md](./docs/problem-statement.md) — original hackathon brief
@@ -2329,3 +2353,18 @@ empty-state messages with no document-level horizontal overflow. No
 backend, dependency, router, charting library, polling mechanism,
 telemetry-simulator, or direct-database code was added or changed for any
 of this.
+
+**Day 12 — Read-only Device Queries (backend-only).** Adds `GET /devices`
+and `GET /devices/{device_id}` (see ["Device query
+endpoints"](#device-query-endpoints-day-12-backend-only) above) on top of
+the Day 11C checkpoint, via `DeviceRepository.list_all()`,
+`ListDevicesService`, and `GetDeviceDetailService`; no migration, no new
+dependency, no frontend change. This supersedes the older "Not
+implemented yet" lists above that name `GET /devices` — the *backend*
+endpoints now exist, while a frontend device inventory/detail and a drift
+UI remain deferred. Verified: 9 repository `list_all` tests, 19 device-
+query application tests, 15 device API contract tests, 42 OpenAPI tests,
+Ruff format/lint clean, mypy clean (65 source files), 1,135 non-
+PostgreSQL tests passed with 295 PostgreSQL-marked tests deselected. The 5
+PostgreSQL device-query tests collect but were not executed locally (local
+PostgreSQL authentication limitation); see CLAUDE.md's "Current Phase".

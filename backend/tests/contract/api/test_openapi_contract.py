@@ -58,6 +58,8 @@ def test_openapi_contract__paths__are_exactly_the_approved_set() -> None:
 
     assert set(schema["paths"].keys()) == {
         "/health",
+        "/devices",
+        "/devices/{device_id}",
         "/devices/{device_id}/config",
         "/devices/{device_id}/drift",
         "/devices/{device_id}/telemetry",
@@ -321,3 +323,105 @@ def test_openapi_contract__drift_entry_response__has_only_approved_fields() -> N
 
     properties = schema["components"]["schemas"]["DriftEntryResponse"]["properties"]
     assert set(properties.keys()) == {"resource", "field", "old_value", "new_value"}
+
+
+def test_openapi_contract__list_devices__operation_id_is_exact() -> None:
+    schema = _openapi_schema()
+
+    assert schema["paths"]["/devices"]["get"]["operationId"] == "list_devices"
+
+
+def test_openapi_contract__list_devices__returns_array() -> None:
+    schema = _openapi_schema()
+
+    body_schema = schema["paths"]["/devices"]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    assert body_schema["type"] == "array"
+    assert body_schema["items"]["$ref"] == "#/components/schemas/DeviceSummaryResponse"
+
+
+def test_openapi_contract__list_devices__documents_500_with_api_error_response() -> None:
+    schema = _openapi_schema()
+
+    responses = schema["paths"]["/devices"]["get"]["responses"]
+    assert "500" in responses
+    schema_ref = responses["500"]["content"]["application/json"]["schema"]
+    assert schema_ref["$ref"] == "#/components/schemas/ApiErrorResponse"
+
+
+def test_openapi_contract__device_summary_response__has_only_approved_fields() -> None:
+    schema = _openapi_schema()
+
+    properties = schema["components"]["schemas"]["DeviceSummaryResponse"]["properties"]
+    assert set(properties.keys()) == {
+        "device_id",
+        "vendor",
+        "current_snapshot_id",
+        "baseline_snapshot_id",
+        "created_at",
+        "updated_at",
+    }
+
+
+def test_openapi_contract__get_device__operation_id_is_exact() -> None:
+    schema = _openapi_schema()
+
+    assert schema["paths"]["/devices/{device_id}"]["get"]["operationId"] == "get_device"
+
+
+def test_openapi_contract__get_device__path_parameter_is_required_string() -> None:
+    schema = _openapi_schema()
+
+    parameters = schema["paths"]["/devices/{device_id}"]["get"]["parameters"]
+    device_id_param = next(p for p in parameters if p["name"] == "device_id")
+    assert device_id_param["in"] == "path"
+    assert device_id_param["required"] is True
+    assert device_id_param["schema"]["type"] == "string"
+
+
+def test_openapi_contract__get_device__has_no_request_body() -> None:
+    schema = _openapi_schema()
+
+    assert "requestBody" not in schema["paths"]["/devices/{device_id}"]["get"]
+
+
+def test_openapi_contract__get_device__documents_200_with_device_detail_response() -> None:
+    schema = _openapi_schema()
+
+    responses = schema["paths"]["/devices/{device_id}"]["get"]["responses"]
+    schema_ref = responses["200"]["content"]["application/json"]["schema"]
+    assert schema_ref["$ref"] == "#/components/schemas/DeviceDetailResponse"
+
+
+def test_openapi_contract__get_device__documents_404_with_api_error_response() -> None:
+    schema = _openapi_schema()
+
+    responses = schema["paths"]["/devices/{device_id}"]["get"]["responses"]
+    assert "404" in responses
+    schema_ref = responses["404"]["content"]["application/json"]["schema"]
+    assert schema_ref["$ref"] == "#/components/schemas/ApiErrorResponse"
+
+
+def test_openapi_contract__device_detail_response__has_only_approved_fields() -> None:
+    schema = _openapi_schema()
+
+    properties = schema["components"]["schemas"]["DeviceDetailResponse"]["properties"]
+    assert set(properties.keys()) == {
+        "device_id",
+        "vendor",
+        "current_snapshot_id",
+        "baseline_snapshot_id",
+        "created_at",
+        "updated_at",
+        "normalized_config",
+    }
+
+
+def test_openapi_contract__device_detail_response__normalized_config_references_schema() -> None:
+    schema = _openapi_schema()
+
+    properties = schema["components"]["schemas"]["DeviceDetailResponse"]["properties"]
+    assert properties["normalized_config"]["$ref"] == (
+        "#/components/schemas/NormalizedConfigurationResponse"
+    )

@@ -58,3 +58,11 @@ class InMemoryDeviceRepository:
                 )
 
         self._store.devices[device.device_id] = device
+
+    def list_all(self) -> tuple[Device, ...]:
+        return tuple(
+            sorted(
+                self._store.devices.values(),
+                key=lambda device: (device.created_at, device.device_id),
+            )
+        )

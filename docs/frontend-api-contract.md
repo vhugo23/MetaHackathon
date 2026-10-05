@@ -26,7 +26,9 @@ and fifth consumers: `GET /devices/{device_id}/telemetry/recent` (Section
 both rendered in a new, read-only `Device telemetry` workspace on the
 existing dashboard — see README.md's "Frontend Telemetry Workspace"
 section. `POST /devices/{device_id}/telemetry` remains backend-only; the
-frontend never submits telemetry.**
+frontend never submits telemetry.** **Day 12 added two read-only
+backend endpoints, `GET /devices` and `GET /devices/{device_id}` (Section
+8A), with no frontend consumer yet.**
 **Derived from:** `backend/src/meta_rne/api/schemas.py`, `api/routes.py`,
 `api/errors.py`, `api/cors.py` (current source, not a planning aspiration)
 
@@ -86,6 +88,8 @@ generated client off of):
 | `GET /incidents` | `list_incidents` |
 | `POST /incidents/{incident_id}/resolve` | `resolve_incident` |
 | `GET /devices/{device_id}/drift` | `get_device_drift` |
+| `GET /devices` | `list_devices` |
+| `GET /devices/{device_id}` | `get_device` |
 
 ## 3. Identifiers, timestamps, and enums
 
@@ -444,6 +448,35 @@ Comparison scope: interfaces (by name; scalar fields `description`,
 `static_routes` are not compared. No severity, recommendation, or incident
 is ever produced by this endpoint.
 
+## 8A. `GET /devices` and `GET /devices/{device_id}` (Day 12, backend-only)
+
+Both are available backend contracts. **Frontend consumption is not
+implemented yet** — the current React dashboard calls neither. Both are
+read-only and return the resource directly: no `data`/`error` envelope.
+
+```
+GET /devices
+```
+
+No query parameters (no filtering, pagination, or sorting). `200` returns a
+bare array of `DeviceSummaryResponse`, ordered by `created_at` ascending
+then `device_id` ascending; an empty array when no device exists. Fields:
+`device_id`, `vendor`, `current_snapshot_id`, `baseline_snapshot_id`,
+`created_at`, `updated_at`. `500` is a documented `ApiErrorResponse`
+(`persistence_error`, generic public detail).
+
+```
+GET /devices/{device_id}
+```
+
+Only the `device_id` path parameter; no request body. `200` returns
+`DeviceDetailResponse`: `device_id`, `vendor`, `current_snapshot_id`,
+`baseline_snapshot_id`, `created_at`, `updated_at`, and `normalized_config`
+— the device's **current** normalized configuration, using the same
+normalized-configuration schema as Section 5's `normalized_config`. No raw
+configuration is returned. An unknown device returns `404`
+`ApiErrorResponse` with `code: "device_not_found"`.
+
 ## 9. `POST /devices/{device_id}/telemetry` (Day 9b, backend-only) and `GET /devices/{device_id}/telemetry/recent` (Day 9b backend; Day 11B frontend)
 
 Ingests telemetry samples and runs three deterministic anomaly rules
@@ -637,7 +670,9 @@ Do not build frontend features assuming any of the following exist:
   (Section 7, Day 7A backend / Day 7B frontend) is the one narrow exception:
   explicit, single-incident `OPEN -> RESOLVED` resolution, now called by the
   dashboard's "Resolve incident" control for exact `OPEN` incidents only
-- `GET /devices`, `GET /devices/{id}`, `GET /incidents/{id}`
+- `GET /incidents/{id}` (`GET /devices` and `GET /devices/{device_id}`
+  exist as backend endpoints as of Day 12, Section 8A, but no frontend
+  consumer exists yet)
 - A frontend consumer of configuration drift detection
   (`GET /devices/{device_id}/drift`, Section 8, implemented as of Day 9)
   — still backend-only; the dashboard does not call this endpoint

@@ -36,6 +36,7 @@ from meta_rne.api.errors import register_exception_handlers
 from meta_rne.api.routes import build_router
 from meta_rne.application.config_ingestion import ConfigIngestionService
 from meta_rne.application.device_drift import GetDeviceDriftService
+from meta_rne.application.device_queries import GetDeviceDetailService, ListDevicesService
 from meta_rne.application.incident_queries import ListIncidentsService
 from meta_rne.application.incident_resolution import ResolveIncidentService
 from meta_rne.application.snapshot_id import default_snapshot_id_factory
@@ -69,6 +70,8 @@ def create_app(
         snapshot_id_factory=snapshot_id_factory,
     )
     list_incidents_service = ListIncidentsService(unit_of_work_factory=uow_factory)
+    list_devices_service = ListDevicesService(unit_of_work_factory=uow_factory)
+    get_device_detail_service = GetDeviceDetailService(unit_of_work_factory=uow_factory)
     resolve_incident_service = ResolveIncidentService(
         unit_of_work_factory=uow_factory, clock=CallableClock(clock)
     )
@@ -103,6 +106,8 @@ def create_app(
         build_router(
             config_ingestion_service=config_ingestion_service,
             list_incidents_service=list_incidents_service,
+            list_devices_service=list_devices_service,
+            get_device_detail_service=get_device_detail_service,
             resolve_incident_service=resolve_incident_service,
             get_device_drift_service=get_device_drift_service,
             telemetry_ingestion_service=telemetry_ingestion_service,

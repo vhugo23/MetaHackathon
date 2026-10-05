@@ -16,6 +16,8 @@ from fastapi import APIRouter, status
 from meta_rne.api.clock import require_utc
 from meta_rne.api.schemas import (
     ApiErrorResponse,
+    DeviceDetailResponse,
+    DeviceSummaryResponse,
     DriftReportResponse,
     IncidentResponse,
     SubmitConfigurationRequest,
@@ -26,6 +28,7 @@ from meta_rne.api.schemas import (
 )
 from meta_rne.application.config_ingestion import ConfigIngestionService
 from meta_rne.application.device_drift import GetDeviceDriftService
+from meta_rne.application.device_queries import GetDeviceDetailService, ListDevicesService
 from meta_rne.application.incident_queries import ListIncidentsService
 from meta_rne.application.incident_resolution import ResolveIncidentService
 from meta_rne.application.models import IngestConfigurationCommand, TelemetryIngestionCommand
@@ -62,6 +65,8 @@ def build_router(
     *,
     config_ingestion_service: ConfigIngestionService,
     list_incidents_service: ListIncidentsService,
+    list_devices_service: ListDevicesService,
+    get_device_detail_service: GetDeviceDetailService,
     resolve_incident_service: ResolveIncidentService,
     get_device_drift_service: GetDeviceDriftService,
     telemetry_ingestion_service: TelemetryIngestionService,
@@ -117,6 +122,36 @@ def build_router(
     def list_incidents() -> list[IncidentResponse]:
         incidents = list_incidents_service.list_all()
         return [IncidentResponse.from_domain(incident) for incident in incidents]
+
+    @router.get(
+        "/devices",
+        response_model=list[DeviceSummaryResponse],
+        operation_id="list_devices",
+        responses={
+            500: {
+                "model": ApiErrorResponse,
+                "description": "persistence_error (generic public detail).",
+            },
+        },
+    )
+    def list_devices() -> list[DeviceSummaryResponse]:
+        devices = list_devices_service.list_all()
+        return [DeviceSummaryResponse.from_domain(device) for device in devices]
+
+    @router.get(
+        "/devices/{device_id}",
+        response_model=DeviceDetailResponse,
+        operation_id="get_device",
+        responses={
+            404: {
+                "model": ApiErrorResponse,
+                "description": "device_not_found.",
+            },
+        },
+    )
+    def get_device_detail(device_id: str) -> DeviceDetailResponse:
+        result = get_device_detail_service.get(device_id)
+        return DeviceDetailResponse.from_domain(result)
 
     @router.post(
         "/incidents/{incident_id}/resolve",

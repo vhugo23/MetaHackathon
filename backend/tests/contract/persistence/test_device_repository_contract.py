@@ -232,3 +232,110 @@ def test_device_repository__nonexistent_baseline_snapshot_reference__raises_devi
         repositories.devices.save(_device(baseline_snapshot_id="does-not-exist"))
 
     assert repositories.devices.get_by_id(DEVICE_ID) is None
+
+
+# --- Day 12A1: list_all() ----------------------------------------------------
+
+
+def test_device_repository__list_all__empty_repository__returns_empty_tuple(
+    repositories: SimpleNamespace,
+) -> None:
+    assert repositories.devices.list_all() == ()
+
+
+def test_device_repository__list_all__returns_a_tuple(
+    repositories: SimpleNamespace,
+) -> None:
+    repositories.devices.save(_device())
+
+    result = repositories.devices.list_all()
+
+    assert isinstance(result, tuple)
+
+
+def test_device_repository__list_all__every_persisted_device_is_returned(
+    repositories: SimpleNamespace,
+) -> None:
+    repositories.devices.save(_device(device_id="spine-01", created_at=T0, updated_at=T0))
+    repositories.devices.save(_device(device_id="leaf-01", created_at=T1, updated_at=T1))
+    repositories.devices.save(_device(device_id="leaf-02", created_at=T2, updated_at=T2))
+
+    result = repositories.devices.list_all()
+
+    assert {device.device_id for device in result} == {"spine-01", "leaf-01", "leaf-02"}
+
+
+def test_device_repository__list_all__insertion_order_does_not_determine_output_order(
+    repositories: SimpleNamespace,
+) -> None:
+    # Saved in device_id-descending / created_at-descending order; the
+    # required output order is created_at-ascending, i.e. the reverse of
+    # insertion order.
+    repositories.devices.save(_device(device_id="leaf-02", created_at=T2, updated_at=T2))
+    repositories.devices.save(_device(device_id="leaf-01", created_at=T1, updated_at=T1))
+    repositories.devices.save(_device(device_id="spine-01", created_at=T0, updated_at=T0))
+
+    result = repositories.devices.list_all()
+
+    assert [device.device_id for device in result] == ["spine-01", "leaf-01", "leaf-02"]
+
+
+def test_device_repository__list_all__primary_ordering_is_created_at_ascending(
+    repositories: SimpleNamespace,
+) -> None:
+    repositories.devices.save(_device(device_id="charlie", created_at=T2, updated_at=T2))
+    repositories.devices.save(_device(device_id="alpha", created_at=T0, updated_at=T0))
+    repositories.devices.save(_device(device_id="bravo", created_at=T1, updated_at=T1))
+
+    result = repositories.devices.list_all()
+
+    assert [device.created_at for device in result] == [T0, T1, T2]
+    assert [device.device_id for device in result] == ["alpha", "bravo", "charlie"]
+
+
+def test_device_repository__list_all__tie_break_ordering_is_device_id_ascending(
+    repositories: SimpleNamespace,
+) -> None:
+    repositories.devices.save(_device(device_id="zulu", created_at=T0, updated_at=T0))
+    repositories.devices.save(_device(device_id="alpha", created_at=T0, updated_at=T0))
+    repositories.devices.save(_device(device_id="mike", created_at=T0, updated_at=T0))
+
+    result = repositories.devices.list_all()
+
+    assert [device.device_id for device in result] == ["alpha", "mike", "zulu"]
+
+
+def test_device_repository__list_all__every_device_field_is_preserved(
+    repositories: SimpleNamespace,
+) -> None:
+    repositories.devices.save(_device())
+    repositories.snapshots.add(_snapshot("snap-1"))
+    device = _device(current_snapshot_id="snap-1", baseline_snapshot_id="snap-1", updated_at=T1)
+    repositories.devices.save(device)
+
+    result = repositories.devices.list_all()
+
+    assert result == (device,)
+
+
+def test_device_repository__list_all__performs_no_mutation(
+    repositories: SimpleNamespace,
+) -> None:
+    device = _device()
+    repositories.devices.save(device)
+
+    repositories.devices.list_all()
+
+    assert repositories.devices.get_by_id(DEVICE_ID) == device
+
+
+def test_device_repository__list_all__repeated_calls_return_the_same_ordered_result(
+    repositories: SimpleNamespace,
+) -> None:
+    repositories.devices.save(_device(device_id="leaf-01", created_at=T1, updated_at=T1))
+    repositories.devices.save(_device(device_id="spine-01", created_at=T0, updated_at=T0))
+
+    first = repositories.devices.list_all()
+    second = repositories.devices.list_all()
+
+    assert first == second

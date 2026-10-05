@@ -18,6 +18,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from meta_rne.application.device_queries import DeviceDetailResult
 from meta_rne.application.models import ConfigIngestionResult, TelemetryIngestionResult
 from meta_rne.domain.anomaly import (
     Anomaly,
@@ -33,6 +34,7 @@ from meta_rne.domain.config import (
     NormalizedInterface,
     NormalizedRouting,
 )
+from meta_rne.domain.device import Device
 from meta_rne.domain.drift import DriftEntry, DriftReport
 from meta_rne.domain.incident import Incident, PolicyViolationIncidentEvidence
 from meta_rne.domain.telemetry import BgpState, LinkState, TelemetrySample
@@ -444,6 +446,49 @@ class SubmitTelemetryResponse(BaseModel):
         return cls(
             sample=TelemetrySampleResponse.from_domain(result.sample),
             anomalies=[AnomalyResponse.from_domain(anomaly) for anomaly in result.anomalies],
+        )
+
+
+class DeviceSummaryResponse(BaseModel):
+    device_id: str
+    vendor: str
+    current_snapshot_id: str | None
+    baseline_snapshot_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(cls, device: Device) -> "DeviceSummaryResponse":
+        return cls(
+            device_id=device.device_id,
+            vendor=device.vendor.value,
+            current_snapshot_id=device.current_snapshot_id,
+            baseline_snapshot_id=device.baseline_snapshot_id,
+            created_at=device.created_at,
+            updated_at=device.updated_at,
+        )
+
+
+class DeviceDetailResponse(BaseModel):
+    device_id: str
+    vendor: str
+    current_snapshot_id: str | None
+    baseline_snapshot_id: str | None
+    created_at: datetime
+    updated_at: datetime
+    normalized_config: NormalizedConfigurationResponse
+
+    @classmethod
+    def from_domain(cls, result: DeviceDetailResult) -> "DeviceDetailResponse":
+        device = result.device
+        return cls(
+            device_id=device.device_id,
+            vendor=device.vendor.value,
+            current_snapshot_id=device.current_snapshot_id,
+            baseline_snapshot_id=device.baseline_snapshot_id,
+            created_at=device.created_at,
+            updated_at=device.updated_at,
+            normalized_config=NormalizedConfigurationResponse.from_domain(result.normalized_config),
         )
 
 

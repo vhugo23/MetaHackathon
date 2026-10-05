@@ -1053,7 +1053,7 @@ planning — see `tests/contract/api/test_config_ingestion_api.py` and
 | Duplicate snapshot | `persistence` (`SnapshotAlreadyExistsError`) | 409 | `snapshot_already_exists` | `test_submit_configuration__duplicate_snapshot__returns_409_snapshot_already_exists` |
 | Referenced device missing | `persistence` (`ReferencedDeviceNotFoundError`) | 409 | `referenced_device_not_found` | `test_submit_configuration__referenced_device_not_found__returns_409` |
 | Other caller/application `ValueError` | `application` | 422 | `invalid_request` | `test_submit_configuration__invalid_generated_snapshot_id__returns_422_invalid_request` |
-| Resource not found | `application` | 404 | `NOT_FOUND` | **Not in Slice 1** — Slice 1 has no single-resource `GET` endpoint (architecture.md Section 10); this test is added once `GET /devices/{id}` or `GET /incidents/{id}` ships (later slice). |
+| Resource not found | `application` | 404 | `NOT_FOUND` | **Not in Slice 1** — Slice 1 has no single-resource `GET` endpoint (architecture.md Section 10); this test is added once `GET /devices/{id}` or `GET /incidents/{id}` ships (later slice). *(`GET /devices/{id}` shipped in Day 12 with its own 404 tests — Section 27.)* |
 | Persistence failure (base) | `persistence` (`PersistenceError`, registered after the conflict subclasses above) | 500 | `persistence_error` | `test_submit_configuration__persistence_failure__returns_generic_500` |
 | Serialization failure | `persistence` (`SerializationError`) | 500 | `serialization_error` | `test_submit_configuration__serialization_failure__returns_generic_500` |
 | Invalid injected clock (server-composition failure, not caller input) | `api` (`InvalidClockError`, deliberately unmapped) | 500 | none — falls through to unmapped-exception handling | `test_submit_configuration__invalid_clock__returns_generic_500_and_persists_nothing` |
@@ -1877,3 +1877,38 @@ backend returns without re-sorting (unchanged from Day 11B).
   only by the disposable, manually-run validation in Section 26.3 above,
   not by an automated CI gate. Closing that gap is out of scope for Day
   11C and is not claimed as done here.
+
+## 27. Registered-Device Query Verification (Day 12)
+
+Verifies `GET /devices` (Day 12A1) and `GET /devices/{device_id}`
+(Day 12B) — architecture.md Section 21.
+
+| Layer | Count | Location |
+|---|---|---|
+| Repository `list_all` contract | 9 | `backend/tests/contract/persistence/test_device_repository_contract.py` |
+| `ListDevicesService` (application) | 8 | `backend/tests/unit/application/test_device_queries.py` |
+| `GetDeviceDetailService` (application) | 11 | `backend/tests/unit/application/test_device_queries.py` |
+| **Device-query application total** | **19** | — |
+| HTTP contract, collection | 8 | `backend/tests/contract/api/test_devices_api.py` |
+| HTTP contract, detail | 7 | `backend/tests/contract/api/test_devices_api.py` |
+| **Device API contract total** | **15** | — |
+| OpenAPI (current total, includes dedicated collection and detail assertions) | 42 | `backend/tests/contract/api/test_openapi_contract.py` |
+| PostgreSQL device-query (3 collection + 2 detail) | 5 | `backend/tests/integration/api/test_device_query_api_postgres.py` |
+
+`GetDeviceDetailService` coverage includes the four broken-invariant cases
+(`current_snapshot_id` is `None`, referenced snapshot missing, snapshot of a
+different device, snapshot of a different vendor — each `RuntimeError`).
+Dedicated detail OpenAPI assertions cover the `get_device` operationId, the
+required string path parameter, no request body, the `200`
+`DeviceDetailResponse` and `404` `ApiErrorResponse` references, the exact
+field set, and the `normalized_config` reference.
+
+**PostgreSQL status.** The 5 PostgreSQL device-query tests collect
+locally (`-m postgres --collect-only`) but **local execution was not
+completed** because of a local PostgreSQL authentication failure; they have
+not been shown to pass locally.
+
+**Full backend verification (non-PostgreSQL):** Ruff format clean, Ruff
+lint clean, mypy clean (65 source files), `pytest -m "not postgres"` →
+**1,135 passed, 295 PostgreSQL-marked deselected**. No combined
+backend total including the PostgreSQL tests is claimed.

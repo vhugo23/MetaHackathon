@@ -45,6 +45,61 @@ For each task:
 
 ## Current Phase
 
+**Day 12 — Read-only registered-device queries, implemented in two
+backend-only slices: Day 12A1 (device collection) and Day 12B (device
+detail), built on top of the Day 11C demo-deployment checkpoint. This
+supersedes Day 11C as the current phase.**
+
+**Day 12A1 — Registered device collection query.**
+`DeviceRepository.list_all() -> tuple[Device, ...]` (port, in-memory and
+SQLAlchemy implementations) returns every persisted device in
+deterministic order: `created_at` ascending, then `device_id` ascending.
+`ListDevicesService.list_all()` (`application/device_queries.py`) uses one
+`UnitOfWork` per call, never commits, and rolls back/closes with the same
+exception-preserving lifecycle as `ListIncidentsService`.
+`GET /devices` (`operation_id="list_devices"`) returns a bare
+`list[DeviceSummaryResponse]` (`device_id`, `vendor`,
+`current_snapshot_id`, `baseline_snapshot_id`, `created_at`,
+`updated_at`) — no envelope, no query parameters, documented generic `500`.
+
+**Day 12B — Device detail query.** `GetDeviceDetailService.get(device_id)`
+returns `DeviceDetailResult(device: Device, normalized_config:
+NormalizedConfiguration)`. It uses only the existing
+`DeviceRepository.get_by_id()` and
+`ConfigurationSnapshotRepository.get_by_id()` — no new repository method
+and no migration. It loads the **current** snapshot only: the baseline
+snapshot pointer is returned on the device, but the baseline configuration
+is never loaded. A missing device raises `DeviceNotFoundError` (404
+`device_not_found`). A `None` `current_snapshot_id`, a missing referenced
+snapshot, a snapshot whose `device_id` differs from the device's, or a
+snapshot whose `vendor` differs from the device's are broken invariants and
+raise `RuntimeError` (generic 500, never a silently chosen alternative).
+Never commits; rolls back and closes on failure.
+`GET /devices/{device_id}` (`operation_id="get_device"`) returns
+`DeviceDetailResponse` (`device_id`, `vendor`, `current_snapshot_id`,
+`baseline_snapshot_id`, `created_at`, `updated_at`, `normalized_config`
+using the existing `NormalizedConfigurationResponse`) — no envelope, no raw
+configuration, `404` documented as `ApiErrorResponse`.
+
+**Explicit boundaries.** Read-only; no pagination or filtering; no
+frontend device inventory yet; no frontend device detail yet; no drift UI
+yet. No repository migration was needed for Day 12B.
+
+**Verification evidence (Day 12).**
+- 9 focused `DeviceRepository.list_all()` contract tests pass
+  (`-k list_all -m "not postgres"`).
+- 19 device-query application tests pass (8 `ListDevicesService` + 11
+  `GetDeviceDetailService`).
+- 15 device API contract tests pass (8 collection + 7 detail).
+- 42 OpenAPI tests pass.
+- 5 PostgreSQL device-query tests (3 collection + 2 detail) **collect**
+  locally but were **not executed** - local PostgreSQL authentication
+  limitation. No claim is made that they pass locally.
+- Ruff format clean, Ruff lint clean, mypy clean across 65 source files.
+- 1,135 non-PostgreSQL tests pass; 295 PostgreSQL-marked tests deselected.
+
+---
+
 **Day 11C — Demo deployment hardening, implemented across three reviewable
 implementation/validation gates (frontend container + Compose runtime
 contract, demo-workflow operator helper, disposable live validation —
@@ -1106,7 +1161,8 @@ for the current, superseding **868**-test inventory (Playwright now 2
 files/tests, everything else unchanged).
 
 **Still prohibited**: a third vendor, vendor autodetection, file upload,
-configuration history, device inventory, `GET /devices`, incident
+configuration history, frontend device inventory (the backend
+`GET /devices` exists as of Day 12; no frontend consumes it), incident
 acknowledgment (the enum member and DB constraint remain dormant
 compatibility state — no public transition into it exists, and no frontend
 control renders for it), reopening, assignment, comments/notes, audit
@@ -1650,7 +1706,10 @@ the full detail; it is no longer deferred. **Frontend telemetry
 consumption now exists as of Day 11B** — a read-only `Device telemetry`
 workspace consuming `GET /devices/{device_id}/telemetry/recent` and
 device-filtered `ANOMALY` incidents from `GET /incidents`; see "Current
-Phase" above for the full detail; it is no longer deferred. End-to-end
+Phase" above for the full detail; it is no longer deferred. **Read-only registered-device queries now exist as of Day 12** — `GET
+/devices` and `GET /devices/{device_id}`, backend-only; see "Current Phase"
+above. A frontend device inventory/detail and a drift UI remain deferred.
+End-to-end
 support for an unrecognized future `ANOMALY` rule_ref remains deferred —
 current API-client validation rejects it before the component's own safe
 fallback would ever render it.
