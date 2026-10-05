@@ -368,3 +368,28 @@ Arista EOS syntax coverage is not claimed — `AristaAdapter` implements
 only the narrow subset documented in architecture.md Section 18.
 
 **Definition of done:** AC-01, AC-03, AC-04, AC-11, AC-12 (for this slice's error paths), AC-13 pass. `GET /incidents` returns the incident with all required fields. **AC-10 (structured JSON log line on incident create/update) was not implemented at Day 8A** — no `observability`/structured-logging module existed at that point; it remained deferred through Day 8A. **AC-10 is implemented as of Day 10** (see AC-10 above and CLAUDE.md's "Current Phase") — it is no longer deferred as of this document's current revision. No application code exists that is not covered by at least one named test (see [test-strategy.md](./test-strategy.md) Section 19).
+
+
+---
+
+## Post-MVP Extension: Network Production Engineering (NPE)
+
+> This section is a **post-MVP extension**. It does not change, relax, or
+> retroactively add to any requirement above. Decision record:
+> [ADR-0003](./adr/0003-network-lab-and-live-state-collection.md).
+
+- The original MVP (Sections 1-9) **remains complete as defined**. Its
+  requirements, non-goals, and assumptions are preserved as historical
+  record; Lab 1 is **not** an MVP requirement.
+- The NPE phase is a post-MVP extension that adds a hands-on network lab
+  (Containerlab + FRR) and, later, live operational-state collection.
+- **Live lab polling is now allowed only against controlled local lab
+  devices.** This supersedes, for lab devices only, assumption A-03 and
+  the Section 7 "live device" non-goals.
+- **Production-device polling remains out of scope.**
+- **Remediation and configuration push remain out of scope** (Section 7)
+  until a later, explicit gate approves lab-only writes.
+- **Simulated telemetry remains supported.** The deterministic simulator
+  and `TelemetrySample` are unchanged and keep serving tests and demos.
+- Status: architecture contract only (NPE-1B0). No lab, collector, or
+  code exists yet.

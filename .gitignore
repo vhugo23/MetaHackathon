@@ -32,3 +32,8 @@ frontend/test-results/
 .DS_Store
 .idea/
 .vscode/
+
+# Containerlab runtime artifacts (generated per lab by `containerlab deploy`:
+# lab directory holding generated node configs, keys, topology-data.json,
+# ansible-inventory.yml). Topology files and FRR configs stay tracked.
+clab-*/

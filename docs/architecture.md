@@ -2108,3 +2108,49 @@ with the original exception preserved (secondary failures attached as
 notes); on success only `close()`. Modular-monolith boundaries are
 unchanged: `api` stays a thin adapter and no persistence type crosses into
 the response schemas.
+
+
+---
+
+## 22. Network Production Engineering Extension (post-MVP)
+
+Decision record: [ADR-0003](./adr/0003-network-lab-and-live-state-collection.md).
+This section is **architectural only** — **no implementation exists yet**.
+It supersedes, for controlled local lab devices only, the statement in
+Section 1 that no live device is in the loop (A-03) and the Section 17.2
+"live device polling" deferral. Production-device access and remediation
+remain out of scope.
+
+**Current (unchanged):**
+
+```
+caller / simulator
+   → TelemetrySample
+   → RuleEngine
+   → Incident
+```
+
+**Future (lab only):**
+
+```
+Containerlab / FRR lab
+   → live collector (read-only)
+   → NormalizedOperationalState
+   → translation / detection
+   → existing incident pipeline
+```
+
+- Live state enters a **separate** `NormalizedOperationalState` model
+  (device, collection time, interfaces, BGP neighbors, routes or route
+  summary, reachability). `TelemetrySample` is not extended.
+- A future translation layer may derive `TelemetrySample`-compatible
+  observations so `RuleEngine` and the incident pipeline are reused as-is.
+- The simulator remains the deterministic test/demo source; the live
+  collector is an additional, separate source.
+- Lab 1 (4 FRR routers, 2 Linux hosts, eBGP leaf-spine, deterministic
+  addressing) is specified in ADR-0003. MPLS is deferred (stock WSL kernel
+  lacks MPLS forwarding).
+
+**Unchanged by this gate:** the `TelemetrySample` model, the persistence
+schema and migrations, all REST APIs and the OpenAPI contract, and all
+source, tests, and CI.

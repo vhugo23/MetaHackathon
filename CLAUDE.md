@@ -45,6 +45,42 @@ For each task:
 
 ## Current Phase
 
+**NPE-1B0 — Network lab architecture contract (documentation only).**
+Begins the post-MVP Network Production Engineering (NPE) extension on top
+of the immutable Day 12 checkpoint (tag `day-12-device-query-api`). The
+Day 12 phase below remains the last implemented application phase.
+
+- **NPE-1A audit results (read-only):** Ubuntu 22.04 on WSL2 (kernel
+  6.18.40.1) with Containerlab v0.77.0 already installed; Docker Desktop
+  installed but not running; no FRR image checked; stock WSL kernel lacks
+  MPLS forwarding; Windows free memory was low (~1.35 GB).
+- **Decision:** Containerlab + FRR on Ubuntu WSL2, topology-as-code,
+  IPv4-first, deterministic addressing/ASNs — see
+  [ADR-0003](./docs/adr/0003-network-lab-and-live-state-collection.md).
+- **Lab 1 topology:** spine-1, spine-2, leaf-1, leaf-2, host-1, host-2;
+  shared spine AS 65000, leaf-1 AS 65101, leaf-2 AS 65102; eBGP on every
+  leaf-spine link; ECMP `maximum-paths 2`; /31 links (10.255.0.0/24),
+  /32 loopbacks (10.0.0.0/24), host /24s 10.1.1.0 and 10.1.2.0.
+- **First fault scenario:** disable leaf-1 eth1 ↔ spine-1 eth1; expect one
+  BGP adjacency down, ECMP 2 → 1, host-1 ↔ host-2 still reachable;
+  restore and expect ECMP back to 2.
+- **Architectural boundary:** live collection does not replace the
+  simulator. Live state will use a separate `NormalizedOperationalState`;
+  `TelemetrySample` is not extended; a future translation layer may derive
+  `TelemetrySample`-compatible observations for the existing `RuleEngine`.
+- **Safety boundary:** live read-only collection and later lab-only fault
+  injection only. No production devices, config push, auto-remediation,
+  AI writes, external credentials, or cloud deployment.
+- **No live implementation yet.** No Docker container, FRR container,
+  BGP session, or topology has been created or deployed; this gate changed
+  documentation and `.gitignore` only. The MVP non-goals and assumption
+  A-03 below remain the historical MVP record and are superseded only for
+  controlled local lab devices.
+
+---
+
+## Previous Phase (last implemented application phase)
+
 **Day 12 — Read-only registered-device queries, implemented in two
 backend-only slices: Day 12A1 (device collection) and Day 12B (device
 detail), built on top of the Day 11C demo-deployment checkpoint. This

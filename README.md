@@ -1761,6 +1761,31 @@ of `DeviceSummaryResponse`, no envelope and no query parameters. Fields:
 - An unknown device returns `404` with `{"code": "device_not_found", ...}`.
 - No raw configuration text is returned.
 
+## Network Production Engineering extension
+
+The project is evolving from a network-aware reliability application into
+a hands-on **Network Production Engineering** platform: instead of only
+analyzing submitted configurations and simulated telemetry, it will
+operate against a real, reproducible routing lab. The original MVP above
+stays complete and unchanged; this is a post-MVP extension.
+
+**Lab 1 goal:** a small leaf-spine network that proves real eBGP
+operation, host-to-host reachability, ECMP redundancy, and survival of a
+single link failure — the base for live state collection, failure
+injection, and root-cause diagnosis in later phases.
+
+**Chosen topology:** 2 spines, 2 leafs, 2 hosts; every leaf connects to
+both spines; eBGP on every leaf-spine link; shared spine AS 65000, leaf
+ASNs 65101/65102; deterministic IPv4 addressing.
+
+**Chosen tools:** Ubuntu on WSL2, [Containerlab](https://containerlab.dev),
+and [FRR](https://frrouting.org), defined as topology-as-code.
+
+**Status:** architecture approved ([ADR-0003](./docs/adr/0003-network-lab-and-live-state-collection.md));
+**the lab is not yet deployed** and no live-collection code exists. The
+deterministic simulator remains the supported telemetry source. Scope is
+limited to a local lab: no production devices and no remediation.
+
 ## Planning Documents
 
 - [docs/problem-statement.md](./docs/problem-statement.md) — original hackathon brief
