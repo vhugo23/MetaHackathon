@@ -1,0 +1,55 @@
+# Lab 1: 2 spines, 2 leafs, 2 hosts, eBGP leaf-spine (ADR-0003).
+# Paths in `binds` are relative to this file. Defined offline in NPE-1B2;
+# not yet deployed.
+name: meta-rne-bgp
+
+topology:
+  nodes:
+    spine-1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.6.1
+      binds:
+        - frr/spine-1/daemons:/etc/frr/daemons:ro
+        - frr/spine-1/frr.conf:/etc/frr/frr.conf:ro
+    spine-2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.6.1
+      binds:
+        - frr/spine-2/daemons:/etc/frr/daemons:ro
+        - frr/spine-2/frr.conf:/etc/frr/frr.conf:ro
+    leaf-1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.6.1
+      binds:
+        - frr/leaf-1/daemons:/etc/frr/daemons:ro
+        - frr/leaf-1/frr.conf:/etc/frr/frr.conf:ro
+    leaf-2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.6.1
+      binds:
+        - frr/leaf-2/daemons:/etc/frr/daemons:ro
+        - frr/leaf-2/frr.conf:/etc/frr/frr.conf:ro
+    host-1:
+      kind: linux
+      image: alpine:3.24.2
+      cmd: tail -f /dev/null
+      exec:
+        - ip link set eth1 up
+        - ip addr add 10.1.1.10/24 dev eth1
+        - ip route replace default via 10.1.1.1 dev eth1
+    host-2:
+      kind: linux
+      image: alpine:3.24.2
+      cmd: tail -f /dev/null
+      exec:
+        - ip link set eth1 up
+        - ip addr add 10.1.2.10/24 dev eth1
+        - ip route replace default via 10.1.2.1 dev eth1
+
+  links:
+    - endpoints: ["leaf-1:eth1", "spine-1:eth1"]
+    - endpoints: ["leaf-1:eth2", "spine-2:eth1"]
+    - endpoints: ["leaf-2:eth1", "spine-1:eth2"]
+    - endpoints: ["leaf-2:eth2", "spine-2:eth2"]
+    - endpoints: ["host-1:eth1", "leaf-1:eth3"]
+    - endpoints: ["host-2:eth1", "leaf-2:eth3"]
