@@ -115,6 +115,30 @@ Loopbacks:
 These ranges avoid Docker's default bridge (172.17.0.0/16) and
 Containerlab's default management network (172.20.20.0/24).
 
+### Management network
+
+Containerlab's default management IPv4 subnet is 172.20.20.0/24. The
+development host already had an unrelated Docker network, `slbdemo0_default`,
+using 172.20.0.0/16, which contains it. The first live deployment attempt
+therefore failed before any node was created, because Docker rejected the
+overlapping network.
+
+Lab 1 now owns an explicit, deterministic management network, declared in
+the topology file:
+
+| Setting | Value |
+|---|---|
+| network | `meta-rne-bgp-mgmt` |
+| IPv4 | 172.31.250.0/24 |
+| IPv6 | 3fff:172:31:250::/64 |
+
+- This management network is separate from all Lab 1 dataplane addressing.
+- The unrelated `slbdemo0` network is deliberately left untouched.
+- Explicit topology configuration is preferred to deleting unrelated
+  resources or relying on per-command deployment flags.
+- This change does not alter the BGP topology, ASNs, dataplane addressing,
+  routing behavior, ECMP design or fault scenario.
+
 ## First failure scenario
 
 Disable the link **leaf-1 eth1 ↔ spine-1 eth1**.

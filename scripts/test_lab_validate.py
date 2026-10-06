@@ -140,6 +140,39 @@ class TopologyContractTests(LabCopyTestCase):
         self.assert_fails_with("leaf-1 binds must be")
 
 
+class MgmtContractTests(LabCopyTestCase):
+    def test_missing_mgmt_block__fails(self) -> None:
+        text = (self.lab / "topology.clab.yml").read_text(encoding="utf-8")
+        start = text.index("mgmt:")
+        end = text.index("topology:")
+        (self.lab / "topology.clab.yml").write_text(
+            text[:start] + text[end:], encoding="utf-8"
+        )
+        self.assert_fails_with("mgmt network must be 'meta-rne-bgp-mgmt'")
+
+    def test_wrong_mgmt_network_name__fails(self) -> None:
+        self.edit(
+            "topology.clab.yml", "network: meta-rne-bgp-mgmt", "network: clab-mgmt"
+        )
+        self.assert_fails_with("mgmt network must be 'meta-rne-bgp-mgmt'")
+
+    def test_wrong_mgmt_ipv4_subnet__fails(self) -> None:
+        self.edit(
+            "topology.clab.yml",
+            "ipv4-subnet: 172.31.250.0/24",
+            "ipv4-subnet: 172.20.20.0/24",
+        )
+        self.assert_fails_with("mgmt ipv4-subnet must be '172.31.250.0/24'")
+
+    def test_wrong_mgmt_ipv6_subnet__fails(self) -> None:
+        self.edit(
+            "topology.clab.yml",
+            "ipv6-subnet: 3fff:172:31:250::/64",
+            "ipv6-subnet: 3fff:172:20:20::/64",
+        )
+        self.assert_fails_with("mgmt ipv6-subnet must be '3fff:172:31:250::/64'")
+
+
 class FrrContractTests(LabCopyTestCase):
     def test_wrong_asn__fails(self) -> None:
         self.edit("frr/leaf-1/frr.conf", "router bgp 65101", "router bgp 65999")

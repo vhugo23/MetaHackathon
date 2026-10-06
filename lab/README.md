@@ -60,6 +60,21 @@ Both spines share AS 65000. Images are pinned; `latest` is never used.
 Hosts use a static default route via their leaf (`10.1.1.1` / `10.1.2.1`),
 configured by Containerlab `exec` commands with no package installation.
 
+## Management network
+
+| Setting | Value |
+|---|---|
+| name | `meta-rne-bgp-mgmt` |
+| IPv4 | 172.31.250.0/24 |
+| IPv6 | 3fff:172:31:250::/64 |
+
+Management addressing is explicit on purpose: Containerlab's default
+172.20.20.0/24 collided with another local Docker project's network
+(172.20.0.0/16). The network is management-only; dataplane tests do not
+depend on management addresses. The unrelated Docker network was not
+changed. A deployment has still not completed successfully, so Lab 1 remains
+unproven live.
+
 ## Routing design
 
 - eBGP on every leaf-spine link: **4 sessions** expected.

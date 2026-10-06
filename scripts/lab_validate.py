@@ -32,6 +32,14 @@ ROUTER_IMAGE = "quay.io/frrouting/frr:10.6.1"
 HOST_IMAGE = "alpine:3.24.2"
 HOST_CMD = "tail -f /dev/null"
 
+# Explicit management network: Containerlab's default 172.20.20.0/24 collides
+# with other local Docker projects (ADR-0003).
+EXPECTED_MGMT = {
+    "network": "meta-rne-bgp-mgmt",
+    "ipv4-subnet": "172.31.250.0/24",
+    "ipv6-subnet": "3fff:172:31:250::/64",
+}
+
 ROUTERS = ("spine-1", "spine-2", "leaf-1", "leaf-2")
 HOSTS = ("host-1", "host-2")
 
@@ -254,6 +262,13 @@ def validate_topology(text: str) -> list[str]:
         failures.append(
             f"topology: name must be {LAB_NAME!r}, got {topo.get('name')!r}"
         )
+
+    mgmt = _as_dict(topo.get("mgmt"))
+    for key, expected in EXPECTED_MGMT.items():
+        if mgmt.get(key) != expected:
+            failures.append(
+                f"topology: mgmt {key} must be {expected!r}, got {mgmt.get(key)!r}"
+            )
 
     topology = _as_dict(topo.get("topology"))
     nodes = _as_dict(topology.get("nodes"))

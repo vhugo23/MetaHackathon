@@ -3,6 +3,11 @@
 # not yet deployed.
 name: meta-rne-bgp
 
+mgmt:
+  network: meta-rne-bgp-mgmt
+  ipv4-subnet: 172.31.250.0/24
+  ipv6-subnet: 3fff:172:31:250::/64
+
 topology:
   nodes:
     spine-1:
