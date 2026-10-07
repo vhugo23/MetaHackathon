@@ -177,6 +177,13 @@ def build_router(
                 "model": ApiErrorResponse,
                 "description": "device_not_found.",
             },
+            409: {
+                "model": ApiErrorResponse,
+                "description": (
+                    "drift_not_applicable: the device has no configuration snapshot "
+                    "(an FRR Lab 1 router)."
+                ),
+            },
             500: {
                 "description": (
                     "An unmapped internal invariant failure (e.g. a device "

@@ -48,3 +48,31 @@ class DeviceNotFoundError(Exception):
     def __init__(self, device_id: str) -> None:
         super().__init__(f"device not found: {device_id!r}")
         self.device_id = device_id
+
+
+class DriftNotApplicableError(Exception):
+    """Raised by ``GetDeviceDriftService`` when the device exists but is of a
+    kind that carries no configuration snapshots (an FRR Lab 1 router), so a
+    configuration-drift comparison has nothing to compare. This is not a
+    broken invariant and not "no drift": drift is unavailable for the device.
+    Preserves ``device_id`` as structured data; the HTTP mapping belongs to
+    the API layer alone."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(
+            f"configuration drift is not applicable to device {device_id!r}: "
+            "it has no configuration snapshot"
+        )
+        self.device_id = device_id
+
+
+class LabDeviceConflictError(Exception):
+    """Raised by ``RegisterLabDevicesService`` when a fixed Lab 1 router ID is
+    already registered in a state that does not match the expected snapshot-
+    less FRR identity (a different vendor, or any snapshot reference).
+    Registration fails closed: nothing is created, nothing is mutated."""
+
+    def __init__(self, device_id: str, reason: str) -> None:
+        super().__init__(f"lab device {device_id!r} conflicts with the Lab 1 identity: {reason}")
+        self.device_id = device_id
+        self.reason = reason

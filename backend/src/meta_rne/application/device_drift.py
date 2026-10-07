@@ -20,8 +20,9 @@ different snapshot.
 
 from collections.abc import Callable
 
-from meta_rne.application.errors import DeviceNotFoundError
+from meta_rne.application.errors import DeviceNotFoundError, DriftNotApplicableError
 from meta_rne.detection.drift_detector import DriftDetector
+from meta_rne.domain.config import VendorType
 from meta_rne.domain.drift import DriftReport
 from meta_rne.domain.ports import UnitOfWork
 
@@ -36,6 +37,9 @@ class GetDeviceDriftService:
             device = uow.devices.get_by_id(device_id)
             if device is None:
                 raise DeviceNotFoundError(device_id)
+
+            if device.vendor is VendorType.FRR:
+                raise DriftNotApplicableError(device_id)
 
             baseline_snapshot_id = device.baseline_snapshot_id
             if baseline_snapshot_id is None:

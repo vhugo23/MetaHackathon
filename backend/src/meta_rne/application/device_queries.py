@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from meta_rne.application.errors import DeviceNotFoundError
-from meta_rne.domain.config import NormalizedConfiguration
+from meta_rne.domain.config import NormalizedConfiguration, VendorType
 from meta_rne.domain.device import Device
 from meta_rne.domain.ports import UnitOfWork
 
@@ -52,8 +52,45 @@ class ListDevicesService:
 
 @dataclass(frozen=True, slots=True)
 class DeviceDetailResult:
+    """``normalized_config`` is ``None`` only for a device kind that carries
+    no configuration snapshots (an FRR Lab 1 router) — never fabricated."""
+
     device: Device
-    normalized_config: NormalizedConfiguration
+    normalized_config: NormalizedConfiguration | None
+
+
+def _detail_from_current_snapshot(uow: UnitOfWork, device: Device) -> DeviceDetailResult:
+    device_id = device.device_id
+    current_snapshot_id = device.current_snapshot_id
+    if current_snapshot_id is None:
+        raise RuntimeError(
+            f"Device {device_id!r} exists but has no current_snapshot_id; a "
+            "persisted device must have one set (see ConfigIngestionService)"
+        )
+
+    current_snapshot = uow.configuration_snapshots.get_by_id(current_snapshot_id)
+    if current_snapshot is None:
+        raise RuntimeError(
+            f"Device {device_id!r} references a current snapshot that does not "
+            f"exist: {current_snapshot_id!r}"
+        )
+
+    if current_snapshot.device_id != device.device_id:
+        raise RuntimeError(
+            f"Device {device_id!r} current snapshot {current_snapshot_id!r} belongs "
+            f"to a different device_id: {current_snapshot.device_id!r}"
+        )
+    if current_snapshot.vendor != device.vendor:
+        raise RuntimeError(
+            f"Device {device_id!r} current snapshot {current_snapshot_id!r} vendor "
+            f"{current_snapshot.vendor.value!r} differs from device vendor "
+            f"{device.vendor.value!r}"
+        )
+
+    return DeviceDetailResult(
+        device=device,
+        normalized_config=current_snapshot.normalized_config,
+    )
 
 
 class GetDeviceDetailService:
@@ -67,36 +104,11 @@ class GetDeviceDetailService:
             if device is None:
                 raise DeviceNotFoundError(device_id)
 
-            current_snapshot_id = device.current_snapshot_id
-            if current_snapshot_id is None:
-                raise RuntimeError(
-                    f"Device {device_id!r} exists but has no current_snapshot_id; a "
-                    "persisted device must have one set (see ConfigIngestionService)"
-                )
-
-            current_snapshot = uow.configuration_snapshots.get_by_id(current_snapshot_id)
-            if current_snapshot is None:
-                raise RuntimeError(
-                    f"Device {device_id!r} references a current snapshot that does not "
-                    f"exist: {current_snapshot_id!r}"
-                )
-
-            if current_snapshot.device_id != device.device_id:
-                raise RuntimeError(
-                    f"Device {device_id!r} current snapshot {current_snapshot_id!r} belongs "
-                    f"to a different device_id: {current_snapshot.device_id!r}"
-                )
-            if current_snapshot.vendor != device.vendor:
-                raise RuntimeError(
-                    f"Device {device_id!r} current snapshot {current_snapshot_id!r} vendor "
-                    f"{current_snapshot.vendor.value!r} differs from device vendor "
-                    f"{device.vendor.value!r}"
-                )
-
-            result = DeviceDetailResult(
-                device=device,
-                normalized_config=current_snapshot.normalized_config,
-            )
+            if device.vendor is VendorType.FRR:
+                # Snapshot-less by design (Device enforces both pointers None).
+                result = DeviceDetailResult(device=device, normalized_config=None)
+            else:
+                result = _detail_from_current_snapshot(uow, device)
         except Exception as original_error:
             try:
                 uow.rollback()

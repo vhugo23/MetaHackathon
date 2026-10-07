@@ -476,7 +476,8 @@ class DeviceDetailResponse(BaseModel):
     baseline_snapshot_id: str | None
     created_at: datetime
     updated_at: datetime
-    normalized_config: NormalizedConfigurationResponse
+    # ``None`` only for a snapshot-less FRR Lab 1 router (NPE-1C3B1).
+    normalized_config: NormalizedConfigurationResponse | None
 
     @classmethod
     def from_domain(cls, result: DeviceDetailResult) -> "DeviceDetailResponse":
@@ -488,7 +489,11 @@ class DeviceDetailResponse(BaseModel):
             baseline_snapshot_id=device.baseline_snapshot_id,
             created_at=device.created_at,
             updated_at=device.updated_at,
-            normalized_config=NormalizedConfigurationResponse.from_domain(result.normalized_config),
+            normalized_config=(
+                None
+                if result.normalized_config is None
+                else NormalizedConfigurationResponse.from_domain(result.normalized_config)
+            ),
         )
 
 

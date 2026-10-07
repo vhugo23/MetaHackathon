@@ -389,7 +389,9 @@ Compares a device's current normalized configuration against its fixed
 baseline (the first successfully accepted configuration for that device)
 and returns the structural diff. Read-only — no request body, no query
 parameters, no write of any kind. **No frontend consumer exists yet** —
-the current React dashboard does not call this endpoint.
+the current React dashboard does not call this endpoint. For a snapshot-less
+FRR Lab 1 router (NPE-1C3B1) the endpoint returns `409` `ApiErrorResponse`
+with `code: "drift_not_applicable"`: drift is unavailable, not "no drift".
 
 ```
 GET /devices/{device_id}/drift
@@ -476,6 +478,16 @@ Only the `device_id` path parameter; no request body. `200` returns
 normalized-configuration schema as Section 5's `normalized_config`. No raw
 configuration is returned. An unknown device returns `404`
 `ApiErrorResponse` with `code: "device_not_found"`.
+
+**NPE-1C3B1 amendment.** A registered Lab 1 FRR router (`vendor: "frr"`) has
+no configuration snapshot: `current_snapshot_id` and `baseline_snapshot_id`
+are `null` and `normalized_config` is `null`. `normalized_config` therefore
+is a required-but-nullable field (OpenAPI `anyOf: [NormalizedConfigurationResponse,
+null]`); it is `null` only for an FRR router and never for Cisco/Arista. A
+Cisco/Arista device without a snapshot is still a broken invariant (`500`).
+`GET /devices` lists FRR routers like any other device. No frontend code
+consumes `GET /devices/{device_id}` or the drift endpoint, so no frontend
+change is required.
 
 ## 9. `POST /devices/{device_id}/telemetry` (Day 9b, backend-only) and `GET /devices/{device_id}/telemetry/recent` (Day 9b backend; Day 11B frontend)
 

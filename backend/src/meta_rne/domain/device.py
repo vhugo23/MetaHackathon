@@ -38,5 +38,12 @@ class Device:
         _require_non_empty(self.device_id, "Device.device_id")
         _require_utc(self.created_at, "Device.created_at")
         _require_utc(self.updated_at, "Device.updated_at")
+        if self.vendor is VendorType.FRR and (
+            self.current_snapshot_id is not None or self.baseline_snapshot_id is not None
+        ):
+            raise ValueError(
+                "Device with vendor 'frr' must not reference configuration snapshots "
+                "(FRR configuration snapshots are not supported)"
+            )
         if self.updated_at < self.created_at:
             raise ValueError("Device.updated_at must not precede Device.created_at")

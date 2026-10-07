@@ -231,6 +231,34 @@ collector's fixed allowlist of read-only commands in the six Lab 1 containers.
   to the platform API, no remediation, no AI action. NPE-1C3B (platform
   integration) is not started.
 
+## Implementation status: NPE-1C3B1 (lab router identity and persistence)
+
+NPE-1C3B1 is **identity and persistence support only**. NPE-1C3B (platform
+integration) is not complete.
+
+- The four Lab 1 routers may now exist as registered platform devices, with
+  the fixed IDs `lab1-spine-1`, `lab1-spine-2`, `lab1-leaf-1` and
+  `lab1-leaf-2`. Hosts are not registered.
+- Their identity is `VendorType.FRR = "frr"` (migration 0004 widens only
+  `ck_devices_vendor`). Their identity is independent of configuration
+  snapshots: `current_snapshot_id` and `baseline_snapshot_id` are `None`, which
+  is a supported state for FRR devices only. `Device` rejects an FRR device that
+  references a snapshot.
+- No FRR configuration ingestion exists: there is no FRR adapter,
+  `AdapterRegistry` still rejects `frr`, `ConfigurationSnapshot` rejects the FRR
+  vendor, and `ck_configuration_snapshots_vendor` still allows only Cisco/Arista.
+- `GET /devices/{id}` returns a snapshot-less FRR router with
+  `normalized_config: null`; `GET /devices/{id}/drift` returns `409
+  drift_not_applicable`. Cisco/Arista behavior is unchanged.
+- Registration is an explicit, idempotent, fixed-allowlist use case
+  (`RegisterLabDevicesService`) run by `scripts/lab_register_devices.py`
+  against `DATABASE_URL`. There is no HTTP registration endpoint, and no
+  arbitrary device ID or vendor input. An existing device with a conflicting
+  vendor or snapshot state fails registration closed.
+- Not done, by design: no operational-state incident ingestion, no detector,
+  no incidents generated from live state, no `RuleEngine` or `BgpDownEvidence`
+  change, no auto-resolution. `TelemetrySample` is unchanged.
+
 ## Deferred
 
 - OSPF

@@ -53,6 +53,7 @@ jobs:
           python scripts/test_lab_validate.py
           python scripts/test_lab_failure_scenario.py
           python scripts/test_lab_collect_state.py
+          python scripts/test_lab_register_devices.py
 
   postgres-tests:
     runs-on: ubuntu-latest

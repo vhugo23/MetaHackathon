@@ -62,7 +62,9 @@ class _DeviceModel(_Base):
 
     __table_args__ = (
         CheckConstraint("updated_at >= created_at", name="ck_devices_updated_at_after_created_at"),
-        CheckConstraint("vendor IN ('cisco-ios-xe', 'arista-eos')", name="ck_devices_vendor"),
+        CheckConstraint(
+            "vendor IN ('cisco-ios-xe', 'arista-eos', 'frr')", name="ck_devices_vendor"
+        ),
     )
 
 

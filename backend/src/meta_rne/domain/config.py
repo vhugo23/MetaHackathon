@@ -26,6 +26,10 @@ class VendorType(StrEnum):
 
     CISCO_IOS_XE = "cisco-ios-xe"
     ARISTA_EOS = "arista-eos"
+    # Network OS identity of the Lab 1 routers (NPE-1C3B1). Identity only: no
+    # FRR configuration adapter exists and no FRR configuration snapshot may
+    # be stored (ADR-0003).
+    FRR = "frr"
 
 
 class AdminState(StrEnum):

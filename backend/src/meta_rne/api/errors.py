@@ -19,6 +19,7 @@ from meta_rne.api.schemas import ApiErrorResponse
 from meta_rne.application.errors import (
     ConfigurationParseError,
     DeviceNotFoundError,
+    DriftNotApplicableError,
     IncidentNotFoundError,
 )
 from meta_rne.domain.errors import UnsupportedVendorError
@@ -68,6 +69,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(DeviceNotFoundError)
     async def _device_not_found(request: Request, exc: DeviceNotFoundError) -> JSONResponse:
         return _error_response(status.HTTP_404_NOT_FOUND, "device_not_found", str(exc))
+
+    @app.exception_handler(DriftNotApplicableError)
+    async def _drift_not_applicable(request: Request, exc: DriftNotApplicableError) -> JSONResponse:
+        return _error_response(status.HTTP_409_CONFLICT, "drift_not_applicable", str(exc))
 
     @app.exception_handler(DeviceConflictError)
     async def _device_conflict(request: Request, exc: DeviceConflictError) -> JSONResponse:

@@ -419,9 +419,22 @@ def test_openapi_contract__device_detail_response__has_only_approved_fields() ->
 
 
 def test_openapi_contract__device_detail_response__normalized_config_references_schema() -> None:
+    """NPE-1C3B1: ``normalized_config`` is required but nullable — ``null`` only
+    for a snapshot-less FRR Lab 1 router."""
     schema = _openapi_schema()
 
-    properties = schema["components"]["schemas"]["DeviceDetailResponse"]["properties"]
-    assert properties["normalized_config"]["$ref"] == (
-        "#/components/schemas/NormalizedConfigurationResponse"
-    )
+    detail = schema["components"]["schemas"]["DeviceDetailResponse"]
+    assert "normalized_config" in detail["required"]
+    assert detail["properties"]["normalized_config"]["anyOf"] == [
+        {"$ref": "#/components/schemas/NormalizedConfigurationResponse"},
+        {"type": "null"},
+    ]
+
+
+def test_openapi_contract__get_device_drift__documents_409_drift_not_applicable() -> None:
+    schema = _openapi_schema()
+
+    responses = schema["paths"]["/devices/{device_id}/drift"]["get"]["responses"]
+    assert responses["409"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ApiErrorResponse"
+    }

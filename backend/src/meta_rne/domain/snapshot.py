@@ -48,6 +48,11 @@ class ConfigurationSnapshot:
 
     def __post_init__(self) -> None:
         _require_non_empty(self.snapshot_id, "ConfigurationSnapshot.snapshot_id")
+        if self.vendor is VendorType.FRR:
+            raise ValueError(
+                "ConfigurationSnapshot.vendor 'frr' is not supported: FRR has no "
+                "configuration adapter and FRR configuration snapshots are not stored"
+            )
         _require_non_empty(self.device_id, "ConfigurationSnapshot.device_id")
         _require_non_empty(self.raw_config_text, "ConfigurationSnapshot.raw_config_text")
         _require_utc(self.submitted_at, "ConfigurationSnapshot.submitted_at")
