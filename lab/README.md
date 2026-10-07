@@ -177,10 +177,51 @@ This is controlled fault injection and measurement only. It does not detect,
 diagnose, or remediate anything automatically, and it is not connected to the
 platform's telemetry, incident, or AI features.
 
+## Read-only live state collection
+
+`scripts/lab_collect_state.py` collects one normalized operational-state
+snapshot of the deployed lab and prints it as JSON (`--output FILE` also writes
+it). It runs a fixed allowlist of read-only commands (`ip -j addr`,
+`vtysh -c "show bgp summary json"`, `vtysh -c "show ip route json"` on routers;
+`ip -o link show`, `ip -o addr show` and one fixed `ping` on hosts) in exactly
+the six Lab 1 containers. There is no option that accepts a container, command,
+interface, or address.
+
+```
+python scripts/lab_collect_state.py [--output state.json]
+```
+
+The backend needs Python >= 3.12, which the WSL distro does not have, so on
+Windows the script runs under Windows Python and reaches the native Docker
+Engine with `wsl -d Ubuntu --exec docker ...` (never a Windows-side `docker`).
+
+- The snapshot has one entry per node, all sharing one `collected_at` and
+  `collection_id`: interfaces (state, addresses), the BGP view (local AS,
+  router ID, neighbors with remote AS, state, and for Established sessions the
+  prefix count and uptime), installed routes with next-hops and a derived
+  ECMP path count, and each host's reachability probe.
+- An observed failure is reported as such (`oper_state: down`, neighbor state
+  `Active`/`Idle`, one next-hop instead of two) and exits `0`. A command that
+  fails or output that cannot be parsed makes that facet *unavailable* (listed
+  under `unavailable`, with empty data) and exits `1`; it is never reported as
+  `down`/`Idle`/zero. A BGP state outside the six standard values (FRR also
+  reports transient states such as `Clearing`) is `Unknown`, with the device's
+  raw string preserved.
+- Code: `backend/src/meta_rne/domain/operational_state.py` (model),
+  `backend/src/meta_rne/adapters/containerlab_frr/` (pure parsers + collector;
+  no process spawning). Tests replay real captures from
+  `backend/tests/fixtures/containerlab_frr/` (see its README) and need no Docker.
+
+This is observation only. Nothing is persisted, nothing is translated into
+`TelemetrySample` or sent to the platform, no device is registered, and nothing
+is written to the lab.
+
 ## Deferred
 
 MPLS (the stock WSL kernel lacks MPLS forwarding), OSPF, IS-IS, GRE,
-IP-in-IP, live collection, and fault automation.
+IP-in-IP, and platform integration of the collected state (persistence,
+telemetry translation, device identity), and automation beyond the single
+controlled failure scenario.
 
 ## Offline validation
 

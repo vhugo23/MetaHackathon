@@ -17,6 +17,7 @@ from meta_rne.domain.config import NormalizedConfiguration
 from meta_rne.domain.device import Device
 from meta_rne.domain.errors import ParseError
 from meta_rne.domain.incident import Incident, IncidentCandidate, IncidentUpsertResult
+from meta_rne.domain.operational_state import FabricOperationalState
 from meta_rne.domain.policy import ConfigurationPolicy
 from meta_rne.domain.snapshot import ConfigurationSnapshot
 from meta_rne.domain.telemetry import TelemetrySample
@@ -27,6 +28,15 @@ class VendorConfigAdapter(Protocol):
     vendor_id: str
 
     def parse(self, raw_text: str) -> NormalizedConfiguration | ParseError: ...
+
+
+class OperationalStateCollector(Protocol):
+    """Read-only source of live operational state (NPE-1C3A). One call is one
+    collection pass. An implementation must never modify the observed
+    network, and must report an observation it could not make as unavailable
+    rather than as a failure state."""
+
+    def collect(self) -> FabricOperationalState: ...
 
 
 class DeviceRepository(Protocol):

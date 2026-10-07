@@ -42,6 +42,18 @@ jobs:
         working-directory: backend
         run: pytest -m "not postgres"
 
+      # Lab-script unit/safety suites (NPE-1C3A-FINAL). Docker-free and
+      # Containerlab-free: each replays a simulated lab or captured fixtures.
+      # They guard the lab contract, the fixed fault-injection target, and the
+      # read-only collector allowlist, so a failure here fails the build. No
+      # live lab is ever started in CI. The editable install above makes the
+      # backend package importable for the collector suite.
+      - name: Lab script unit and safety tests (no Docker, no live lab)
+        run: |
+          python scripts/test_lab_validate.py
+          python scripts/test_lab_failure_scenario.py
+          python scripts/test_lab_collect_state.py
+
   postgres-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15

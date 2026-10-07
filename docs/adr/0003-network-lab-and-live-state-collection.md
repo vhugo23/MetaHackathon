@@ -158,7 +158,8 @@ Live collection must **not** replace the deterministic simulator. Both
 modes coexist:
 
 - **simulator** = deterministic test/demo source (unchanged);
-- **live collector** = real lab operational-state source (future).
+- **live collector** = real lab operational-state source (read-only collector
+  implemented in NPE-1C3A; not yet connected to the platform).
 
 Live state will enter a **separate** `NormalizedOperationalState` model.
 `TelemetrySample` is **not** extended with routes, reachability, or other
@@ -211,6 +212,25 @@ All future writes remain lab-only until separately approved.
 - Production-device polling and remediation remain out of scope.
 - No existing code, schema, API, or test changes as a result of this ADR.
 
+## Implementation status: NPE-1C3A (read-only collection)
+
+`NormalizedOperationalState` now exists (`domain/operational_state.py`), with a
+read-only collector for Lab 1 under the existing adapter layer
+(`adapters/containerlab_frr/`: pure parsers and a collector that takes an
+injected command runner and spawns nothing). The only real subprocess runner
+is `scripts/lab_collect_state.py`, which re-checks every call against the
+collector's fixed allowlist of read-only commands in the six Lab 1 containers.
+
+- The model is separate from `TelemetrySample`; `TelemetrySample` is unchanged.
+- An observed failure state (interface `down`, BGP `Idle`/`Active`) is distinct
+  from an unavailable observation (failed command, unparseable output, or a
+  BGP state the model does not recognize, which is `Unknown`). A collection
+  error is never reported as a network failure.
+- Not done, by design: no persistence of normalized state, no translation into
+  `TelemetrySample`, no device registration or `VendorType` change, no posting
+  to the platform API, no remediation, no AI action. NPE-1C3B (platform
+  integration) is not started.
+
 ## Deferred
 
 - OSPF
@@ -218,8 +238,9 @@ All future writes remain lab-only until separately approved.
 - MPLS
 - GRE
 - IP-in-IP
-- live collector implementation
-- `NormalizedOperationalState` implementation
+- translation of normalized state into `TelemetrySample` (NPE-1C3B)
+- persistence of normalized state
+- device identity / registration of lab nodes (NPE-1C3B)
 - fault automation
 - RCA engine
 - remediation engine
