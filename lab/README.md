@@ -1,10 +1,14 @@
 # Lab 1 — eBGP leaf-spine
 
-> **Status: defined offline, not yet deployed.** This directory is the
-> topology-as-code definition from NPE-1B2. No container has been started,
-> no BGP session has been established, and no reachability or ECMP behavior
-> has been proven. The Alpine host image may not yet be present locally
-> (`quay.io/frrouting/frr:10.6.1` is cached; `alpine:3.24.2` is not).
+> **Status: live-proven local lab.** This directory is the topology-as-code
+> definition. It was first defined and validated offline in NPE-1B2, before
+> any successful deployment; later milestones then proved it live on a native
+> Ubuntu Docker Engine under WSL2: 4 FRR routers and 2 hosts, four
+> Established eBGP sessions, two-path ECMP on both leaves, and bidirectional
+> host-to-host reachability. A controlled `leaf-1 eth1` failure and recovery
+> was also validated (ECMP 2 → 1 → 2, with host reachability preserved
+> throughout). This is a local development lab, not a production network, and
+> nothing here performs automated remediation.
 > Decision record: [ADR-0003](../docs/adr/0003-network-lab-and-live-state-collection.md).
 
 ## Purpose
@@ -110,11 +114,68 @@ confirmed against a running lab.
   equal-cost next-hops (one per spine).
 - host-1 ↔ host-2 ping succeeds.
 
-## First future fault scenario
+## Controlled link-failure scenario
 
-Disable `leaf-1 eth1 ↔ spine-1 eth1`: expect that interface down, one BGP
-adjacency out of Established, ECMP from 2 paths to 1, host-1 ↔ host-2 still
-reachable via spine-2; restoring the link restores the adjacency and ECMP 2.
+`scripts/lab_failure_scenario.py` is a lab-only, repeatable, measured version
+of the first fault scenario (first proven by hand in NPE-1C1). It models loss
+of exactly one fabric link, `leaf-1 eth1 ↔ spine-1 eth1`, and its recovery.
+
+| Phase | Expected |
+|---|---|
+| Baseline | 4 of 4 leaf-spine eBGP sessions Established; two installed next-hops on each leaf (leaf-1 → `10.1.2.0/24` via `10.255.0.0`/eth1 and `10.255.0.2`/eth2; leaf-2 → `10.1.1.0/24` via `10.255.0.4`/eth1 and `10.255.0.6`/eth2); host-1 ↔ host-2 reachable |
+| Failure | `ip link set eth1 down` inside leaf-1 only; the leaf-1 ↔ spine-1 session leaves Established, the other 3 stay Established |
+| Degraded | ECMP 2 → 1: leaf-1 keeps only `10.255.0.2` via eth2, leaf-2 only `10.255.0.6` via eth2; host-1 ↔ host-2 stays reachable through spine-2 |
+| Restore | `ip link set eth1 up` (no re-addressing, no FRR restart or config change) |
+| Recovered | 4 of 4 sessions Established again, ECMP back to 2 on both leaves, hosts reachable |
+
+Run it against an already-deployed lab, from Ubuntu WSL next to the native
+Docker Engine (Python 3.10+ is enough, standard library only):
+
+```
+containerlab deploy  -t lab/topology.clab.yml
+python3 scripts/lab_failure_scenario.py [--output result.json]
+containerlab destroy -t lab/topology.clab.yml --cleanup
+```
+
+Progress goes to stderr; a structured JSON result goes to stdout (and to
+`--output`). Exit codes: `0` passed, `1` scenario failed, `2` refused (a safety
+precondition failed, nothing injected), `3` baseline unhealthy (nothing
+injected), `4` Docker/WSL runtime restarted during the run, `5` recovery
+failed (the lab may be left degraded), `6` unexpected internal error.
+
+Lab-only safety restrictions:
+
+- The target (`clab-meta-rne-bgp-leaf-1`, `eth1`) is a constant. There is no
+  option or code path for another container, interface, command, or address.
+- It refuses unless the topology is `meta-rne-bgp`, exactly the six Lab 1
+  containers are running, the Docker server is the native Engine (not Docker
+  Desktop), and the baseline above is fully healthy. It never injects a fault
+  into an unhealthy lab.
+- The restore command runs in a `finally` path, so `eth1` is brought back up
+  even if validation fails, times out, or raises.
+
+Measurements (all monotonic, from one execution):
+
+- BGP detection, leaf-1 FIB convergence and leaf-2 FIB convergence are
+  measured independently from the injection instant; they are not
+  interchangeable. Recovery has the same three measurements from the restore
+  instant.
+- They are taken by polling, so each is an upper bound with a resolution of one
+  poll cycle (a few `docker exec` calls) and includes `docker exec` dispatch
+  latency. A value of a few hundred ms means "converged by the first poll".
+- A background monitor sends one single-packet ping per probe from host-1 to
+  host-2 and timestamps each result itself (avoiding BusyBox's buffered
+  long-running ping output). It reports probe count, losses, loss percentage,
+  the longest consecutive failure streak, and failure offsets relative to the
+  injection. Brief loss during reconvergence does not fail the scenario;
+  failing to recover does.
+- The result also records the WSL boot id and Docker restart count before and
+  after; a change fails the run (exit `4`), because a restarted daemon would
+  invalidate the experiment.
+
+This is controlled fault injection and measurement only. It does not detect,
+diagnose, or remediate anything automatically, and it is not connected to the
+platform's telemetry, incident, or AI features.
 
 ## Deferred
 
@@ -147,12 +208,20 @@ ECMP, or reachability — those require the live deployment gate. Note that
 the command writes a generated `clab-meta-rne-bgp/` directory next to the
 topology file (ignored by `.gitignore`); remove it afterwards.
 
-## Future commands (documentation only — not run by NPE-1B2)
+## Lab lifecycle commands
 
 ```
 containerlab deploy -t lab/topology.clab.yml
 containerlab destroy -t lab/topology.clab.yml --cleanup
 ```
 
-Deployment needs Docker Desktop running, the `alpine:3.24.2` image pulled,
-and roughly 2 GB of free host memory.
+NPE-1B2 itself did not run these (it only defined and validated the lab
+offline); they were first executed in later live-deployment milestones, which
+validated the lab end to end. Run them from Ubuntu WSL against the native
+Docker Engine: Containerlab and Docker must share one Linux network
+namespace, so Docker Desktop's separate engine does not work. The
+`quay.io/frrouting/frr:10.6.1` and `alpine:3.24.2` images must be pulled into
+that engine, the Containerlab management network is the explicit
+`meta-rne-bgp-mgmt` (see above), and roughly 2 GB of free Windows memory is
+advisable. Set `instanceIdleTimeout=-1` under `[general]` in `.wslconfig` so
+WSL does not shut down (and restart Docker) while the lab is running.
