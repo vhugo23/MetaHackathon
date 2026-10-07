@@ -786,6 +786,27 @@ def test_incident_repository__anomaly_candidate__preserves_source_rule_ref_and_e
     assert incident.evidence == _BGP_DOWN_EVIDENCE
 
 
+def test_incident_repository__bgp_down_null_previous_state__round_trips_via_get_by_id(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    evidence = BgpDownEvidence(neighbor_ip="10.255.0.0", state=BgpState.ACTIVE, previous_state=None)
+    candidate = _anomaly_candidate(
+        rule_ref="RULE-BGP-DOWN",
+        affected_resource="bgp-neighbor:10.255.0.0",
+        evidence=evidence,
+    )
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+    fetched = incidents.get_by_id(result.incident.incident_id)
+
+    assert fetched is not None
+    assert isinstance(fetched.evidence, BgpDownEvidence)
+    assert fetched.evidence == evidence
+    assert fetched.evidence.previous_state is None
+
+
 def test_incident_repository__repeated_anomaly_upsert__updates_in_place(
     repositories: SimpleNamespace,
 ) -> None:

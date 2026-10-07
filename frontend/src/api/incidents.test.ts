@@ -752,6 +752,17 @@ test("rejects a RULE-LINK-FLAP incident with a malformed transition entry", asyn
   await expect(fetchIncidents()).rejects.toThrow(ApiRequestError);
 });
 
+test("accepts a RULE-BGP-DOWN incident with a null previous_state", async () => {
+  const payload = rawBgpDownIncidentPayload({
+    evidence: { neighbor_ip: "10.0.0.2", previous_state: null, state: "Active" },
+  });
+  stubIncidentsResponse([payload]);
+
+  const incidents = await fetchIncidents();
+
+  expect(incidents).toHaveLength(1);
+});
+
 test("rejects a RULE-BGP-DOWN incident missing the current state", async () => {
   const payload = rawBgpDownIncidentPayload({
     evidence: { neighbor_ip: "10.0.0.2", previous_state: "Established", state: "" },

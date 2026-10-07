@@ -378,6 +378,31 @@ def test_incident_repository_sqlalchemy__bgp_down_evidence__round_trips_through_
     assert fetched.evidence.previous_state == BgpState.ESTABLISHED
 
 
+def test_incident_repository_sqlalchemy__bgp_down_null_previous_state__stored_as_json_null(
+    sqlalchemy_session: Session,
+) -> None:
+    _seed_device(sqlalchemy_session)
+    incidents = SqlAlchemyIncidentRepository(sqlalchemy_session, incident_id_factory=lambda: "id-1")
+    evidence = BgpDownEvidence(neighbor_ip="10.255.0.0", state=BgpState.ACTIVE, previous_state=None)
+    candidate = _anomaly_candidate(
+        rule_ref="RULE-BGP-DOWN", affected_resource="bgp-neighbor:10.255.0.0", evidence=evidence
+    )
+
+    result = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+    sqlalchemy_session.flush()
+    raw = sqlalchemy_session.execute(
+        text("SELECT evidence::text, evidence -> 'previous_state' = 'null'::jsonb FROM incidents")
+    ).one()
+    fetched = incidents.get_by_id(result.incident.incident_id)
+
+    assert '"previous_state": null' in raw[0]
+    assert raw[1] is True
+    assert fetched is not None
+    assert fetched.evidence == evidence
+    assert isinstance(fetched.evidence, BgpDownEvidence)
+    assert fetched.evidence.previous_state is None
+
+
 def test_incident_repository_sqlalchemy__repeated_anomaly_upsert__replaces_evidence_in_jsonb(
     sqlalchemy_session: Session,
 ) -> None:

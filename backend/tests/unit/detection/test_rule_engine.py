@@ -48,7 +48,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from meta_rne.detection.rule_engine import RuleEngine
-from meta_rne.domain.anomaly import RuleId
+from meta_rne.domain.anomaly import BgpDownEvidence, RuleId
 from meta_rne.domain.telemetry import (
     BgpSession,
     BgpState,
@@ -1160,6 +1160,10 @@ def test_rule_engine__bgp_down__non_down_to_down_transition__triggers(
 
     assert len(result) == 1
     assert result[0].rule_id == RuleId.BGP_DOWN
+    # Edge-triggered: evidence keeps the real observed predecessor.
+    assert isinstance(result[0].evidence, BgpDownEvidence)
+    assert result[0].evidence.previous_state == previous_state
+    assert result[0].evidence.state == current_state
 
 
 # --- RULE-BGP-DOWN: non-triggering transitions -----------------------------------

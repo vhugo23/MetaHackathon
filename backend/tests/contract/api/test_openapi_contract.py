@@ -438,3 +438,15 @@ def test_openapi_contract__get_device_drift__documents_409_drift_not_applicable(
     assert responses["409"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ApiErrorResponse"
     }
+
+
+def test_openapi_contract__bgp_down_evidence__previous_state_is_required_and_nullable() -> None:
+    schema = _openapi_schema()
+
+    evidence_schema = schema["components"]["schemas"]["BgpDownEvidenceResponse"]
+    assert "previous_state" in evidence_schema["required"]
+    types_in_any_of = {
+        member.get("type") for member in evidence_schema["properties"]["previous_state"]["anyOf"]
+    }
+    assert types_in_any_of == {"string", "null"}
+    assert evidence_schema["properties"]["state"]["type"] == "string"

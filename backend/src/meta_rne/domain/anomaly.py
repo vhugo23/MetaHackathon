@@ -69,9 +69,14 @@ class LinkFlapEvidence:
 
 @dataclass(frozen=True, slots=True)
 class BgpDownEvidence:
+    """``previous_state`` is a real observed predecessor (an actual transition,
+    from the edge-triggered ``RuleEngine``) or ``None`` when the neighbor was
+    first observed already degraded (the level-triggered operational-state
+    detector). It is never fabricated and never ``UNKNOWN``."""
+
     neighbor_ip: str
     state: BgpState
-    previous_state: BgpState
+    previous_state: BgpState | None
 
 
 RuleEvidence = CpuHighEvidence | LinkFlapEvidence | BgpDownEvidence

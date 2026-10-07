@@ -261,6 +261,7 @@ of three shapes, selected by `rule_ref`:
 
 // rule_ref: "RULE-BGP-DOWN"
 {"neighbor_ip": "10.0.0.1", "previous_state": "Established", "state": "Idle"}
+// previous_state is null when the neighbor was first observed already degraded
 ```
 
 An `"ANOMALY"` incident's `severity` is always `"High"`

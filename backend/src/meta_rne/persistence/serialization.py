@@ -422,8 +422,14 @@ def bgp_down_evidence_to_json(evidence: BgpDownEvidence) -> dict[str, Any]:
     return {
         "neighbor_ip": evidence.neighbor_ip,
         "state": evidence.state.value,
-        "previous_state": evidence.previous_state.value,
+        "previous_state": (
+            None if evidence.previous_state is None else evidence.previous_state.value
+        ),
     }
+
+
+def _optional_bgp_state(value: Any) -> BgpState | None:
+    return None if value is None else _enum(BgpState, value, "previous_state")
 
 
 def bgp_down_evidence_from_json(data: Any) -> BgpDownEvidence:
@@ -432,9 +438,7 @@ def bgp_down_evidence_from_json(data: Any) -> BgpDownEvidence:
         return BgpDownEvidence(
             neighbor_ip=_get(data, "neighbor_ip", "BgpDownEvidence"),
             state=_enum(BgpState, _get(data, "state", "BgpDownEvidence"), "state"),
-            previous_state=_enum(
-                BgpState, _get(data, "previous_state", "BgpDownEvidence"), "previous_state"
-            ),
+            previous_state=_optional_bgp_state(_get(data, "previous_state", "BgpDownEvidence")),
         )
     except SerializationError:
         raise

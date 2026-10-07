@@ -28,6 +28,12 @@ class BgpState(StrEnum):
     ESTABLISHED = "Established"
 
 
+# Shared BGP down-family semantics (RuleEngine + OperationalStateDetector):
+# exactly Idle/Active are a failed session; Connect/OpenSent/OpenConfirm are
+# in-progress negotiation, never a failure on their own.
+BGP_DOWN_STATES: frozenset[BgpState] = frozenset({BgpState.IDLE, BgpState.ACTIVE})
+
+
 def _require_non_empty(value: str, field_name: str) -> None:
     if not value.strip():
         raise ValueError(f"{field_name} must not be empty")

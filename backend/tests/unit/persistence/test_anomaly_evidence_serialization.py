@@ -559,3 +559,23 @@ def test_anomaly_evidence_from_json__valid_rule_ref_wrong_shape__raises_serializ
 
     with pytest.raises(SerializationError):
         anomaly_evidence_from_json("RULE-BGP-DOWN", wrong_shape_data)
+
+
+def test_bgp_down_evidence__none_previous_state__round_trips_as_json_null() -> None:
+    evidence = BgpDownEvidence(neighbor_ip="10.255.0.0", state=BgpState.ACTIVE, previous_state=None)
+
+    data = bgp_down_evidence_to_json(evidence)
+
+    assert data["previous_state"] is None
+    assert bgp_down_evidence_from_json(data) == evidence
+
+
+def test_bgp_down_evidence__real_previous_state__round_trips_unchanged() -> None:
+    evidence = BgpDownEvidence(
+        neighbor_ip="10.0.0.1", state=BgpState.IDLE, previous_state=BgpState.ESTABLISHED
+    )
+
+    data = bgp_down_evidence_to_json(evidence)
+
+    assert data["previous_state"] == "Established"
+    assert bgp_down_evidence_from_json(data) == evidence

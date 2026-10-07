@@ -48,12 +48,12 @@ from meta_rne.domain.anomaly import (
     LinkFlapEvidence,
     RuleId,
 )
-from meta_rne.domain.telemetry import BgpState, LinkState, TelemetrySample
+from meta_rne.domain.telemetry import BGP_DOWN_STATES, BgpState, LinkState, TelemetrySample
 
 _CPU_HIGH_THRESHOLD_PCT = 90.0
 _LINK_FLAP_TRANSITION_COUNT = 4
 _LINK_FLAP_WINDOW = timedelta(seconds=60)
-_BGP_DOWN_FAMILY_STATES = frozenset({BgpState.IDLE, BgpState.ACTIVE})
+_BGP_DOWN_FAMILY_STATES = BGP_DOWN_STATES
 _BGP_NON_DOWN_STATES = frozenset(
     {BgpState.ESTABLISHED, BgpState.CONNECT, BgpState.OPEN_SENT, BgpState.OPEN_CONFIRM}
 )

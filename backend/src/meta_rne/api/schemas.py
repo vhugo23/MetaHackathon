@@ -240,14 +240,16 @@ class LinkFlapEvidenceResponse(BaseModel):
 
 class BgpDownEvidenceResponse(BaseModel):
     neighbor_ip: str
-    previous_state: str
+    previous_state: str | None
     state: str
 
     @classmethod
     def from_domain(cls, evidence: BgpDownEvidence) -> "BgpDownEvidenceResponse":
         return cls(
             neighbor_ip=evidence.neighbor_ip,
-            previous_state=evidence.previous_state.value,
+            previous_state=(
+                None if evidence.previous_state is None else evidence.previous_state.value
+            ),
             state=evidence.state.value,
         )
 

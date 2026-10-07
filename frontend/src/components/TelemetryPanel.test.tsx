@@ -475,6 +475,20 @@ test("renders a BGP-down evidence summary with neighbor and state transition", a
   expect(await screen.findByText("Neighbor 10.0.0.2: Established -> Idle.")).toBeInTheDocument();
 });
 
+test("renders a BGP-down evidence summary without a prior state", async () => {
+  fetchRecentTelemetryMock.mockResolvedValue([]);
+  fetchIncidentsMock.mockResolvedValue([
+    bgpDownIncident({
+      evidence: { neighbor_ip: "10.255.0.0", previous_state: null, state: "Active" },
+    }),
+  ]);
+  render(<TelemetryPanel />);
+
+  loadDevice("spine-01");
+
+  expect(await screen.findByText("Neighbor 10.255.0.0: observed Active.")).toBeInTheDocument();
+});
+
 test("renders both OPEN and RESOLVED anomaly incidents", async () => {
   const resolved = cpuIncident({
     incident_id: "cpu-incident-resolved",

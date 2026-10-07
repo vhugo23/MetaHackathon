@@ -42,7 +42,7 @@ export interface LinkFlapEvidenceResponse {
 
 export interface BgpDownEvidenceResponse {
   neighbor_ip: string;
-  previous_state: string;
+  previous_state: string | null;
   state: string;
 }
 
@@ -252,7 +252,7 @@ export function isBgpDownEvidenceResponse(value: unknown): value is BgpDownEvide
   }
   return (
     isNonEmptyString(value.neighbor_ip) &&
-    isNonEmptyString(value.previous_state) &&
+    (value.previous_state === null || isNonEmptyString(value.previous_state)) &&
     isNonEmptyString(value.state)
   );
 }

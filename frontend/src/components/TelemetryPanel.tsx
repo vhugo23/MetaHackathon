@@ -46,7 +46,9 @@ function AnomalyEvidenceSummary({ incident }: { incident: IncidentResponse }) {
   if (incident.rule_ref === "RULE-BGP-DOWN" && isBgpDownEvidenceResponse(evidence)) {
     return (
       <p className="telemetry-anomaly__evidence">
-        {`Neighbor ${evidence.neighbor_ip}: ${evidence.previous_state} -> ${evidence.state}.`}
+        {evidence.previous_state === null
+          ? `Neighbor ${evidence.neighbor_ip}: observed ${evidence.state}.`
+          : `Neighbor ${evidence.neighbor_ip}: ${evidence.previous_state} -> ${evidence.state}.`}
       </p>
     );
   }

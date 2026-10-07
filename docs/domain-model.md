@@ -393,7 +393,7 @@ Anomaly
 
 - `RULE-CPU-HIGH` → `{ samples: [{timestamp, cpu_utilization_pct}] }` (2 consecutive samples > 90%)
 - `RULE-LINK-FLAP` → `{ interface_name, transitions: [{timestamp, oper_state}] }` (> 3 transitions, i.e. ≥ 4, within 60s)
-- `RULE-BGP-DOWN` → `{ neighbor_ip, state, previous_state }` (`previous_state` not in `{Idle, Active}`, `state` in `{Idle, Active}`)
+- `RULE-BGP-DOWN` → `{ neighbor_ip, state, previous_state }` (`state` in `{Idle, Active}`; `previous_state` not in `{Idle, Active}` for the telemetry rule, or `null` when produced by the level-triggered operational-state detector, meaning no prior observation)
 
 Transient, like `ConfigurationViolation` — produced and consumed within
 one rule-evaluation pass, never independently persisted. `detected_at` is

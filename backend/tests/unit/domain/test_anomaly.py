@@ -111,6 +111,12 @@ def test_bgp_down_evidence__valid_fields__preserves_fields() -> None:
     assert evidence.previous_state == BgpState.ESTABLISHED
 
 
+def test_bgp_down_evidence__no_prior_observation__previous_state_none() -> None:
+    evidence = BgpDownEvidence(neighbor_ip="10.0.0.1", state=BgpState.ACTIVE, previous_state=None)
+
+    assert evidence.previous_state is None
+
+
 # --- Evidence-container tuple order preservation ---------------------------
 
 

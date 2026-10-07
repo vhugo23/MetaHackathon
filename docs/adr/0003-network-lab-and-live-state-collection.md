@@ -257,7 +257,36 @@ integration) is not complete.
   vendor or snapshot state fails registration closed.
 - Not done, by design: no operational-state incident ingestion, no detector,
   no incidents generated from live state, no `RuleEngine` or `BgpDownEvidence`
-  change, no auto-resolution. `TelemetrySample` is unchanged.
+  change (as of C3B1; see C3B2 below), no auto-resolution. `TelemetrySample` is unchanged.
+
+## Implementation status: NPE-1C3B2 (pure BGP-down detector)
+
+NPE-1C3B is **not complete**. C3B2 adds detection only:
+
+- Normalized operational state now has a pure BGP-down detector
+  (`OperationalStateDetector.detect`: `FabricOperationalState` ->
+  `tuple[Anomaly, ...]`, RULE-BGP-DOWN only; no repository, database,
+  subprocess, HTTP or clock; `detected_at` is the fabric `collected_at`).
+- It is stateless and level-triggered: every observed `Idle`/`Active` neighbor
+  yields an anomaly on every evaluation. It does not deduplicate; that belongs
+  to the incident repository (C3B3).
+- `Idle`/`Active` are observed failures. `UNKNOWN` (including a normalized
+  `Clearing`), an unavailable or missing BGP facet, `Connect`/`OpenSent`/
+  `OpenConfirm`, `Established` and hosts are never failures.
+- `BgpDownEvidence.previous_state` is now `BgpState | None`. `None` means the
+  neighbor was first observed already degraded; the detector never fabricates a
+  predecessor and never uses `UNKNOWN` for it. The telemetry `RuleEngine` is
+  unchanged (edge-triggered, still records the real prior state). Persistence,
+  the API (`previous_state: string | null`) and the frontend accept `null`;
+  non-null evidence is unchanged. The down-state set is shared as
+  `BGP_DOWN_STATES`.
+- Collector node IDs map through a fixed table (`spine-1` -> `lab1-spine-1`,
+  etc.); an unknown router node fails closed with `ValueError`.
+- One physical link failure yields two device-scoped anomalies (e.g.
+  `lab1-leaf-1`/`10.255.0.0` and `lab1-spine-1`/`10.255.0.1`), whose states may
+  differ mid-convergence. They are not correlated; that is deferred to RCA.
+- Not done: no incident ingestion, no incident writes, no auto-resolution, no
+  recovery event, no public endpoint.
 
 ## Deferred
 
