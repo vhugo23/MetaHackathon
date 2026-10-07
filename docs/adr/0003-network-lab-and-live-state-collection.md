@@ -255,7 +255,7 @@ integration) is not complete.
   against `DATABASE_URL`. There is no HTTP registration endpoint, and no
   arbitrary device ID or vendor input. An existing device with a conflicting
   vendor or snapshot state fails registration closed.
-- Not done, by design: no operational-state incident ingestion, no detector,
+- Not done, by design (as of C3B1): no operational-state incident ingestion, no detector,
   no incidents generated from live state, no `RuleEngine` or `BgpDownEvidence`
   change (as of C3B1; see C3B2 below), no auto-resolution. `TelemetrySample` is unchanged.
 
@@ -288,8 +288,62 @@ NPE-1C3B is **not complete**. C3B2 adds detection only:
 - Not done: no incident ingestion, no incident writes, no auto-resolution, no
   recovery event, no public endpoint.
 
+## Implementation status: NPE-1C3B3 (persist live operational-state BGP incidents)
+
+NPE-1C3B is **not complete** (recovery semantics remain). C3B3 adds the
+application-layer path from collected state to persisted incidents:
+
+- `OperationalStateIngestionService.ingest(FabricOperationalState)` runs the
+  existing pure `OperationalStateDetector`, then maps each anomaly through the
+  existing `AnomalyIncidentMapper`, fingerprints it with the existing
+  `compute_fingerprint` and persists it with the existing atomic
+  `upsert_open_incident`. The detector stays pure and stateless; no
+  deduplication logic was added. It returns a frozen
+  `OperationalStateIngestionResult` (collection id, anomalies, upsert results,
+  created/updated counts).
+- The service never collects state, spawns a process, calls Docker/Containerlab,
+  performs HTTP, reads a clock, registers a device or resolves an incident. The
+  collected state is **not** persisted and **no telemetry is fabricated**:
+  `TelemetrySample` and `TelemetryIngestionService` are unchanged.
+- One `UnitOfWork` per call, one `commit()`, and the existing
+  exception-preserving rollback/close lifecycle: any failure persists nothing.
+- Every device an anomaly references must already be registered (C3B1). A
+  missing device raises the existing `DeviceNotFoundError` before any write;
+  the service never auto-creates devices.
+- Timestamps come from the observation (`collected_at` -> `detected_at` ->
+  `observed_at`). Repeated degraded observations at later timestamps update the
+  same OPEN incident: same fingerprint, `occurrence_count` + 1, `last_seen_at`
+  advanced. The repository still rejects a stale (earlier) observation.
+- A physical link failure yields **two device-scoped incidents** (e.g.
+  `lab1-leaf-1` / `bgp-neighbor:10.255.0.0` and `lab1-spine-1` /
+  `bgp-neighbor:10.255.0.1`), not one. Correlating them into a single physical
+  root cause is deferred to RCA.
+- `previous_state` is persisted as JSON `null` and read back as `None`.
+- **Healthy state does not auto-resolve incidents.** A recovered or baseline
+  fabric yields zero anomalies, therefore zero upserts; existing OPEN incidents
+  stay OPEN and unchanged. Recovery/auto-resolution semantics are a later gate.
+- Structured incident events use the existing `IncidentLogEvent`.
+- No public write endpoint and no migration. `GET /incidents` is the read path
+  and `IncidentResponse` is unchanged. The frontend is unchanged.
+- `scripts/lab_ingest_operational_state.py` is the controlled composition
+  boundary: it takes no arguments, reuses `lab_collect_state`'s fixed
+  allowlisted collector, requires `scripts/lab_register_devices.py` to have run
+  (exit 3 otherwise), and prints one deterministic JSON summary on stdout
+  (incident events go to stderr). It injects no fault.
+
+Live proof (Lab 1 on the native Ubuntu Docker Engine, disposable PostgreSQL):
+healthy fabric (6 nodes running, 4/4 sessions Established, ECMP 2 on both
+leaves, hosts reachable) -> 0 anomalies, 0 incidents; with `leaf-1 eth1` down (3/4
+sessions Established, leaf ECMP 2 -> 1, hosts still reachable) -> 2 anomalies and
+exactly 2 OPEN `ANOMALY`/`RULE-BGP-DOWN` incidents (both ends reported `Active`,
+`previous_state` null); a second degraded ingestion -> 0 created, 2 updated,
+unchanged fingerprints, `occurrence_count` 2, `last_seen_at` advanced; after
+restoring the link (4/4 Established, ECMP 2, hosts reachable) a further
+ingestion -> 0 anomalies, 0 changes, both incidents still OPEN.
+
 ## Deferred
 
+- recovery / auto-resolution of operational-state incidents
 - OSPF
 - IS-IS
 - MPLS
