@@ -34,6 +34,13 @@ class AnomalyIncidentMapper:
     ``IncidentFactory`` contract this mirrors."""
 
     @staticmethod
+    def bgp_down_affected_resource(neighbor_ip: str) -> str:
+        """The one ``affected_resource`` format for RULE-BGP-DOWN incidents,
+        shared with operational-state recovery so both address the same
+        fingerprint."""
+        return f"bgp-neighbor:{neighbor_ip}"
+
+    @staticmethod
     def build_candidate(anomaly: Anomaly) -> IncidentCandidate:
         if anomaly.rule_id is RuleId.CPU_HIGH:
             if not isinstance(anomaly.evidence, CpuHighEvidence):
@@ -62,7 +69,9 @@ class AnomalyIncidentMapper:
                     "AnomalyIncidentMapper: RULE-BGP-DOWN requires BgpDownEvidence, got "
                     f"{type(anomaly.evidence).__name__}"
                 )
-            affected_resource = f"bgp-neighbor:{anomaly.evidence.neighbor_ip}"
+            affected_resource = AnomalyIncidentMapper.bgp_down_affected_resource(
+                anomaly.evidence.neighbor_ip
+            )
             severity = Severity.CRITICAL
             recommendation = (
                 f"Investigate BGP session down on {anomaly.device_id} neighbor "

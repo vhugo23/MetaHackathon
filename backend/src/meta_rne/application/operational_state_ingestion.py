@@ -10,7 +10,8 @@ No deduplication logic lives here: the repository upsert is the mechanism.
 
 This service never collects state, spawns a process, calls Docker or
 Containerlab, performs HTTP, reads a clock, persists the fabric state or any
-``TelemetrySample``, registers a device, or resolves an incident. Timestamps
+``TelemetrySample``, registers a device, or resolves an incident outside the
+recovery rule above. Timestamps
 come from the anomaly (``detected_at`` == ``FabricOperationalState.collected_at``).
 
 Every referenced device must already be registered (``RegisterLabDevicesService``
@@ -21,10 +22,18 @@ One ``UnitOfWork`` per call, one ``commit()`` on success (no per-anomaly
 commits), and ``TelemetryIngestionService``'s exception-preserving
 rollback/close lifecycle on failure.
 
-No recovery semantics: a healthy fabric yields zero anomalies, therefore zero
-upserts. Existing OPEN incidents stay OPEN; auto-resolution is a later gate.
-A single physical link failure yields two device-scoped incidents (one per
-end); correlating them is RCA's job, not this service's.
+Recovery (NPE-1C3C) is positive-evidence only and lives here, not in the
+detector, because it needs persisted incident state and the transaction. A
+neighbor observed ``Established`` on a registered router resolves the OPEN
+RULE-BGP-DOWN incident with the same fingerprint (same device, same neighbor)
+via the existing atomic ``resolve``. Idle/Active/Connect/OpenSent/OpenConfirm/
+UNKNOWN, an unavailable/missing BGP facet and a missing neighbor never
+resolve: absence of failure evidence is not recovery. An Established
+observation older than the incident's ``last_seen_at`` is rejected as a stale
+observation (rolled back), consistent with the upsert's stale rule. The two
+endpoint incidents of one link recover independently. A single physical link
+failure yields two device-scoped incidents (one per end);
+correlating them is RCA's job, not this service's.
 
 Structured incident events are emitted best-effort after commit, with the same
 ``IncidentLogEvent`` shape ``TelemetryIngestionService`` emits.
@@ -33,16 +42,21 @@ Structured incident events are emitted best-effort after commit, with the same
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from meta_rne.application.errors import DeviceNotFoundError
+from meta_rne.application.errors import DeviceNotFoundError, IncidentNotFoundError
 from meta_rne.detection.anomaly_incident_mapper import AnomalyIncidentMapper
-from meta_rne.detection.operational_state_detector import OperationalStateDetector
-from meta_rne.domain.anomaly import Anomaly
+from meta_rne.detection.operational_state_detector import (
+    LAB1_NODE_DEVICE_IDS,
+    OperationalStateDetector,
+)
+from meta_rne.domain.anomaly import Anomaly, RuleId
 from meta_rne.domain.incident import (
+    Incident,
+    IncidentSource,
     IncidentUpsertOutcome,
     IncidentUpsertResult,
     compute_fingerprint,
 )
-from meta_rne.domain.operational_state import FabricOperationalState
+from meta_rne.domain.operational_state import FabricOperationalState, NodeRole
 from meta_rne.domain.ports import UnitOfWork
 from meta_rne.observability import IncidentEventSink, IncidentLogEvent, StdoutIncidentEventSink
 
@@ -54,6 +68,8 @@ class OperationalStateIngestionResult:
     upserts: tuple[IncidentUpsertResult, ...]
     incidents_created: int
     incidents_updated: int
+    resolved_incidents: tuple[Incident, ...] = ()
+    incidents_resolved: int = 0
 
 
 class OperationalStateIngestionService:
@@ -92,6 +108,8 @@ class OperationalStateIngestionService:
                     )
                 )
 
+            resolved = self._recover(uow, fabric, upserts)
+
             uow.commit()
         except Exception as original_error:
             try:
@@ -104,7 +122,7 @@ class OperationalStateIngestionService:
                 original_error.add_note(f"UnitOfWork close also failed: {close_error!r}")
             raise
         else:
-            self._emit_incident_events(upserts)
+            self._emit_incident_events(upserts, resolved)
             uow.close()
             return OperationalStateIngestionResult(
                 collection_id=fabric.collection_id,
@@ -116,13 +134,60 @@ class OperationalStateIngestionService:
                 incidents_updated=sum(
                     1 for upsert in upserts if upsert.outcome is IncidentUpsertOutcome.UPDATED
                 ),
+                resolved_incidents=tuple(resolved),
+                incidents_resolved=len(resolved),
             )
 
-    def _emit_incident_events(self, results: list[IncidentUpsertResult]) -> None:
+    @staticmethod
+    def _recover(
+        uow: UnitOfWork,
+        fabric: FabricOperationalState,
+        upserts: list[IncidentUpsertResult],
+    ) -> list[Incident]:
+        """Resolve the matching OPEN RULE-BGP-DOWN incident for every neighbor
+        observed Established. Never reads anything but the fabric and the
+        OPEN incident found by its exact fingerprint."""
+        # A neighbor failing in this same snapshot can never also recover.
+        failing = {upsert.incident.fingerprint for upsert in upserts}
+        resolved: list[Incident] = []
+        for node in fabric.nodes:
+            if node.role is not NodeRole.ROUTER or node.bgp is None:
+                continue
+            device_id = LAB1_NODE_DEVICE_IDS[node.node_id]
+            for neighbor in node.bgp.neighbors:
+                if not neighbor.is_established:
+                    continue
+                fingerprint = compute_fingerprint(
+                    device_id,
+                    IncidentSource.ANOMALY,
+                    RuleId.BGP_DOWN.value,
+                    AnomalyIncidentMapper.bgp_down_affected_resource(neighbor.neighbor_ip),
+                )
+                if fingerprint in failing:
+                    continue
+                open_incident = uow.incidents.get_open_by_fingerprint(fingerprint)
+                if open_incident is None:
+                    continue
+                if fabric.collected_at < open_incident.last_seen_at:
+                    raise ValueError(
+                        "stale observation: collected_at precedes the existing OPEN "
+                        "incident's last_seen_at"
+                    )
+                result = uow.incidents.resolve(open_incident.incident_id, fabric.collected_at)
+                if result is None:
+                    raise IncidentNotFoundError(open_incident.incident_id)
+                resolved.append(result)
+        return resolved
+
+    def _emit_incident_events(
+        self, results: list[IncidentUpsertResult], resolved: list[Incident]
+    ) -> None:
         """Best-effort and post-commit only: one failing emission never stops
         later ones, is never retried, and never propagates."""
-        for result in results:
+        events = [IncidentLogEvent.from_upsert_result(result) for result in results]
+        events.extend(IncidentLogEvent.from_resolved(incident) for incident in resolved)
+        for event in events:
             try:
-                self._incident_event_sink.emit(IncidentLogEvent.from_upsert_result(result))
+                self._incident_event_sink.emit(event)
             except Exception:
                 pass

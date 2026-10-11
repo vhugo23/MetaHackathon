@@ -48,6 +48,10 @@ class InMemoryIncidentRepository:
     def get_by_id(self, incident_id: str) -> Incident | None:
         return self._store.incidents.get(incident_id)
 
+    def get_open_by_fingerprint(self, fingerprint: str) -> Incident | None:
+        with self._store.incidents_lock:
+            return _find_open_by_fingerprint(self._store, fingerprint)
+
     def list_all(self) -> tuple[Incident, ...]:
         return tuple(
             sorted(self._store.incidents.values(), key=lambda i: (i.created_at, i.incident_id))

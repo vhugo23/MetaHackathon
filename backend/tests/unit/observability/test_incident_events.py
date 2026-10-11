@@ -2,6 +2,8 @@ import io
 import json
 from datetime import UTC, datetime
 
+import pytest
+
 from meta_rne.domain.config import AclDirection
 from meta_rne.domain.incident import (
     Incident,
@@ -239,3 +241,25 @@ def test_incident_event_sink_protocol__recording_double__records_emitted_events(
     sink.emit(updated_event)
 
     assert sink.calls == [created_event, updated_event]
+
+
+def test_from_resolved__resolved_incident__uses_resolved_at_and_resolved_outcome() -> None:
+    resolved_at = datetime(2026, 7, 18, 11, 0, 0, tzinfo=UTC)
+    incident = _incident(
+        status=IncidentStatus.RESOLVED, resolved_at=resolved_at, updated_at=resolved_at
+    )
+
+    event = IncidentLogEvent.from_resolved(incident)
+
+    assert event.status == IncidentStatus.RESOLVED
+    assert event.outcome.value == "RESOLVED"
+    assert event.timestamp == resolved_at
+    payload = json.loads(event.to_json())
+    assert tuple(payload) == _REQUIRED_KEYS
+    assert payload["outcome"] == "RESOLVED"
+    assert payload["timestamp"] == "2026-07-18T11:00:00Z"
+
+
+def test_from_resolved__open_incident__raises() -> None:
+    with pytest.raises(ValueError, match="RESOLVED"):
+        IncidentLogEvent.from_resolved(_incident())

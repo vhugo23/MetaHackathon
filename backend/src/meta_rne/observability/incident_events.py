@@ -19,7 +19,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, TextIO
 
-from meta_rne.domain.incident import IncidentStatus, IncidentUpsertOutcome, IncidentUpsertResult
+from meta_rne.domain.incident import (
+    Incident,
+    IncidentResolutionOutcome,
+    IncidentStatus,
+    IncidentUpsertOutcome,
+    IncidentUpsertResult,
+)
 from meta_rne.domain.policy import Severity
 
 
@@ -38,7 +44,7 @@ class IncidentLogEvent:
     rule_ref: str
     severity: Severity
     status: IncidentStatus
-    outcome: IncidentUpsertOutcome
+    outcome: IncidentUpsertOutcome | IncidentResolutionOutcome
     timestamp: datetime
 
     @classmethod
@@ -52,6 +58,22 @@ class IncidentLogEvent:
             status=incident.status,
             outcome=result.outcome,
             timestamp=incident.last_seen_at,
+        )
+
+    @classmethod
+    def from_resolved(cls, incident: Incident) -> "IncidentLogEvent":
+        """Operational-state recovery event (NPE-1C3C); `timestamp` is the
+        incident's `resolved_at`."""
+        if incident.status is not IncidentStatus.RESOLVED or incident.resolved_at is None:
+            raise ValueError("IncidentLogEvent.from_resolved requires a RESOLVED incident")
+        return cls(
+            incident_id=incident.incident_id,
+            device_id=incident.device_id,
+            rule_ref=incident.rule_ref,
+            severity=incident.severity,
+            status=incident.status,
+            outcome=IncidentResolutionOutcome.RESOLVED,
+            timestamp=incident.resolved_at,
         )
 
     def to_json(self) -> str:

@@ -34,6 +34,7 @@ from meta_rne.domain.errors import ParseError, ParseErrorCode, UnsupportedVendor
 from meta_rne.domain.incident import (
     Incident,
     IncidentCandidate,
+    IncidentResolutionOutcome,
     IncidentSource,
     IncidentStatus,
     IncidentUpsertOutcome,
@@ -80,6 +81,7 @@ __all__ = [
     "IncidentCandidate",
     "IncidentSource",
     "IncidentStatus",
+    "IncidentResolutionOutcome",
     "IncidentUpsertOutcome",
     "IncidentUpsertResult",
     "InterfaceState",

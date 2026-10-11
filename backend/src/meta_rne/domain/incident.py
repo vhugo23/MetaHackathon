@@ -193,6 +193,12 @@ class IncidentUpsertOutcome(StrEnum):
     UPDATED = "UPDATED"
 
 
+class IncidentResolutionOutcome(StrEnum):
+    """Event outcome for an OPEN -> RESOLVED transition (NPE-1C3C)."""
+
+    RESOLVED = "RESOLVED"
+
+
 @dataclass(frozen=True, slots=True)
 class IncidentUpsertResult:
     incident: Incident

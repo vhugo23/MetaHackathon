@@ -842,3 +842,46 @@ def test_incident_repository__mismatched_source_and_evidence_candidate__is_rejec
         incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
 
     assert incidents.list_all() == ()
+
+
+def test_incident_repository_get_open_by_fingerprint__unknown__returns_none(
+    repositories: SimpleNamespace,
+) -> None:
+    assert repositories.incidents.get_open_by_fingerprint("0" * 64) is None
+
+
+def test_incident_repository_get_open_by_fingerprint__open__returns_incident(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID]))
+    candidate = _candidate()
+    created = incidents.upsert_open_incident(candidate, _fingerprint(candidate), T0)
+
+    found = incidents.get_open_by_fingerprint(_fingerprint(candidate))
+
+    assert found == created.incident
+
+
+def test_incident_repository_get_open_by_fingerprint__resolved__returns_none_then_new_open(
+    repositories: SimpleNamespace,
+) -> None:
+    _seed_device(repositories)
+    incidents = repositories.make_incidents(_sequential_id_factory([FIRST_ID, SECOND_ID]))
+    candidate = _candidate()
+    fingerprint = _fingerprint(candidate)
+    first = incidents.upsert_open_incident(candidate, fingerprint, T0)
+    incidents.resolve(first.incident.incident_id, T1)
+
+    assert incidents.get_open_by_fingerprint(fingerprint) is None
+
+    later = T1 + (T1 - T0)
+    second = incidents.upsert_open_incident(_candidate(observed_at=later), fingerprint, later)
+    assert second.outcome == IncidentUpsertOutcome.CREATED
+    assert second.incident.incident_id == SECOND_ID
+    found = incidents.get_open_by_fingerprint(fingerprint)
+    assert found is not None
+    assert found.incident_id == SECOND_ID
+    old = incidents.get_by_id(FIRST_ID)
+    assert old is not None
+    assert old.status == IncidentStatus.RESOLVED

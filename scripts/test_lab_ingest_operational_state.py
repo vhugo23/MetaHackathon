@@ -82,6 +82,8 @@ class Main(unittest.TestCase):
         self.assertEqual(document["anomaly_count"], 0)
         self.assertEqual(document["incidents_created"], 0)
         self.assertEqual(document["incidents_updated"], 0)
+        self.assertEqual(document["incidents_resolved"], 0)
+        self.assertEqual(document["resolved_incidents"], [])
         self.assertTrue(document["complete"])
         self.assertEqual(store.incidents, {})
 
@@ -122,18 +124,47 @@ class Main(unittest.TestCase):
         )
         self.assertEqual(len(store.incidents), 2)
 
-    def test_recovered_ingestion_after_degraded_does_not_resolve(self) -> None:
+    def test_recovered_ingestion_after_degraded_resolves_both(self) -> None:
         store = _registered_store()
         _run(store, fixture_runner("degraded-active"))
-        code, out, _ = _run(
+        code, out, err = _run(
             store, fixture_runner("baseline"), now=NOW + timedelta(seconds=30)
         )
 
         document = json.loads(out)
         self.assertEqual(code, lios.EXIT_INGESTED)
         self.assertEqual(document["anomaly_count"], 0)
+        self.assertEqual(document["incidents_created"], 0)
+        self.assertEqual(document["incidents_updated"], 0)
+        self.assertEqual(document["incidents_resolved"], 2)
+        self.assertEqual(
+            sorted(
+                (i["device_id"], i["affected_resource"])
+                for i in document["resolved_incidents"]
+            ),
+            [
+                ("lab1-leaf-1", "bgp-neighbor:10.255.0.0"),
+                ("lab1-spine-1", "bgp-neighbor:10.255.0.1"),
+            ],
+        )
         self.assertEqual(len(store.incidents), 2)
-        self.assertTrue(all(i.status.value == "OPEN" for i in store.incidents.values()))
+        self.assertTrue(
+            all(i.status.value == "RESOLVED" for i in store.incidents.values())
+        )
+        self.assertEqual(len(err.strip().splitlines()), 2)
+
+    def test_repeat_healthy_ingestion_resolves_nothing_more(self) -> None:
+        store = _registered_store()
+        _run(store, fixture_runner("degraded-active"))
+        _run(store, fixture_runner("baseline"), now=NOW + timedelta(seconds=30))
+        code, out, err = _run(
+            store, fixture_runner("baseline"), now=NOW + timedelta(seconds=60)
+        )
+
+        document = json.loads(out)
+        self.assertEqual(code, lios.EXIT_INGESTED)
+        self.assertEqual(document["incidents_resolved"], 0)
+        self.assertEqual(err.strip(), "")
 
     def test_output_is_deterministic(self) -> None:
         first = _run(_registered_store(), fixture_runner("degraded-active"))[1]
@@ -269,11 +300,12 @@ class CompositionIsFixedAndControlled(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, imported)
 
-    def test_cli_uses_no_resolution_or_device_creation_apis(self) -> None:
+    def test_cli_uses_no_direct_resolution_or_device_creation_apis(self) -> None:
         source = Path(lios.__file__).read_text(encoding="utf-8")
         for forbidden in (
             "ResolveIncidentService",
             "incidents.resolve",
+            "get_open_by_fingerprint",
             "RegisterLabDevicesService",
             "devices.save",
         ):

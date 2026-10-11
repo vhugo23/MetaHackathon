@@ -12,12 +12,15 @@ It composes two existing, unchanged pieces and nothing else:
   1. ``lab_collect_state``'s fixed, allowlisted read-only collector
      (``ContainerlabFrrCollector`` + its one subprocess runner), then
   2. ``OperationalStateIngestionService``: detector -> incident mapper ->
-     fingerprint -> atomic upsert, one transaction, one commit.
+     fingerprint -> atomic upsert, plus positive-evidence recovery (an
+     Established neighbor resolves its own OPEN RULE-BGP-DOWN incident), one
+     transaction, one commit.
 
 There is no option that accepts a container, node, command, interface,
 neighbor address, vendor or device ID. It injects no fault, performs no HTTP,
-and never persists the collected state or any telemetry. A healthy fabric
-creates no incidents and resolves none: recovery semantics are a later gate.
+and never persists the collected state or any telemetry. Only a neighbor
+observed Established resolves an OPEN incident (same device, same neighbor);
+unknown, unavailable, missing or transitional state never does.
 
 stdout is one deterministic JSON summary; structured incident events go to
 stderr so they never mix with it.
@@ -104,6 +107,21 @@ def result_to_document(
         }
         for upsert in result.upserts
     ]
+    resolved = [
+        {
+            "incident_id": incident.incident_id,
+            "device_id": incident.device_id,
+            "affected_resource": incident.affected_resource,
+            "fingerprint": incident.fingerprint,
+            "occurrence_count": incident.occurrence_count,
+            "status": incident.status.value,
+            "last_seen_at": _isoformat(incident.last_seen_at),
+            "resolved_at": (
+                None if incident.resolved_at is None else _isoformat(incident.resolved_at)
+            ),
+        }
+        for incident in result.resolved_incidents
+    ]
     return {
         "schema_version": SCHEMA_VERSION,
         "collection_id": result.collection_id,
@@ -114,6 +132,8 @@ def result_to_document(
         "incidents_created": result.incidents_created,
         "incidents_updated": result.incidents_updated,
         "incidents": incidents,
+        "incidents_resolved": result.incidents_resolved,
+        "resolved_incidents": resolved,
     }
 
 

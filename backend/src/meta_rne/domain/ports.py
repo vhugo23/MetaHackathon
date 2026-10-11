@@ -68,9 +68,10 @@ class ConfigurationPolicyRepository(Protocol):
 class IncidentRepository(Protocol):
     """``upsert_open_incident`` is the only write path — atomic create-or-
     update, never a find-then-save sequence (domain-model.md Section 11).
-    No ``find_open_by_fingerprint``: dropped from this port's public surface
-    per Day 4B1's binding decision — the atomic upsert itself is the
-    deduplication mechanism."""
+    The atomic upsert itself remains the deduplication mechanism;
+    ``get_open_by_fingerprint`` (NPE-1C3C) is a read-only lookup that lets
+    operational-state recovery find the one OPEN incident to resolve without
+    scanning unrelated incidents."""
 
     def upsert_open_incident(
         self,
@@ -81,6 +82,12 @@ class IncidentRepository(Protocol):
 
     def get_by_id(self, incident_id: str) -> Incident | None: ...
     def list_all(self) -> tuple[Incident, ...]: ...
+
+    def get_open_by_fingerprint(self, fingerprint: str) -> Incident | None:
+        """The single OPEN incident with this fingerprint, else ``None``.
+        RESOLVED history is never returned (the partial unique index
+        guarantees at most one OPEN row per fingerprint)."""
+        ...
 
     def resolve(self, incident_id: str, resolved_at: datetime) -> Incident | None:
         """Narrow, atomic OPEN -> RESOLVED transition (Day 7A) — not a

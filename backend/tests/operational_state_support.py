@@ -2,6 +2,7 @@
 ``FabricOperationalState`` from the captured Lab 1 BGP fixtures at a chosen
 ``collected_at``. Test-only; never imported by production code."""
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from meta_rne.adapters.containerlab_frr.parsers import parse_bgp_summary
 from meta_rne.domain.config import VendorType
 from meta_rne.domain.device import Device
 from meta_rne.domain.operational_state import (
+    BgpSessionState,
     CollectionSource,
     FabricOperationalState,
     NodeRole,
@@ -95,3 +97,37 @@ def frr_device(device_id: str, at: datetime) -> Device:
         created_at=at,
         updated_at=at,
     )
+
+
+def with_neighbor_states(
+    fabric: FabricOperationalState,
+    overrides: dict[tuple[str, str], BgpSessionState | None],
+) -> FabricOperationalState:
+    """Return ``fabric`` with chosen ``(node_id, neighbor_ip)`` BGP states
+    replaced; a ``None`` value removes that neighbor (a missing neighbor)."""
+    nodes = []
+    for node in fabric.nodes:
+        if node.bgp is None:
+            nodes.append(node)
+            continue
+        neighbors = []
+        for neighbor in node.bgp.neighbors:
+            key = (node.node_id, neighbor.neighbor_ip)
+            if key not in overrides:
+                neighbors.append(neighbor)
+                continue
+            state = overrides[key]
+            if state is None:
+                continue
+            established = state is BgpSessionState.ESTABLISHED
+            neighbors.append(
+                replace(
+                    neighbor,
+                    state=state,
+                    raw_state=state.value,
+                    prefixes_received=neighbor.prefixes_received or 0 if established else None,
+                    uptime_ms=neighbor.uptime_ms or 0 if established else None,
+                )
+            )
+        nodes.append(replace(node, bgp=replace(node.bgp, neighbors=tuple(neighbors))))
+    return replace(fabric, nodes=tuple(nodes))

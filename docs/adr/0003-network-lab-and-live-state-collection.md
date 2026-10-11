@@ -290,7 +290,7 @@ NPE-1C3B is **not complete**. C3B2 adds detection only:
 
 ## Implementation status: NPE-1C3B3 (persist live operational-state BGP incidents)
 
-NPE-1C3B is **not complete** (recovery semantics remain). C3B3 adds the
+C3B3 adds the
 application-layer path from collected state to persisted incidents:
 
 - `OperationalStateIngestionService.ingest(FabricOperationalState)` runs the
@@ -319,9 +319,9 @@ application-layer path from collected state to persisted incidents:
   `bgp-neighbor:10.255.0.1`), not one. Correlating them into a single physical
   root cause is deferred to RCA.
 - `previous_state` is persisted as JSON `null` and read back as `None`.
-- **Healthy state does not auto-resolve incidents.** A recovered or baseline
-  fabric yields zero anomalies, therefore zero upserts; existing OPEN incidents
-  stay OPEN and unchanged. Recovery/auto-resolution semantics are a later gate.
+- **C3B3 itself does not resolve incidents.** A recovered or baseline fabric
+  yields zero anomalies, therefore zero upserts. (Positive-evidence recovery
+  was added afterwards by NPE-1C3C, below.)
 - Structured incident events use the existing `IncidentLogEvent`.
 - No public write endpoint and no migration. `GET /incidents` is the read path
   and `IncidentResponse` is unchanged. The frontend is unchanged.
@@ -341,9 +341,77 @@ unchanged fingerprints, `occurrence_count` 2, `last_seen_at` advanced; after
 restoring the link (4/4 Established, ECMP 2, hosts reachable) a further
 ingestion -> 0 anomalies, 0 changes, both incidents still OPEN.
 
+## Implementation status: NPE-1C3C (trustworthy BGP incident recovery)
+
+C3C adds **positive-evidence recovery** to the C3B3 ingestion path, and nothing
+else:
+
+- A neighbor observed `Established` on a registered router resolves the OPEN
+  `ANOMALY`/`RULE-BGP-DOWN` incident whose fingerprint matches **the same
+  device and the same neighbor** (`device_id`, `ANOMALY`, `RULE-BGP-DOWN`,
+  `bgp-neighbor:<neighbor-ip>`). The fingerprint scheme is unchanged and no
+  recovery fingerprint exists. If no OPEN incident matches, nothing happens:
+  no error, nothing is fabricated.
+- **Only `Established` resolves.** `Idle`, `Active`, `Connect`, `OpenSent`,
+  `OpenConfirm`, `UNKNOWN` (including a normalized `Clearing`), an unavailable
+  or missing BGP facet, a missing neighbor, a missing node and a collector
+  error never resolve anything. Absence of failure evidence is not recovery.
+  Failure (`Idle`/`Active`) and recovery (`Established`) are disjoint per
+  neighbor within a snapshot; transitional/unknown/unavailable states trigger
+  neither.
+- The two endpoint incidents of one link recover **independently**, each from
+  its own local `Established` observation. If only one side is `Established`
+  the other incident stays OPEN. Nothing is correlated across devices.
+- `OperationalStateDetector` is unchanged and remains failure-detection only.
+  Recovery lives in `OperationalStateIngestionService` because it needs
+  persisted incident state and the transaction. The service finds the incident
+  with the new narrow, read-only `IncidentRepository.get_open_by_fingerprint`
+  (an indexed lookup on the OPEN partial unique index; no scan of unrelated
+  incidents) and resolves it with the existing atomic
+  `IncidentRepository.resolve`, i.e. the same `Incident.resolve` semantics the
+  manual endpoint uses. `POST /incidents/{id}/resolve` and
+  `ResolveIncidentService` are unchanged.
+- Recovery runs **inside the same `UnitOfWork` and the same single commit** as
+  the failure upserts of that ingestion; any failure rolls everything back and
+  the original exception propagates. Structured events (created/updated and a
+  new `RESOLVED` outcome, timestamped with `resolved_at`) are emitted only
+  after commit.
+- Timestamps: `resolved_at == updated_at ==` the healthy fabric's
+  `collected_at`; `last_seen_at`, `created_at` and `occurrence_count` keep the
+  values accumulated before recovery. An `Established` observation older than
+  the incident's `last_seen_at` is rejected as a stale observation (the
+  existing C3B3 rule), rolling back the whole ingestion and leaving the incident
+  OPEN. History is never moved backward.
+- Repeating a healthy ingestion is idempotent: a RESOLVED incident is no longer
+  OPEN, so it is not found and not mutated, and no event is emitted.
+- **Re-failure.** The unique constraint covers only OPEN fingerprints, so a
+  later failure of the same neighbor creates a **new** OPEN incident (new
+  `incident_id`, `occurrence_count` 1) with the same fingerprint value. The
+  earlier RESOLVED incident is left untouched as history and is never
+  resurrected.
+- `OperationalStateIngestionResult` gains `resolved_incidents` and
+  `incidents_resolved` (defaults keep existing fields compatible), and the CLI
+  summary gains `incidents_resolved` and `resolved_incidents`. `GET /incidents`
+  shows the recovery as `status: RESOLVED` with `resolved_at`; there is no new
+  endpoint, no migration and no frontend change.
+- Not done: no RCA, no cross-endpoint correlation, no remediation, no AI, no
+  frontend redesign. `Established` means the local BGP session is up at the
+  collection instant; this gate makes no claim about routing convergence
+  timing, ECMP or reachability.
+
+Live proof (Lab 1, disposable PostgreSQL): with `leaf-1 eth1` down, two
+degraded ingestions created then updated exactly 2 OPEN incidents; after the
+link was restored (4/4 Established) one ingestion resolved both (0 anomalies, 0
+created, 0 updated, 2 resolved) and `GET /incidents` showed both `RESOLVED`
+with `resolved_at` set; a repeat healthy ingestion resolved 0; a second failure
+created 2 new OPEN incidents with the same fingerprints and left the resolved
+history intact. FRR cycles a down session through `Idle`/`Active`, so separate
+observations of the failed link differed (a read-only poll saw `Idle`; the
+ingestion collections saw `Active`); persisted evidence always matches the
+state of the collection that produced it.
+
 ## Deferred
 
-- recovery / auto-resolution of operational-state incidents
 - OSPF
 - IS-IS
 - MPLS

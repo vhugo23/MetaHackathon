@@ -10,8 +10,8 @@ branch is itself conditional (``WHERE excluded.last_seen_at >=
 incidents.last_seen_at``) so a stale observation never mutates the stored
 row; when that condition suppresses the update, ``RETURNING`` yields no row,
 and the stale-vs-unexpected distinction (domain-model.md Section 11) is
-resolved by one internal, non-public follow-up SELECT — never exposed as a
-``find_open_by_fingerprint`` port method.
+resolved by one follow-up SELECT, ``get_open_by_fingerprint`` (also a
+read-only port method since NPE-1C3C).
 
 ``xmax = 0`` (Postgres's standard "freshly inserted, not touched by ON
 CONFLICT" tell) is used only inside this module to map the RETURNING row to
@@ -218,14 +218,17 @@ class SqlAlchemyIncidentRepository:
         )
         return tuple(_to_domain(model) for model in self._session.scalars(stmt).all())
 
-    def _get_open_by_fingerprint(self, fingerprint: str) -> Incident | None:
-        # Internal only — never exposed on the public IncidentRepository
-        # port (Day 4B1 binding decision). Used solely to distinguish a
-        # stale observation from a genuinely unexpected no-row result after
-        # the conditional ON CONFLICT DO UPDATE below suppresses its update.
-        stmt = select(_IncidentModel).where(
-            _IncidentModel.fingerprint == fingerprint,
-            _IncidentModel.status == IncidentStatus.OPEN.value,
+    def get_open_by_fingerprint(self, fingerprint: str) -> Incident | None:
+        # Also used internally to distinguish a stale observation from a
+        # genuinely unexpected no-row result after the conditional ON
+        # CONFLICT DO UPDATE below suppresses its update.
+        stmt = (
+            select(_IncidentModel)
+            .where(
+                _IncidentModel.fingerprint == fingerprint,
+                _IncidentModel.status == IncidentStatus.OPEN.value,
+            )
+            .execution_options(populate_existing=True)
         )
         model = self._session.execute(stmt).scalar_one_or_none()
         return None if model is None else _to_domain(model)
@@ -303,7 +306,7 @@ class SqlAlchemyIncidentRepository:
         # genuine stale observation, or something unexpected happened
         # between the statement and this check. Only one internal SELECT,
         # never the primary write mechanism (item 2's "no read-before-write").
-        existing = self._get_open_by_fingerprint(fingerprint)
+        existing = self.get_open_by_fingerprint(fingerprint)
         if existing is not None and observed_at < existing.last_seen_at:
             raise ValueError(
                 "stale observation: observed_at precedes the existing OPEN incident's "
