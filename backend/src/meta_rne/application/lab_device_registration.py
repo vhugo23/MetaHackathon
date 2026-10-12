@@ -26,13 +26,9 @@ from meta_rne.application.errors import LabDeviceConflictError
 from meta_rne.domain.config import VendorType
 from meta_rne.domain.device import Device
 from meta_rne.domain.ports import UnitOfWork
+from meta_rne.lab1_identity import LAB1_NODE_DEVICE_IDS
 
-LAB1_ROUTER_DEVICE_IDS: tuple[str, ...] = (
-    "lab1-spine-1",
-    "lab1-spine-2",
-    "lab1-leaf-1",
-    "lab1-leaf-2",
-)
+LAB1_ROUTER_DEVICE_IDS: tuple[str, ...] = tuple(LAB1_NODE_DEVICE_IDS.values())
 LAB1_ROUTER_VENDOR = VendorType.FRR
 
 

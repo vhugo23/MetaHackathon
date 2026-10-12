@@ -39,10 +39,12 @@ from meta_rne.application.device_drift import GetDeviceDriftService
 from meta_rne.application.device_queries import GetDeviceDetailService, ListDevicesService
 from meta_rne.application.incident_queries import ListIncidentsService
 from meta_rne.application.incident_resolution import ResolveIncidentService
+from meta_rne.application.network_state_query import GetNetworkStateService
 from meta_rne.application.snapshot_id import default_snapshot_id_factory
 from meta_rne.application.telemetry_ingestion import TelemetryIngestionService
 from meta_rne.application.telemetry_query import GetRecentTelemetryService
 from meta_rne.domain.ports import UnitOfWork
+from meta_rne.lab1_identity import LAB1_LAB_NAME
 
 
 def create_app(
@@ -78,6 +80,11 @@ def create_app(
     get_device_drift_service = GetDeviceDriftService(unit_of_work_factory=uow_factory)
     telemetry_ingestion_service = TelemetryIngestionService(unit_of_work_factory=uow_factory)
     telemetry_query_service = GetRecentTelemetryService(unit_of_work_factory=uow_factory)
+    network_state_service = GetNetworkStateService(
+        unit_of_work_factory=uow_factory,
+        lab_name=LAB1_LAB_NAME,
+        clock=CallableClock(clock).now,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -112,6 +119,7 @@ def create_app(
             get_device_drift_service=get_device_drift_service,
             telemetry_ingestion_service=telemetry_ingestion_service,
             telemetry_query_service=telemetry_query_service,
+            network_state_service=network_state_service,
             clock=clock,
         )
     )

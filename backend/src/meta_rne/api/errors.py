@@ -21,8 +21,10 @@ from meta_rne.application.errors import (
     DeviceNotFoundError,
     DriftNotApplicableError,
     IncidentNotFoundError,
+    OperationalStateNotFoundError,
 )
 from meta_rne.domain.errors import UnsupportedVendorError
+from meta_rne.domain.operational_state import FabricSourceError
 from meta_rne.persistence.errors import (
     DeviceConflictError,
     PersistenceError,
@@ -69,6 +71,26 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(DeviceNotFoundError)
     async def _device_not_found(request: Request, exc: DeviceNotFoundError) -> JSONResponse:
         return _error_response(status.HTTP_404_NOT_FOUND, "device_not_found", str(exc))
+
+    @app.exception_handler(OperationalStateNotFoundError)
+    async def _operational_state_not_found(
+        request: Request, exc: OperationalStateNotFoundError
+    ) -> JSONResponse:
+        return _error_response(
+            status.HTTP_404_NOT_FOUND,
+            "operational_state_not_found",
+            f"No operational state is available for lab '{exc.lab_name}'.",
+        )
+
+    @app.exception_handler(FabricSourceError)
+    async def _fabric_source_error(request: Request, exc: FabricSourceError) -> JSONResponse:
+        # Stored state without one truthful source is corrupt data, not caller input
+        # (FabricSourceError is a ValueError; this must win over the 422 mapping).
+        return _error_response(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "serialization_error",
+            _GENERIC_SERIALIZATION_DETAIL,
+        )
 
     @app.exception_handler(DriftNotApplicableError)
     async def _drift_not_applicable(request: Request, exc: DriftNotApplicableError) -> JSONResponse:

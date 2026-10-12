@@ -36,13 +36,7 @@ from meta_rne.domain.operational_state import (
     NodeRole,
 )
 from meta_rne.domain.telemetry import BGP_DOWN_STATES, BgpState
-
-LAB1_NODE_DEVICE_IDS: dict[str, str] = {
-    "spine-1": "lab1-spine-1",
-    "spine-2": "lab1-spine-2",
-    "leaf-1": "lab1-leaf-1",
-    "leaf-2": "lab1-leaf-2",
-}
+from meta_rne.lab1_identity import LAB1_NODE_DEVICE_IDS
 
 
 def _observed_down_state(state: BgpSessionState) -> BgpState | None:

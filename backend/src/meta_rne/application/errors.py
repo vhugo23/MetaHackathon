@@ -76,3 +76,13 @@ class LabDeviceConflictError(Exception):
         super().__init__(f"lab device {device_id!r} conflicts with the Lab 1 identity: {reason}")
         self.device_id = device_id
         self.reason = reason
+
+
+class OperationalStateNotFoundError(Exception):
+    """Raised by ``GetNetworkStateService`` (NPE-1D1B) when no operational
+    state has been ingested for the lab. Preserves ``lab_name`` as structured
+    data; the HTTP mapping belongs to the API layer alone."""
+
+    def __init__(self, lab_name: str) -> None:
+        super().__init__(f"no operational state for lab {lab_name!r}")
+        self.lab_name = lab_name

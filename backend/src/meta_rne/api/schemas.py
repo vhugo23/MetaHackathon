@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from meta_rne.application.device_queries import DeviceDetailResult
 from meta_rne.application.models import ConfigIngestionResult, TelemetryIngestionResult
+from meta_rne.application.network_state_query import NetworkStateResult
 from meta_rne.domain.anomaly import (
     Anomaly,
     BgpDownEvidence,
@@ -37,7 +38,21 @@ from meta_rne.domain.config import (
 from meta_rne.domain.device import Device
 from meta_rne.domain.drift import DriftEntry, DriftReport
 from meta_rne.domain.incident import Incident, PolicyViolationIncidentEvidence
+from meta_rne.domain.operational_state import (
+    BgpNeighborObservation,
+    BgpObservation,
+    InterfaceObservation,
+    NextHop,
+    NodeRole,
+    NormalizedOperationalState,
+    ObservationFacet,
+    ReachabilityObservation,
+    RouteObservation,
+    UnavailableObservation,
+)
 from meta_rne.domain.telemetry import BgpState, LinkState, TelemetrySample
+from meta_rne.lab1_identity import LAB1_NODE_DEVICE_IDS
+from meta_rne.persistence.serialization import SerializationError
 
 
 class SubmitConfigurationRequest(BaseModel):
@@ -496,6 +511,194 @@ class DeviceDetailResponse(BaseModel):
                 if result.normalized_config is None
                 else NormalizedConfigurationResponse.from_domain(result.normalized_config)
             ),
+        )
+
+
+# --- GET /network/state (NPE-1D1B) -----------------------------------------
+#
+# Facet applicability mapping (collector/domain invariants):
+#   interfaces   router/host: array when observed (possibly empty), null when the
+#                facet is unavailable.
+#   bgp          router: object when observed, null when unavailable.
+#                host: null (not applicable).
+#   routes       router: array when observed (possibly empty), null when unavailable.
+#                host: null (not a collected host facet).
+#   reachability host: array when observed, null when unavailable.
+#                router: null (not applicable).
+# ``unavailable`` lists every facet that could not be collected, with its reason.
+
+
+class NetworkStateSourceResponse(BaseModel):
+    collector: str
+    lab_name: str
+
+
+class NetworkInterfaceResponse(BaseModel):
+    name: str
+    oper_state: str
+    addresses: list[str]
+
+    @classmethod
+    def from_domain(cls, interface: InterfaceObservation) -> "NetworkInterfaceResponse":
+        return cls(
+            name=interface.name,
+            oper_state=interface.oper_state.value,
+            addresses=list(interface.addresses),
+        )
+
+
+class NetworkBgpNeighborResponse(BaseModel):
+    neighbor_ip: str
+    remote_as: int | None
+    state: str
+    raw_state: str | None
+    prefixes_received: int | None
+    uptime_ms: int | None
+
+    @classmethod
+    def from_domain(cls, neighbor: BgpNeighborObservation) -> "NetworkBgpNeighborResponse":
+        return cls(
+            neighbor_ip=neighbor.neighbor_ip,
+            remote_as=neighbor.remote_as,
+            state=neighbor.state.value,
+            raw_state=neighbor.raw_state,
+            prefixes_received=neighbor.prefixes_received,
+            uptime_ms=neighbor.uptime_ms,
+        )
+
+
+class NetworkBgpResponse(BaseModel):
+    local_as: int
+    router_id: str
+    established_count: int
+    neighbors: list[NetworkBgpNeighborResponse]
+
+    @classmethod
+    def from_domain(cls, bgp: BgpObservation) -> "NetworkBgpResponse":
+        return cls(
+            local_as=bgp.local_as,
+            router_id=bgp.router_id,
+            established_count=bgp.established_count,
+            neighbors=[NetworkBgpNeighborResponse.from_domain(n) for n in bgp.neighbors],
+        )
+
+
+class NetworkNextHopResponse(BaseModel):
+    ip: str | None
+    interface: str | None
+
+    @classmethod
+    def from_domain(cls, next_hop: NextHop) -> "NetworkNextHopResponse":
+        return cls(ip=next_hop.ip, interface=next_hop.interface)
+
+
+class NetworkRouteResponse(BaseModel):
+    prefix: str
+    protocol: str
+    ecmp_path_count: int
+    next_hops: list[NetworkNextHopResponse]
+
+    @classmethod
+    def from_domain(cls, route: RouteObservation) -> "NetworkRouteResponse":
+        return cls(
+            prefix=route.prefix,
+            protocol=route.protocol,
+            ecmp_path_count=route.ecmp_path_count,
+            next_hops=[NetworkNextHopResponse.from_domain(h) for h in route.next_hops],
+        )
+
+
+class NetworkReachabilityResponse(BaseModel):
+    from_node: str
+    target: str
+    sent: int
+    received: int
+    succeeded: bool
+
+    @classmethod
+    def from_domain(cls, probe: ReachabilityObservation) -> "NetworkReachabilityResponse":
+        return cls(
+            from_node=probe.from_node,
+            target=probe.target,
+            sent=probe.sent,
+            received=probe.received,
+            succeeded=probe.succeeded,
+        )
+
+
+class NetworkUnavailableResponse(BaseModel):
+    facet: str
+    reason: str
+
+    @classmethod
+    def from_domain(cls, item: UnavailableObservation) -> "NetworkUnavailableResponse":
+        return cls(facet=item.facet.value, reason=item.reason)
+
+
+class NetworkNodeResponse(BaseModel):
+    node_id: str
+    device_id: str | None
+    role: str
+    interfaces: list[NetworkInterfaceResponse] | None
+    bgp: NetworkBgpResponse | None
+    routes: list[NetworkRouteResponse] | None
+    reachability: list[NetworkReachabilityResponse] | None
+    unavailable: list[NetworkUnavailableResponse]
+
+    @classmethod
+    def from_domain(cls, node: NormalizedOperationalState) -> "NetworkNodeResponse":
+        is_router = node.role is NodeRole.ROUTER
+        device_id: str | None = None
+        if is_router:
+            device_id = LAB1_NODE_DEVICE_IDS.get(node.node_id)
+            if device_id is None:
+                # A platform device ID is never invented.
+                raise SerializationError(
+                    f"router node {node.node_id!r} has no registered platform device ID"
+                )
+        unavailable = node.is_unavailable
+        return cls(
+            node_id=node.node_id,
+            device_id=device_id,
+            role=node.role.value,
+            interfaces=(
+                None
+                if unavailable(ObservationFacet.INTERFACES)
+                else [NetworkInterfaceResponse.from_domain(i) for i in node.interfaces]
+            ),
+            bgp=None if node.bgp is None else NetworkBgpResponse.from_domain(node.bgp),
+            routes=(
+                [NetworkRouteResponse.from_domain(r) for r in node.routes]
+                if is_router and not unavailable(ObservationFacet.ROUTES)
+                else None
+            ),
+            reachability=(
+                None
+                if is_router or unavailable(ObservationFacet.REACHABILITY)
+                else [NetworkReachabilityResponse.from_domain(p) for p in node.reachability]
+            ),
+            unavailable=[NetworkUnavailableResponse.from_domain(u) for u in node.unavailable],
+        )
+
+
+class NetworkStateResponse(BaseModel):
+    collection_id: str
+    collected_at: datetime
+    retrieved_at: datetime
+    source: NetworkStateSourceResponse
+    nodes: list[NetworkNodeResponse]
+
+    @classmethod
+    def from_domain(cls, result: NetworkStateResult) -> "NetworkStateResponse":
+        fabric = result.fabric
+        return cls(
+            collection_id=fabric.collection_id,
+            collected_at=fabric.collected_at,
+            retrieved_at=result.retrieved_at,
+            source=NetworkStateSourceResponse(
+                collector=result.source.collector, lab_name=result.source.lab_name
+            ),
+            nodes=[NetworkNodeResponse.from_domain(node) for node in fabric.nodes],
         )
 
 

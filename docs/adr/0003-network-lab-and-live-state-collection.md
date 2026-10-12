@@ -494,6 +494,28 @@ persistence only: `NPE-1D1` (state visible to operators) is **not** complete.
   `NPE-1D1B`. Topology is not stored and links are never inferred from BGP.
   The frontend is unchanged. No RCA, remediation or AI behavior.
 
+## Implementation status: NPE-1D1B (read-only live network state API)
+
+D1B exposes the D1A latest state read-only and nothing else:
+
+- `GET /network/state` (`operation_id` `get_network_state`) returns the latest
+  ingested `FabricOperationalState` of the fixed Lab 1 (`meta-rne-bgp`) through
+  `GetNetworkStateService` (one `UnitOfWork`, no commit) as an independent
+  `NetworkStateResponse`; the public contract does not depend on the
+  `schema_version=1` persistence encoding. No state is `404`
+  `operational_state_not_found`, never an empty `200`.
+- `retrieved_at` comes from the injected clock, once per query; it is not
+  stored and is not a freshness threshold. No health score or status enum.
+- Router nodes carry the platform `device_id` from a neutral
+  `meta_rne/lab1_identity.py` (a pure move of the former detector mapping,
+  now also the Lab name); hosts have `device_id: null`.
+- Unavailable facets are `null` plus an `unavailable[]` reason; observed-empty
+  is `[]`; not-applicable is `null` (see `docs/frontend-api-contract.md` 8B).
+- **No new write boundary** (no public write endpoint) and **no migration**.
+  Ingestion remains the trusted CLI.
+- **Topology is still deferred to D2** and the **frontend is not implemented**.
+  No RCA, remediation or AI behavior.
+
 ## Deferred
 
 - OSPF

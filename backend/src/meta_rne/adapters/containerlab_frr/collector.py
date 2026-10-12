@@ -41,9 +41,10 @@ from meta_rne.domain.operational_state import (
     ReachabilityObservation,
     UnavailableObservation,
 )
+from meta_rne.lab1_identity import LAB1_LAB_NAME
 
 COLLECTOR_NAME = "containerlab-frr"
-LAB_NAME = "meta-rne-bgp"
+LAB_NAME = LAB1_LAB_NAME
 CONTAINER_PREFIX = f"clab-{LAB_NAME}-"
 
 ROUTER_NODES: tuple[str, ...] = ("spine-1", "spine-2", "leaf-1", "leaf-2")

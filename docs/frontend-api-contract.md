@@ -597,6 +597,73 @@ telemetry workspace (`TelemetryPanel.tsx`) requests this endpoint and `GET
 handles their success/failure independently — see README.md's "Frontend
 Telemetry Workspace" section for the full user-facing behavior.
 
+## 8B. `GET /network/state` (NPE-1D1B, backend-only)
+
+Read-only view of the **latest successfully ingested** live operational state
+of the one fixed Lab 1 (`meta-rne-bgp`). **No frontend consumer exists yet**
+(NPE-1D2). There is no request body, no query parameter and no lab selector,
+and no public write endpoint: `POST`/`PUT`/`PATCH`/`DELETE /network/state` do
+not exist (`405`). Ingestion stays the trusted CLI
+`scripts/lab_ingest_operational_state.py`. `operation_id` is
+`get_network_state`; CORS is unchanged (`GET` is already allowed).
+
+`200` returns `NetworkStateResponse` (no envelope):
+
+```json
+{
+  "collection_id": "...",
+  "collected_at": "2026-10-07T12:00:00Z",
+  "retrieved_at": "2026-10-07T12:00:07Z",
+  "source": {"collector": "containerlab-frr", "lab_name": "meta-rne-bgp"},
+  "nodes": [ {"node_id": "leaf-1", "device_id": "lab1-leaf-1", "role": "router",
+              "interfaces": [...], "bgp": {...}, "routes": [...],
+              "reachability": null, "unavailable": []} ]
+}
+```
+
+- `collected_at` is when the collector observed the fabric (stored).
+  `retrieved_at` is the API server's UTC clock at request time: it is not
+  stored, not part of the state, and not a freshness threshold. A client may
+  compare `retrieved_at - collected_at` for presentation; the API defines no
+  stale threshold, health score, healthy flag or per-node status.
+- `source` is derived from the nodes' common source identity; stored data
+  without a single source fails closed (`500 serialization_error`).
+- `nodes` keep the collector's node set (six in a full Lab 1 collection).
+  `device_id` is the platform device ID for the four routers
+  (`spine-1`->`lab1-spine-1`, `spine-2`->`lab1-spine-2`, `leaf-1`->`lab1-leaf-1`,
+  `leaf-2`->`lab1-leaf-2`) and **`null` for hosts** (hosts are not registered
+  devices). The fixed mapping is not read from the `devices` table.
+- `interfaces[]`: `name`, `oper_state` (`up`/`down`/`unknown`), `addresses[]`.
+- `bgp`: `local_as`, `router_id`, `established_count` (derived), `neighbors[]`
+  with `neighbor_ip`, `remote_as`, `state` (`Idle`/`Connect`/`Active`/
+  `OpenSent`/`OpenConfirm`/`Established`/`Unknown`), `raw_state` (nullable),
+  `prefixes_received` and `uptime_ms` (nullable; only set for `Established`).
+- `routes[]`: `prefix`, `protocol`, `ecmp_path_count` (= `next_hops.length`),
+  `next_hops[]` of `{ip, interface}` (each nullable, never both). Next hops are
+  the **active** ones only; inactive paths are not represented.
+- `reachability[]` (hosts): `from_node`, `target`, `sent`, `received`,
+  `succeeded`. `received: 0` is an observed total loss, not unavailable.
+- **`UNKNOWN`** is an explicit value the device reported or that could not be
+  mapped (`oper_state: "unknown"`, BGP `state: "Unknown"` with the original text
+  in `raw_state`, e.g. `Clearing`). It is never rewritten as down.
+- **`unavailable[]`** (`{facet, reason}`) lists facets the collector could not
+  observe. The matching facet is then `null`, never `[]`.
+- **Missing / not applicable** are also `null`, distinguished by role:
+
+  | facet | router | host |
+  |---|---|---|
+  | `interfaces` | array; `null` if unavailable | array; `null` if unavailable |
+  | `bgp` | object; `null` if unavailable | `null` (not applicable) |
+  | `routes` | array (may be empty = observed none); `null` if unavailable | `null` (not collected) |
+  | `reachability` | `null` (not applicable) | array; `null` if unavailable |
+
+- No topology or links are returned; links are never inferred from BGP.
+
+`404` `ApiErrorResponse` `code: "operational_state_not_found"`, `detail`
+`"No operational state is available for lab 'meta-rne-bgp'."`, when nothing has
+been ingested; an absent state is never `200` with an empty/`null` body.
+`500` is `persistence_error` / `serialization_error` with generic public detail.
+
 ## 10. Errors
 
 Every failure response is a bare object, no envelope:
@@ -624,6 +691,7 @@ occurred, not on the status code alone:
 | 500 | `persistence_error` | `ApiErrorResponse` | Database failure. `detail` is generic — never SQL, constraint names, or a stack trace. |
 | 500 | `serialization_error` | `ApiErrorResponse` | Internal data-encoding failure. `detail` is generic. |
 | 404 | `incident_not_found` | `ApiErrorResponse` | (Day 7A) `POST /incidents/{incident_id}/resolve` with an `incident_id` that does not exist. `detail` is exactly `"Incident '<incident_id>' was not found."`. |
+| 404 | `operational_state_not_found` | `ApiErrorResponse` | (NPE-1D1B) `GET /network/state` before any operational state has been ingested. |
 | 500 | — (no custom body) | none | Any unmapped/unexpected server failure — normal production 500 behavior, no leaked internals. |
 
 `GET /incidents` can only produce the `persistence_error`/500 row above
@@ -676,6 +744,9 @@ ACL is assigned inbound on `GigabitEthernet0/1`, and a
 
 Do not build frontend features assuming any of the following exist:
 
+- A frontend consumer of `GET /network/state` (Section 8B, NPE-1D1B), a
+  topology API, an operational-state history, or any operational-state write
+  endpoint
 - Authentication or authorization (every endpoint is unauthenticated)
 - Pagination, filtering, or sorting query parameters on `GET /incidents`
 - Incident acknowledgment, reopening, assignment, comments/notes, audit
