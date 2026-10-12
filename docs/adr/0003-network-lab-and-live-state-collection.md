@@ -527,7 +527,11 @@ D1B exposes the D1A latest state read-only and nothing else:
 - history of persisted normalized state (only the latest is stored, NPE-1D1A)
 - device identity / registration of lab nodes (NPE-1C3B)
 - fault automation
-- RCA engine
+- RCA application correlation and incident linking (NPE-1E1B; the pure
+  deterministic RCA engine itself exists since NPE-1E1A)
+- `GET /network/diagnosis` (NPE-1E1B)
+- diagnosis persistence and history
+- frontend RCA presentation (NPE-1E1C)
 - remediation engine
 - AI operator copilot
 - evaluation harness
@@ -543,3 +547,56 @@ detail, 5 s presentation polling, stale-response protection by `collected_at`).
 No backend source, endpoint or persistence semantics changed; the browser
 performs no operational-state write. RCA, remediation and AI remain out of
 scope. Details: `docs/frontend-api-contract.md` Section 8B (NPE-1D2 notes).
+
+## Implementation status: NPE-1E1A (pure deterministic RCA engine)
+
+Backend-only and pure. NPE-1E1 as a whole is **not** complete: this gate adds
+the engine and nothing that calls it.
+
+- **Declared topology.** `meta_rne/lab1_topology.py` declares the six Lab 1 nodes,
+  six physical links (4 leaf-spine, 2 host-leaf), endpoint addresses and the
+  two ECMP expectations (leaf-1 -> `10.1.2.0/24` and leaf-2 -> `10.1.1.0/24`,
+  2 paths each). A link's endpoints are ordered by `(node, interface)` and its
+  ID is `leaf-1:eth1--spine-1:eth1`. It is never parsed at runtime;
+  `tests/unit/test_lab1_topology_drift.py` checks it against
+  `lab/topology.clab.yml`, `lab/frr/*/frr.conf` (addresses, BGP neighbors,
+  `maximum-paths 2`) and `LAB1_NODE_IDS`/`LAB1_NODE_DEVICE_IDS`.
+- **Engine.** `meta_rne/diagnosis/engine.py`: `FabricOperationalState` plus the
+  declared topology in, `tuple[Diagnosis, ...]` out (`domain/diagnosis.py`). No
+  repository, UnitOfWork, incident, clock, HTTP or subprocess access and no
+  history; the same input gives equal, identically ordered output. It reads only
+  the latest collection.
+- **Types.** `PHYSICAL_LINK_FAILURE`, `BGP_SESSION_FAILURE`,
+  `INSUFFICIENT_EVIDENCE` (a diagnostic outcome, not a root cause).
+  Only router-router links are evaluated.
+- **Trigger.** An endpoint interface explicitly `DOWN`, or an expected BGP
+  session explicitly `Idle`/`Active`. UNKNOWN/unavailable/missing facts, a
+  missing node, transitional BGP states and a failed host ping never create a
+  diagnosis and are never treated as proof of failure or of health.
+- **Rules.** Some interface `DOWN` and no endpoint `Established` ->
+  physical. Both interfaces `UP`, a BGP side `DOWN`, none `Established` -> BGP
+  session. Any other symptom (e.g. an unknown interface with BGP down, or an
+  `Established` side) -> `INSUFFICIENT_EVIDENCE` with `confidence = None`.
+- **Confidence** (interface and BGP facts only). Physical: both interfaces down
+  and a BGP side down `HIGH`; both down without BGP-down, or one down with
+  BGP-down `MEDIUM`; one down without BGP-down `LOW`. BGP session: both sides
+  down `HIGH`, one `MEDIUM`. An observed interface address that conflicts with
+  the declared one is `CONTRADICTS` evidence and caps confidence at `MEDIUM`.
+  Routes, ECMP and reachability are supporting evidence and never change a tier.
+- **Evidence and symptom keys.** Structured `EvidenceItem`s (interface state,
+  BGP session, address match, route next hop, ECMP paths, reachability) with
+  `SUPPORTS`/`CONTRADICTS`/`UNKNOWN` roles; unavailable facets yield `UNKNOWN`
+  items with no observed value. Route next-hop and ECMP evidence is specific to
+  the diagnosed link: an ECMP expectation is attached only if losing that link
+  removes one of its paths (the path via the link's spine, declared in
+  `lab1_topology`), and it `SUPPORTS` only if that exact next hop is absent from
+  the observed routes. A reduction caused by another link, or healthy ECMP, is
+  neutral. Reachability is context only (healthy: neutral; loss: supporting). `symptom_keys` are
+  `(device_id, "bgp-neighbor:<peer-ip>")` for each BGP-down end, ready for later
+  incident linkage. A diagnosis may exist with no incident.
+- **Fixtures.** Captured `baseline`, `degraded-active`, `degraded-idle` and
+  `degraded-clearing` sets: baseline gives no diagnosis; the leaf-1 eth1 failure
+  gives one `HIGH` `PHYSICAL_LINK_FAILURE` on `leaf-1:eth1--spine-1:eth1`.
+- **Not done.** No persistence, repository, migration or diagnosis table; no
+  API route; no incident linking; no frontend change; no remediation; no AI.
+  Application/API correlation is NPE-1E1B and UI presentation is NPE-1E1C.
