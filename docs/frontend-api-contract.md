@@ -600,8 +600,8 @@ Telemetry Workspace" section for the full user-facing behavior.
 ## 8B. `GET /network/state` (NPE-1D1B, backend-only)
 
 Read-only view of the **latest successfully ingested** live operational state
-of the one fixed Lab 1 (`meta-rne-bgp`). **No frontend consumer exists yet**
-(NPE-1D2). There is no request body, no query parameter and no lab selector,
+of the one fixed Lab 1 (`meta-rne-bgp`). **The frontend consumer is the NPE-1D2 live network workspace** (see
+the NPE-1D2 notes below). There is no request body, no query parameter and no lab selector,
 and no public write endpoint: `POST`/`PUT`/`PATCH`/`DELETE /network/state` do
 not exist (`405`). Ingestion stays the trusted CLI
 `scripts/lab_ingest_operational_state.py`. `operation_id` is
@@ -663,6 +663,57 @@ not exist (`405`). Ingestion stays the trusted CLI
 `"No operational state is available for lab 'meta-rne-bgp'."`, when nothing has
 been ingested; an absent state is never `200` with an empty/`null` body.
 `500` is `persistence_error` / `serialization_error` with generic public detail.
+
+
+**Frontend consumption notes (NPE-1D2, live network workspace).** The default
+view of the app (`#network`; the previous dashboard is `#tools`) reads only
+`GET /network/state` and `GET /incidents`; the existing manual resolve call is
+the only write, and the browser never collects, ingests, registers or injects.
+
+- *Fixed declared topology.* The six nodes / six physical links come from a
+  frontend constant (`src/network/lab1Topology.ts`) copied from
+  `lab/topology.clab.yml` and the Lab 1 addressing; a Vitest drift test fails if
+  it diverges from the topology file, `frr.conf` and `lab1_identity.py`. Links
+  are never inferred from BGP, subnets or next hops.
+- *Physical vs BGP.* A link is DOWN if either endpoint interface reports
+  `down`, UP only if both report `up`, otherwise UNKNOWN (unavailable facet,
+  `unknown`, missing interface/node). BGP is a separate per-link adjacency over
+  the four leaf-spine links (not eight directional neighbors): Established if
+  both ends are, Degraded if either end is a known non-Established state,
+  otherwise Unknown. BGP never colours the physical link.
+- *Five meanings kept apart:* observed healthy, observed failure, UNKNOWN,
+  unavailable/not observed, and not applicable (e.g. BGP on a host), each with
+  a text label and glyph (never colour alone). A missing ECMP route is "not
+  observed", never 0 paths; an unavailable probe is not a reachability failure.
+- *Summary.* BGP adjacencies, ECMP path count per leaf toward the other host
+  network (count from the API; expected 2 is declared metadata), host probe
+  `received/sent`, OPEN incident count, and observation age. A frontend-only
+  "presentation status" is derived ONLY from `GET /network/state` observations:
+  Degraded on any explicit failure (a link down, a known non-Established
+  adjacency, reduced ECMP, a failed probe), Healthy only when every required
+  observation is present and healthy, else Unknown. Incident lifecycle is never
+  an input: the two endpoints are independent reads and may briefly disagree
+  (e.g. network recovered while an incident still reads OPEN), and the view
+  shows exactly that. It is not persisted, not a score and not RCA.
+- *Incident scope.* The workspace lists and counts only ANOMALY incidents on the
+  four fixed Lab 1 router device IDs (OPEN and RESOLVED history; OPEN count =
+  OPEN only). Unrelated incidents are untouched and remain, unchanged, in the
+  global `#tools` view.
+- *Observation age* is `retrieved_at - collected_at` (server-anchored); no
+  freshness threshold is applied.
+- *Polling.* Every 5 s (`LIVE_REFRESH_INTERVAL_MS`, presentation only, not the
+  collector cadence) both endpoints are re-read, independently; a tick skips a
+  request still in flight; the timer and requests are cancelled on unmount.
+  The tools view does not poll. A failed refresh keeps the last snapshot
+  visible with a notice.
+- *Stale protection.* Responses are reconciled by parsed `collected_at`: newer
+  wins, older is ignored, same instant + same `collection_id` refreshes
+  metadata, same instant + different `collection_id` keeps the current state.
+- *States.* `404 operational_state_not_found` is the "No live network snapshot
+  yet" empty state; unreachable / malformed / API-error are distinct error
+  states. No-incident is never read as healthy.
+- Incidents are listed individually (device, resource, rule, severity,
+  occurrences, status, manual resolve); there is no RCA, remediation or AI.
 
 ## 10. Errors
 
@@ -744,9 +795,9 @@ ACL is assigned inbound on `GigabitEthernet0/1`, and a
 
 Do not build frontend features assuming any of the following exist:
 
-- A frontend consumer of `GET /network/state` (Section 8B, NPE-1D1B), a
-  topology API, an operational-state history, or any operational-state write
-  endpoint
+- A topology API, an operational-state history, or any operational-state write
+  endpoint (`GET /network/state` has a frontend consumer since NPE-1D2; the
+  browser never writes operational state)
 - Authentication or authorization (every endpoint is unauthenticated)
 - Pagination, filtering, or sorting query parameters on `GET /incidents`
 - Incident acknowledgment, reopening, assignment, comments/notes, audit

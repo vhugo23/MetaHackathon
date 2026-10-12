@@ -82,7 +82,9 @@ export async function openDashboard(page: Page): Promise<DashboardHandle> {
   const requests = trackRequests(page);
   const initialIncidentsResponse = waitForIncidentRefresh(page);
 
-  await page.goto("/");
+  // The existing incident/configuration/telemetry tools live at #tools since
+  // NPE-1D2 made the live network workspace the default view.
+  await page.goto("/#tools");
 
   await expect(page.getByRole("heading", { name: "Network Incidents", level: 1 })).toBeVisible();
   await expect(

@@ -34,7 +34,7 @@ function generateDeviceId(label: string, workerIndex: number): string {
  */
 async function openDashboardAndResolveApiOrigin(page: Page): Promise<string> {
   const initialIncidentsResponsePromise = waitForIncidentRefresh(page);
-  await page.goto("/");
+  await page.goto("/#tools");
   const initialResponse = await initialIncidentsResponsePromise;
   expect(initialResponse.status()).toBe(200);
   return new URL(initialResponse.url()).origin;

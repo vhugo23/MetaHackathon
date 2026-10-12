@@ -532,3 +532,14 @@ D1B exposes the D1A latest state read-only and nothing else:
 - AI operator copilot
 - evaluation harness
 - backend/frontend integration
+
+## Implementation status: NPE-1D2 (live network operator workspace)
+
+Frontend-only. The default app view is now a read-only operator workspace over
+`GET /network/state` and `GET /incidents` for the fixed declared Lab 1
+topology (physical state from interface observations, BGP adjacency state
+separately, ECMP, host reachability, observation age, open incidents, node
+detail, 5 s presentation polling, stale-response protection by `collected_at`).
+No backend source, endpoint or persistence semantics changed; the browser
+performs no operational-state write. RCA, remediation and AI remain out of
+scope. Details: `docs/frontend-api-contract.md` Section 8B (NPE-1D2 notes).

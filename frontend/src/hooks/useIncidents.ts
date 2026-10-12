@@ -7,12 +7,25 @@ const NETWORK_ERROR_MESSAGE = "Could not reach the Meta RNE API. Check your conn
 
 export type IncidentsState =
   | { status: "loading" }
-  | { status: "success"; data: IncidentResponse[]; lastUpdatedAt: string; isRefreshing: boolean }
+  | {
+      status: "success";
+      data: IncidentResponse[];
+      lastUpdatedAt: string;
+      isRefreshing: boolean;
+      /** Set only by a failed background `poll()`; the list stays visible. */
+      refreshError?: string;
+    }
   | { status: "error"; message: string };
 
 export interface UseIncidentsResult {
   state: IncidentsState;
   refresh: () => void;
+  /**
+   * Background refresh for the live workspace: skipped while a request is
+   * already in flight, and a failure keeps the loaded list (recording
+   * `refreshError`) instead of replacing it with an error state.
+   */
+  poll: () => void;
   resolvingIds: ReadonlySet<string>;
   resolveErrors: Readonly<Record<string, string>>;
   resolveIncident: (incidentId: string) => void;
@@ -99,6 +112,7 @@ export function useIncidents(): UseIncidentsResult {
   const [state, setState] = useState<IncidentsState>({ status: "loading" });
   const abortControllerRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef(0);
+  const inFlightIdRef = useRef<number | null>(null);
   const isMountedRef = useRef(true);
 
   // Always holds the latest committed state, read synchronously by
@@ -124,50 +138,75 @@ export function useIncidents(): UseIncidentsResult {
   // Only ever called from a promise callback (.then()/.catch()), never
   // synchronously from the effect body below — that's what keeps the
   // mount effect itself free of a direct setState call.
-  const runFetch = useCallback((controller: AbortController, requestId: number) => {
-    fetchIncidents({ signal: controller.signal })
-      .then((data) => {
-        if (!isMountedRef.current || requestIdRef.current !== requestId) {
-          return;
+  const runFetch = useCallback(
+    (controller: AbortController, requestId: number, background: boolean) => {
+      const settle = () => {
+        if (inFlightIdRef.current === requestId) {
+          inFlightIdRef.current = null;
         }
-        setState((previous) => ({
-          status: "success",
-          data: previous.status === "success" ? mergeIncidentLists(data, previous.data) : data,
-          lastUpdatedAt: new Date().toISOString(),
-          isRefreshing: false,
-        }));
-      })
-      .catch((error: unknown) => {
-        if (!isMountedRef.current || requestIdRef.current !== requestId) {
-          return;
-        }
-        if (isAbortError(error)) {
-          // Deliberate cancellation (superseded by a newer request, or the
-          // component is unmounting) — never a user-visible error.
-          return;
-        }
-        const message = error instanceof ApiRequestError ? error.message : NETWORK_ERROR_MESSAGE;
-        setState({ status: "error", message });
-      });
-  }, []);
+      };
+      fetchIncidents({ signal: controller.signal })
+        .then((data) => {
+          if (!isMountedRef.current || requestIdRef.current !== requestId) {
+            return;
+          }
+          settle();
+          setState((previous) => ({
+            status: "success",
+            data: previous.status === "success" ? mergeIncidentLists(data, previous.data) : data,
+            lastUpdatedAt: new Date().toISOString(),
+            isRefreshing: false,
+          }));
+        })
+        .catch((error: unknown) => {
+          if (!isMountedRef.current || requestIdRef.current !== requestId) {
+            return;
+          }
+          if (isAbortError(error)) {
+            // Deliberate cancellation (superseded by a newer request, or the
+            // component is unmounting) — never a user-visible error.
+            return;
+          }
+          settle();
+          const message = error instanceof ApiRequestError ? error.message : NETWORK_ERROR_MESSAGE;
+          setState((previous) =>
+            background && previous.status === "success"
+              ? { ...previous, refreshError: message }
+              : { status: "error", message },
+          );
+        });
+    },
+    [],
+  );
 
   // Cancels whatever request is currently in flight (if any), mints a new
   // request ID — the authoritative staleness guard read back in
   // `runFetch`, independent of whether the underlying client actually
   // honors AbortSignal — and starts exactly one new request.
-  const beginNewRequest = useCallback(() => {
-    abortControllerRef.current?.abort();
-    const requestId = (requestIdRef.current += 1);
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    runFetch(controller, requestId);
-  }, [runFetch]);
+  const beginNewRequest = useCallback(
+    (background = false) => {
+      abortControllerRef.current?.abort();
+      const requestId = (requestIdRef.current += 1);
+      inFlightIdRef.current = requestId;
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      runFetch(controller, requestId, background);
+    },
+    [runFetch],
+  );
 
   const refresh = useCallback(() => {
     setState((previous) =>
       previous.status === "success" ? { ...previous, isRefreshing: true } : { status: "loading" },
     );
     beginNewRequest();
+  }, [beginNewRequest]);
+
+  const poll = useCallback(() => {
+    if (inFlightIdRef.current !== null) {
+      return;
+    }
+    beginNewRequest(true);
   }, [beginNewRequest]);
 
   const clearResolvingId = useCallback((incidentId: string) => {
@@ -299,5 +338,5 @@ export function useIncidents(): UseIncidentsResult {
     };
   }, [beginNewRequest]);
 
-  return { state, refresh, resolvingIds, resolveErrors, resolveIncident };
+  return { state, refresh, poll, resolvingIds, resolveErrors, resolveIncident };
 }

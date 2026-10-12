@@ -109,6 +109,42 @@ export async function getJsonArray(path: string, options: GetJsonOptions = {}): 
   return body as unknown[];
 }
 
+/**
+ * Returns the raw parsed JSON object, shape unvalidated � the object
+ * counterpart of `getJsonArray`. Callers (see `networkState.ts`) apply
+ * their own runtime structural validator; this function only proves the
+ * top-level body is a non-array object, never asserts its shape via cast.
+ */
+export async function getJsonObject(
+  path: string,
+  options: GetJsonOptions = {},
+): Promise<Record<string, unknown>> {
+  const response = await fetch(buildUrl(path), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    credentials: "omit",
+    signal: options.signal,
+  });
+
+  if (!response.ok) {
+    const { detail, code } = await parseErrorDetail(response);
+    throw new ApiRequestError(detail, code);
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new ApiRequestError(MALFORMED_RESPONSE_MESSAGE);
+  }
+
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new ApiRequestError(MALFORMED_RESPONSE_MESSAGE);
+  }
+
+  return body as Record<string, unknown>;
+}
+
 export interface PostJsonOptions {
   signal?: AbortSignal;
 }

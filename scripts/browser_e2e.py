@@ -148,6 +148,57 @@ def docker_volume_filter_command(project_name: str) -> list[str]:
     ]
 
 
+# --------------------------------------------------------------------------
+# Deterministic network-state seed (NPE-1D2, test-only)
+#
+# The baseline operational state is ingested through the real application
+# service *inside the compose api container* (the image already contains
+# meta_rne and the DATABASE_URL), from the existing captured fixtures — no
+# public endpoint, no frontend mock, no host Python dependencies, no lab.
+# --------------------------------------------------------------------------
+
+SEED_REMOTE_DIR = "/tmp/e2e-seed"
+SEED_SCRIPT = REPO_ROOT / "scripts" / "seed_e2e_network_state.py"
+SEED_SUPPORT_MODULE = REPO_ROOT / "backend" / "tests" / "operational_state_support.py"
+SEED_FIXTURES_DIR = REPO_ROOT / "backend" / "tests" / "fixtures" / "containerlab_frr"
+
+
+def seed_commands(project_name: str) -> list[list[str]]:
+    """The exact, project-scoped, api-service-only command sequence."""
+    return [
+        compose_command(
+            project_name, "exec", "-T", "api", "mkdir", "-p", f"{SEED_REMOTE_DIR}/fixtures"
+        ),
+        compose_command(project_name, "cp", str(SEED_SCRIPT), f"api:{SEED_REMOTE_DIR}/"),
+        compose_command(project_name, "cp", str(SEED_SUPPORT_MODULE), f"api:{SEED_REMOTE_DIR}/"),
+        compose_command(
+            project_name, "cp", str(SEED_FIXTURES_DIR), f"api:{SEED_REMOTE_DIR}/fixtures/"
+        ),
+        compose_command(
+            project_name,
+            "exec",
+            "-T",
+            "api",
+            "python",
+            f"{SEED_REMOTE_DIR}/{SEED_SCRIPT.name}",
+        ),
+    ]
+
+
+def parse_seed_result(stdout: str) -> dict[str, Any]:
+    """The seed prints one JSON line; anything but a fresh CREATED is a failure."""
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        raise BrowserE2EError("network-state seed printed no result")
+    try:
+        result: Any = json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        raise BrowserE2EError(f"network-state seed result is not JSON: {lines[-1]!r}") from exc
+    if not isinstance(result, dict) or result.get("state_outcome") != "CREATED":
+        raise BrowserE2EError(f"network-state seed did not create the baseline: {result!r}")
+    return result
+
+
 def vite_preview_command(frontend_dir: Path, port: int) -> list[str]:
     vite_entry = frontend_dir / "node_modules" / "vite" / "bin" / "vite.js"
     return [
@@ -491,6 +542,22 @@ def run_browser_e2e(config: BrowserE2EConfig) -> int:
 
             _log("waiting for GET /health")
             wait_for_api_health(api_reservation.port, time.monotonic() + config.timeout)
+
+            _log("seeding one deterministic baseline operational state (real ingestion path)")
+            seed_stdout = ""
+            for command in seed_commands(config.project_name):
+                completed = run_subprocess(
+                    command, cwd=REPO_ROOT, env=compose_env, timeout=max(config.timeout, 60)
+                )
+                seed_stdout = completed.stdout
+            parse_seed_result(seed_stdout)
+            seeded_state_status, _ = _http_get(
+                f"http://127.0.0.1:{api_reservation.port}/network/state", timeout=10
+            )
+            if seeded_state_status != 200:
+                raise BrowserE2EError(
+                    f"GET /network/state returned {seeded_state_status} after seeding, expected 200"
+                )
 
             _log("building the frontend with VITE_API_BASE_URL baked in")
             build_env = {**os.environ, "VITE_API_BASE_URL": runtime_env["VITE_API_BASE_URL"]}

@@ -192,6 +192,61 @@ class VitePreviewCommandTests(unittest.TestCase):
         self.assertFalse(any("npm" in str(part) for part in command))
 
 
+class NetworkStateSeedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.commands = browser_e2e.seed_commands("meta-rne-browser-e2e-abcd1234")
+
+    def test_seed_commands__are_all_project_scoped_compose_commands(self) -> None:
+        for command in self.commands:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    command[:4],
+                    ["docker", "compose", "--project-name", "meta-rne-browser-e2e-abcd1234"],
+                )
+
+    def test_seed_commands__touch_only_the_api_service(self) -> None:
+        for command in self.commands:
+            with self.subTest(command=command):
+                joined = " ".join(command)
+                self.assertNotIn("db", command[4:6])
+                self.assertTrue("api:" in joined or "api" in command)
+                self.assertNotIn("run", command[4:5])
+
+    def test_seed_commands__copy_script_support_module_and_fixtures_then_run_seed(self) -> None:
+        copies = [c for c in self.commands if c[4] == "cp"]
+        self.assertEqual(
+            [Path(c[5]).name for c in copies],
+            ["seed_e2e_network_state.py", "operational_state_support.py", "containerlab_frr"],
+        )
+        self.assertEqual(
+            self.commands[-1][4:],
+            ["exec", "-T", "api", "python", "/tmp/e2e-seed/seed_e2e_network_state.py"],
+        )
+
+    def test_seed_commands__use_no_shell_and_no_host_network(self) -> None:
+        for command in self.commands:
+            self.assertNotIn("sh", command)
+            self.assertNotIn("--network", command)
+            self.assertNotIn("deploy", command)  # no lab deployment of any kind
+
+    def test_seed_sources_exist_in_the_repository(self) -> None:
+        self.assertTrue(browser_e2e.SEED_SCRIPT.is_file())
+        self.assertTrue(browser_e2e.SEED_SUPPORT_MODULE.is_file())
+        self.assertTrue((browser_e2e.SEED_FIXTURES_DIR / "baseline").is_dir())
+
+    def test_parse_seed_result__accepts_only_a_created_baseline(self) -> None:
+        result = browser_e2e.parse_seed_result(
+            'noise\n{"state_outcome": "CREATED", "collection_id": "x", "anomalies": 0}\n'
+        )
+        self.assertEqual(result["state_outcome"], "CREATED")
+
+    def test_parse_seed_result__rejects_everything_else(self) -> None:
+        for bad in ("", "not json", '{"state_outcome": "UNCHANGED"}', "[1]"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(browser_e2e.BrowserE2EError):
+                    browser_e2e.parse_seed_result(bad)
+
+
 class NpmExecutableResolutionTests(unittest.TestCase):
     def test_resolve_npm_executable__windows(self) -> None:
         self.assertEqual(browser_e2e.resolve_npm_executable("Windows"), "npm.cmd")
