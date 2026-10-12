@@ -527,9 +527,6 @@ D1B exposes the D1A latest state read-only and nothing else:
 - history of persisted normalized state (only the latest is stored, NPE-1D1A)
 - device identity / registration of lab nodes (NPE-1C3B)
 - fault automation
-- RCA application correlation and incident linking (NPE-1E1B; the pure
-  deterministic RCA engine itself exists since NPE-1E1A)
-- `GET /network/diagnosis` (NPE-1E1B)
 - diagnosis persistence and history
 - frontend RCA presentation (NPE-1E1C)
 - remediation engine
@@ -600,3 +597,29 @@ the engine and nothing that calls it.
 - **Not done.** No persistence, repository, migration or diagnosis table; no
   API route; no incident linking; no frontend change; no remediation; no AI.
   Application/API correlation is NPE-1E1B and UI presentation is NPE-1E1C.
+
+## Implementation status: NPE-1E1B (RCA application correlation and read API)
+
+Backend-only. NPE-1E1 as a whole is **not** complete: the frontend (NPE-1E1C)
+and remediation are still deferred.
+
+- **On-demand, read-only.** `GetNetworkDiagnosisService` (one `UnitOfWork`, no
+  commit) loads the latest `FabricOperationalState`, runs the pure
+  `DeterministicDiagnosisEngine`, and exposes the result through
+  `GET /network/diagnosis` (`operation_id` `get_network_diagnosis`; no body, no
+  query parameter, no write method). No operational state is `404
+  operational_state_not_found`; a healthy fabric is `200` with `diagnoses: []`.
+- **Diagnosis is derived from the latest state.** Evidence comes only from the
+  fabric. Nothing is persisted: no diagnosis table, repository, migration or
+  history; no diagnosis ID or status.
+- **Incidents are annotations.** Each symptom key `(device_id, affected_resource)`
+  is mapped to the existing RULE-BGP-DOWN fingerprint (`ANOMALY`,
+  `RULE-BGP-DOWN`, device, resource) and looked up with
+  `get_open_by_fingerprint`. Only OPEN incidents link; RESOLVED ones never do. An
+  OPEN incident with `last_seen_at` later than the diagnosed fabric's
+  `collected_at` belongs to a newer ingestion and is omitted. Incidents are
+  never created or mutated, and fingerprints are unchanged.
+- **Zero linked incidents is valid.** A diagnosis with no matching incident
+  still appears at unchanged confidence; incident lifecycle (e.g. both incidents
+  manually resolved while the link is still down) never changes a diagnosis.
+- **Not done.** No frontend change (NPE-1E1C), no remediation, no AI.

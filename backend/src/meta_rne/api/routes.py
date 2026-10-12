@@ -20,6 +20,7 @@ from meta_rne.api.schemas import (
     DeviceSummaryResponse,
     DriftReportResponse,
     IncidentResponse,
+    NetworkDiagnosisResponse,
     NetworkStateResponse,
     SubmitConfigurationRequest,
     SubmitConfigurationResponse,
@@ -33,6 +34,7 @@ from meta_rne.application.device_queries import GetDeviceDetailService, ListDevi
 from meta_rne.application.incident_queries import ListIncidentsService
 from meta_rne.application.incident_resolution import ResolveIncidentService
 from meta_rne.application.models import IngestConfigurationCommand, TelemetryIngestionCommand
+from meta_rne.application.network_diagnosis_query import GetNetworkDiagnosisService
 from meta_rne.application.network_state_query import GetNetworkStateService
 from meta_rne.application.telemetry_ingestion import TelemetryIngestionService
 from meta_rne.application.telemetry_query import GetRecentTelemetryService
@@ -74,6 +76,7 @@ def build_router(
     telemetry_ingestion_service: TelemetryIngestionService,
     telemetry_query_service: GetRecentTelemetryService,
     network_state_service: GetNetworkStateService,
+    network_diagnosis_service: GetNetworkDiagnosisService,
     clock: Callable[[], datetime],
 ) -> APIRouter:
     router = APIRouter()
@@ -143,6 +146,24 @@ def build_router(
     )
     def get_network_state() -> NetworkStateResponse:
         return NetworkStateResponse.from_domain(network_state_service.get())
+
+    @router.get(
+        "/network/diagnosis",
+        response_model=NetworkDiagnosisResponse,
+        operation_id="get_network_diagnosis",
+        responses={
+            404: {
+                "model": ApiErrorResponse,
+                "description": "operational_state_not_found.",
+            },
+            500: {
+                "model": ApiErrorResponse,
+                "description": "persistence_error or serialization_error (generic public detail).",
+            },
+        },
+    )
+    def get_network_diagnosis() -> NetworkDiagnosisResponse:
+        return NetworkDiagnosisResponse.from_domain(network_diagnosis_service.get())
 
     @router.get(
         "/devices",

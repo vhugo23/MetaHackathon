@@ -715,6 +715,70 @@ the only write, and the browser never collects, ingests, registers or injects.
 - Incidents are listed individually (device, resource, rule, severity,
   occurrences, status, manual resolve); there is no RCA, remediation or AI.
 
+## 8C. `GET /network/diagnosis` (NPE-1E1B, backend-only)
+
+Read-only, on-demand deterministic root-cause analysis of the **latest ingested**
+operational state of Lab 1. Computed per request, never stored: no diagnosis ID,
+status, history or write method (`POST`/`PUT`/`PATCH`/`DELETE` do not exist).
+No body, no query parameter. `operation_id` is `get_network_diagnosis`. There is
+no frontend consumer yet (NPE-1E1C).
+
+`200` returns `NetworkDiagnosisResponse` (no envelope); a healthy network is
+`200` with `"diagnoses": []`, never `404`/`204`/`null`:
+
+```json
+{
+  "collection_id": "run-1",
+  "collected_at": "2026-10-07T12:00:00Z",
+  "diagnoses": [
+    {
+      "diagnosis_type": "PHYSICAL_LINK_FAILURE",
+      "confidence": "HIGH",
+      "resource": {
+        "resource_id": "leaf-1:eth1--spine-1:eth1",
+        "endpoint_a": {"node_id": "leaf-1", "interface": "eth1"},
+        "endpoint_b": {"node_id": "spine-1", "interface": "eth1"}
+      },
+      "evidence": [
+        {"kind": "INTERFACE_STATE", "role": "SUPPORTS", "node_id": "leaf-1",
+         "subject": "eth1", "observed": {"interface_name": "eth1", "state": "DOWN"}}
+      ],
+      "symptom_keys": [
+        {"device_id": "lab1-leaf-1", "affected_resource": "bgp-neighbor:10.255.0.0"}
+      ],
+      "linked_incidents": [
+        {"incident_id": "...", "device_id": "lab1-leaf-1",
+         "affected_resource": "bgp-neighbor:10.255.0.0", "severity": "Critical",
+         "status": "OPEN", "created_at": "...", "last_seen_at": "...",
+         "occurrence_count": 1}
+      ]
+    }
+  ]
+}
+```
+
+- `diagnosis_type`: `PHYSICAL_LINK_FAILURE` | `BGP_SESSION_FAILURE` |
+  `INSUFFICIENT_EVIDENCE`. `confidence`: `HIGH` | `MEDIUM` | `LOW`, and `null`
+  exactly for `INSUFFICIENT_EVIDENCE`. `PHYSICAL_LINK_FAILURE` means the declared
+  link is the failed resource, not why it failed.
+- `evidence[]`: `kind` (`INTERFACE_STATE`, `BGP_SESSION`, `ADDRESS_MATCH`,
+  `ROUTE_NEXT_HOP`, `ECMP_PATHS`, `REACHABILITY`), `role` (`SUPPORTS`,
+  `CONTRADICTS`, `UNKNOWN`), `node_id`, `subject`, and one `observed` shape per
+  kind: interface `{interface_name, state}`; BGP `{neighbor_ip, state,
+  raw_state}`; address `{interface_name, declared_address, observed_addresses,
+  matches}`; next hop `{next_hop_ip, interface_name, active_route_count}`; ECMP
+  `{prefix, observed_paths, expected_paths, link_next_hop_ip,
+  link_next_hop_present}`; reachability `{target, sent, received}`. Unobserved
+  values are `null`. Engine ordering of diagnoses and evidence is preserved.
+- `symptom_keys` are correlation keys, always present. `linked_incidents` are
+  OPEN RULE-BGP-DOWN incidents matched by the existing fingerprint, in
+  symptom-key order, without duplicates; it may be empty (RESOLVED incidents, no
+  incident yet, or an incident newer than the diagnosed snapshot are not linked).
+  Diagnosis evidence always comes from the network state, never from incidents.
+
+`404` `ApiErrorResponse` `code: "operational_state_not_found"` when nothing has
+been ingested. `500` is `persistence_error` / `serialization_error`.
+
 ## 10. Errors
 
 Every failure response is a bare object, no envelope:
@@ -742,7 +806,7 @@ occurred, not on the status code alone:
 | 500 | `persistence_error` | `ApiErrorResponse` | Database failure. `detail` is generic — never SQL, constraint names, or a stack trace. |
 | 500 | `serialization_error` | `ApiErrorResponse` | Internal data-encoding failure. `detail` is generic. |
 | 404 | `incident_not_found` | `ApiErrorResponse` | (Day 7A) `POST /incidents/{incident_id}/resolve` with an `incident_id` that does not exist. `detail` is exactly `"Incident '<incident_id>' was not found."`. |
-| 404 | `operational_state_not_found` | `ApiErrorResponse` | (NPE-1D1B) `GET /network/state` before any operational state has been ingested. |
+| 404 | `operational_state_not_found` | `ApiErrorResponse` | (NPE-1D1B) `GET /network/state` and (NPE-1E1B) `GET /network/diagnosis` before any operational state has been ingested. |
 | 500 | — (no custom body) | none | Any unmapped/unexpected server failure — normal production 500 behavior, no leaked internals. |
 
 `GET /incidents` can only produce the `persistence_error`/500 row above
@@ -795,6 +859,8 @@ ACL is assigned inbound on `GigabitEthernet0/1`, and a
 
 Do not build frontend features assuming any of the following exist:
 
+- A frontend consumer of `GET /network/diagnosis` (Section 8C, backend-only
+  until NPE-1E1C), diagnosis persistence or history, remediation
 - A topology API, an operational-state history, or any operational-state write
   endpoint (`GET /network/state` has a frontend consumer since NPE-1D2; the
   browser never writes operational state)

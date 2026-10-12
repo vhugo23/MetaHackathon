@@ -20,6 +20,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from meta_rne.application.device_queries import DeviceDetailResult
 from meta_rne.application.models import ConfigIngestionResult, TelemetryIngestionResult
+from meta_rne.application.network_diagnosis_query import (
+    CorrelatedDiagnosis,
+    IncidentReference,
+    NetworkDiagnosisResult,
+)
 from meta_rne.application.network_state_query import NetworkStateResult
 from meta_rne.domain.anomaly import (
     Anomaly,
@@ -36,6 +41,18 @@ from meta_rne.domain.config import (
     NormalizedRouting,
 )
 from meta_rne.domain.device import Device
+from meta_rne.domain.diagnosis import (
+    AddressObserved,
+    BgpSessionObserved,
+    EcmpPathsObserved,
+    EvidenceItem,
+    EvidenceObservation,
+    InterfaceStateObserved,
+    LinkRef,
+    NextHopObserved,
+    ReachabilityObserved,
+    SymptomKey,
+)
 from meta_rne.domain.drift import DriftEntry, DriftReport
 from meta_rne.domain.incident import Incident, PolicyViolationIncidentEvidence
 from meta_rne.domain.operational_state import (
@@ -699,6 +716,202 @@ class NetworkStateResponse(BaseModel):
                 collector=result.source.collector, lab_name=result.source.lab_name
             ),
             nodes=[NetworkNodeResponse.from_domain(node) for node in fabric.nodes],
+        )
+
+
+class DiagnosisEndpointResponse(BaseModel):
+    node_id: str
+    interface: str
+
+
+class DiagnosisResourceResponse(BaseModel):
+    resource_id: str
+    endpoint_a: DiagnosisEndpointResponse
+    endpoint_b: DiagnosisEndpointResponse
+
+    @classmethod
+    def from_domain(cls, link: LinkRef) -> "DiagnosisResourceResponse":
+        return cls(
+            resource_id=link.resource_id,
+            endpoint_a=DiagnosisEndpointResponse(node_id=link.a_node, interface=link.a_interface),
+            endpoint_b=DiagnosisEndpointResponse(node_id=link.b_node, interface=link.b_interface),
+        )
+
+
+class InterfaceStateObservedResponse(BaseModel):
+    interface_name: str
+    state: str
+
+
+class BgpSessionObservedResponse(BaseModel):
+    neighbor_ip: str
+    state: str
+    raw_state: str | None
+
+
+class AddressObservedResponse(BaseModel):
+    interface_name: str
+    declared_address: str
+    observed_addresses: list[str]
+    matches: bool | None
+
+
+class NextHopObservedResponse(BaseModel):
+    next_hop_ip: str
+    interface_name: str
+    active_route_count: int | None
+
+
+class EcmpPathsObservedResponse(BaseModel):
+    prefix: str
+    observed_paths: int | None
+    expected_paths: int
+    link_next_hop_ip: str
+    link_next_hop_present: bool | None
+
+
+class ReachabilityObservedResponse(BaseModel):
+    target: str
+    sent: int | None
+    received: int | None
+
+
+DiagnosisObservedResponse = (
+    InterfaceStateObservedResponse
+    | BgpSessionObservedResponse
+    | AddressObservedResponse
+    | NextHopObservedResponse
+    | EcmpPathsObservedResponse
+    | ReachabilityObservedResponse
+)
+
+
+def _observed_from_domain(observed: EvidenceObservation) -> DiagnosisObservedResponse:
+    if isinstance(observed, InterfaceStateObserved):
+        return InterfaceStateObservedResponse(
+            interface_name=observed.interface_name, state=observed.state.value
+        )
+    if isinstance(observed, BgpSessionObserved):
+        return BgpSessionObservedResponse(
+            neighbor_ip=observed.neighbor_ip,
+            state=observed.state.value,
+            raw_state=observed.raw_state,
+        )
+    if isinstance(observed, AddressObserved):
+        return AddressObservedResponse(
+            interface_name=observed.interface_name,
+            declared_address=observed.declared_address,
+            observed_addresses=list(observed.observed_addresses),
+            matches=observed.matches,
+        )
+    if isinstance(observed, NextHopObserved):
+        return NextHopObservedResponse(
+            next_hop_ip=observed.next_hop_ip,
+            interface_name=observed.interface_name,
+            active_route_count=observed.active_route_count,
+        )
+    if isinstance(observed, EcmpPathsObserved):
+        return EcmpPathsObservedResponse(
+            prefix=observed.prefix,
+            observed_paths=observed.observed_path_count,
+            expected_paths=observed.expected_path_count,
+            link_next_hop_ip=observed.link_next_hop_ip,
+            link_next_hop_present=observed.link_path_present,
+        )
+    if isinstance(observed, ReachabilityObserved):
+        return ReachabilityObservedResponse(
+            target=observed.target, sent=observed.sent, received=observed.received
+        )
+    raise TypeError(f"unsupported diagnosis observation: {type(observed).__name__}")
+
+
+class DiagnosisEvidenceResponse(BaseModel):
+    kind: str
+    role: str
+    node_id: str
+    subject: str
+    observed: DiagnosisObservedResponse
+
+    @classmethod
+    def from_domain(cls, item: EvidenceItem) -> "DiagnosisEvidenceResponse":
+        return cls(
+            kind=item.kind.value,
+            role=item.role.value,
+            node_id=item.node_id,
+            subject=item.subject,
+            observed=_observed_from_domain(item.observed),
+        )
+
+
+class DiagnosisSymptomKeyResponse(BaseModel):
+    device_id: str
+    affected_resource: str
+
+    @classmethod
+    def from_domain(cls, key: SymptomKey) -> "DiagnosisSymptomKeyResponse":
+        return cls(device_id=key.device_id, affected_resource=key.affected_resource)
+
+
+class LinkedIncidentResponse(BaseModel):
+    incident_id: str
+    device_id: str
+    affected_resource: str
+    severity: str
+    status: str
+    created_at: datetime
+    last_seen_at: datetime
+    occurrence_count: int
+
+    @classmethod
+    def from_domain(cls, reference: IncidentReference) -> "LinkedIncidentResponse":
+        return cls(
+            incident_id=reference.incident_id,
+            device_id=reference.device_id,
+            affected_resource=reference.affected_resource,
+            severity=reference.severity.value,
+            status=reference.status.value,
+            created_at=reference.created_at,
+            last_seen_at=reference.last_seen_at,
+            occurrence_count=reference.occurrence_count,
+        )
+
+
+class NetworkDiagnosisItemResponse(BaseModel):
+    diagnosis_type: str
+    confidence: str | None
+    resource: DiagnosisResourceResponse
+    evidence: list[DiagnosisEvidenceResponse]
+    symptom_keys: list[DiagnosisSymptomKeyResponse]
+    linked_incidents: list[LinkedIncidentResponse]
+
+    @classmethod
+    def from_domain(cls, correlated: CorrelatedDiagnosis) -> "NetworkDiagnosisItemResponse":
+        diagnosis = correlated.diagnosis
+        return cls(
+            diagnosis_type=diagnosis.diagnosis_type.value,
+            confidence=None if diagnosis.confidence is None else diagnosis.confidence.value,
+            resource=DiagnosisResourceResponse.from_domain(diagnosis.resource),
+            evidence=[DiagnosisEvidenceResponse.from_domain(item) for item in diagnosis.evidence],
+            symptom_keys=[
+                DiagnosisSymptomKeyResponse.from_domain(key) for key in diagnosis.symptom_keys
+            ],
+            linked_incidents=[
+                LinkedIncidentResponse.from_domain(ref) for ref in correlated.linked_incidents
+            ],
+        )
+
+
+class NetworkDiagnosisResponse(BaseModel):
+    collection_id: str
+    collected_at: datetime
+    diagnoses: list[NetworkDiagnosisItemResponse]
+
+    @classmethod
+    def from_domain(cls, result: NetworkDiagnosisResult) -> "NetworkDiagnosisResponse":
+        return cls(
+            collection_id=result.collection_id,
+            collected_at=result.collected_at,
+            diagnoses=[NetworkDiagnosisItemResponse.from_domain(d) for d in result.diagnoses],
         )
 
 

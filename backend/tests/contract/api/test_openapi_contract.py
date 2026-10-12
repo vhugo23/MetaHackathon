@@ -66,6 +66,7 @@ def test_openapi_contract__paths__are_exactly_the_approved_set() -> None:
         "/devices/{device_id}/telemetry/recent",
         "/incidents",
         "/incidents/{incident_id}/resolve",
+        "/network/diagnosis",
         "/network/state",
     }
 
@@ -469,3 +470,21 @@ def test_openapi_contract__network_state__get_only_with_exact_models() -> None:
     not_found = operation["responses"]["404"]["content"]["application/json"]["schema"]
     assert not_found["$ref"] == "#/components/schemas/ApiErrorResponse"
     assert "NetworkStateResponse" in schema["components"]["schemas"]
+
+
+def test_openapi_contract__network_diagnosis__get_only_with_exact_models() -> None:
+    schema = _openapi_schema()
+
+    path = schema["paths"]["/network/diagnosis"]
+    assert set(path) == {"get"}
+    for method in ("post", "put", "patch", "delete"):
+        assert method not in path
+    operation = path["get"]
+    assert operation["operationId"] == "get_network_diagnosis"
+    assert "parameters" not in operation
+    assert "requestBody" not in operation
+    ok = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert ok["$ref"] == "#/components/schemas/NetworkDiagnosisResponse"
+    not_found = operation["responses"]["404"]["content"]["application/json"]["schema"]
+    assert not_found["$ref"] == "#/components/schemas/ApiErrorResponse"
+    assert "NetworkDiagnosisResponse" in schema["components"]["schemas"]
