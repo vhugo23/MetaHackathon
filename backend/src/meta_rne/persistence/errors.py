@@ -56,3 +56,33 @@ class PolicySeedConflictError(PersistenceConflictError):
     def __init__(self, policy_id: str) -> None:
         super().__init__(f"policy seed conflict: {policy_id!r}")
         self.policy_id = policy_id
+
+
+class StaleOperationalStateError(PersistenceConflictError):
+    """Raised by ``OperationalStateRepository.save_latest`` when a distinct
+    collection is older than the lab's stored latest state."""
+
+    def __init__(self, lab_name: str, collection_id: str, stored_collection_id: str) -> None:
+        super().__init__(
+            f"stale operational state for lab {lab_name!r}: collection {collection_id!r} "
+            f"is older than stored collection {stored_collection_id!r}"
+        )
+        self.lab_name = lab_name
+        self.collection_id = collection_id
+        self.stored_collection_id = stored_collection_id
+
+
+class OperationalStateConflictError(PersistenceConflictError):
+    """Raised by ``OperationalStateRepository.save_latest`` when no truthful
+    ordering or identity exists: distinct collections with identical
+    timestamps, or one ``collection_id`` presented with a different
+    timestamp or payload (a collection ID names one immutable observation)."""
+
+    def __init__(self, lab_name: str, collection_id: str, reason: str) -> None:
+        super().__init__(
+            f"operational state conflict for lab {lab_name!r}, collection {collection_id!r}: "
+            f"{reason}"
+        )
+        self.lab_name = lab_name
+        self.collection_id = collection_id
+        self.reason = reason

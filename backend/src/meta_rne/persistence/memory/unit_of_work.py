@@ -12,7 +12,7 @@ one working-store object, so ``rollback()`` must reset the *same* object's
 collections in place rather than swap in a new store the repositories
 wouldn't see.
 
-``commit()`` publishes all four working collections into the committed
+``commit()`` publishes all working collections into the committed
 store at once, while holding the committed store's ``publish_lock`` — never
 exposing a partially-published collection set to a *new* UnitOfWork
 constructed against the same committed store afterward. Construction and
@@ -28,10 +28,14 @@ import threading
 
 from meta_rne.domain.device import Device
 from meta_rne.domain.incident import Incident
+from meta_rne.domain.operational_state import FabricOperationalState
 from meta_rne.domain.policy import ConfigurationPolicy
 from meta_rne.domain.snapshot import ConfigurationSnapshot
 from meta_rne.persistence.memory.device_repository import InMemoryDeviceRepository
 from meta_rne.persistence.memory.incident_repository import InMemoryIncidentRepository
+from meta_rne.persistence.memory.operational_state_repository import (
+    InMemoryOperationalStateRepository,
+)
 from meta_rne.persistence.memory.policy_repository import InMemoryConfigurationPolicyRepository
 from meta_rne.persistence.memory.snapshot_repository import (
     InMemoryConfigurationSnapshotRepository,
@@ -46,6 +50,7 @@ _CommittedSnapshot = tuple[
     dict[str, Incident],
     dict[str, tuple[_StoredTelemetrySample, ...]],
     int,
+    dict[str, FabricOperationalState],
 ]
 
 
@@ -64,6 +69,7 @@ def _snapshot_committed_store(committed: InMemoryStore) -> _CommittedSnapshot:
             dict(committed.incidents),
             dict(committed.telemetry_samples),
             committed.telemetry_sequence,
+            dict(committed.operational_states),
         )
 
 
@@ -75,6 +81,7 @@ def _apply_snapshot_to_working_store(working: InMemoryStore, snapshot: _Committe
         working.incidents,
         working.telemetry_samples,
         working.telemetry_sequence,
+        working.operational_states,
     ) = snapshot
     # Fresh locks, never the committed store's lock instances.
     working.incidents_lock = threading.Lock()
@@ -94,6 +101,7 @@ class InMemoryUnitOfWork:
         self.configuration_policies = InMemoryConfigurationPolicyRepository(self._working_store)
         self.incidents = InMemoryIncidentRepository(self._working_store)
         self.telemetry_samples = InMemoryTelemetryRepository(self._working_store)
+        self.operational_state = InMemoryOperationalStateRepository(self._working_store)
 
     def commit(self) -> None:
         working_devices = dict(self._working_store.devices)
@@ -102,6 +110,7 @@ class InMemoryUnitOfWork:
         working_incidents = dict(self._working_store.incidents)
         working_telemetry_samples = dict(self._working_store.telemetry_samples)
         working_telemetry_sequence = self._working_store.telemetry_sequence
+        working_operational_states = dict(self._working_store.operational_states)
         with self._committed_store.publish_lock:
             self._committed_store.devices = working_devices
             self._committed_store.snapshots = working_snapshots
@@ -109,6 +118,7 @@ class InMemoryUnitOfWork:
             self._committed_store.incidents = working_incidents
             self._committed_store.telemetry_samples = working_telemetry_samples
             self._committed_store.telemetry_sequence = working_telemetry_sequence
+            self._committed_store.operational_states = working_operational_states
 
     def rollback(self) -> None:
         _apply_snapshot_to_working_store(

@@ -22,6 +22,7 @@ from meta_rne.domain.incident import (
 from meta_rne.domain.operational_state import BgpSessionState
 from meta_rne.domain.telemetry import BgpState
 from meta_rne.observability import IncidentLogEvent
+from meta_rne.persistence.errors import StaleOperationalStateError
 from meta_rne.persistence.memory.store import InMemoryStore
 from meta_rne.persistence.memory.unit_of_work import InMemoryUnitOfWork
 from operational_state_support import (
@@ -206,11 +207,13 @@ def test_unavailable_bgp_facet__creates_no_incident() -> None:
 
 
 def test_stale_collection__rolls_back_and_preserves_error() -> None:
+    # NPE-1D1A: the older collection is now rejected by the latest-state
+    # monotonicity rule before any incident logic runs.
     h = _harness()
     h.service.ingest(fixture_fabric("degraded-active", T1))
     before = _incidents(h.store)
 
-    with pytest.raises(ValueError, match="stale observation"):
+    with pytest.raises(StaleOperationalStateError):
         h.service.ingest(fixture_fabric("degraded-active", T0, collection_id="run-old"))
 
     assert _incidents(h.store) == before
@@ -372,7 +375,7 @@ def test_stale_established_observation__rolls_back_and_stays_open() -> None:
     h.service.ingest(fixture_fabric("degraded-active", T1))
     before = _incidents(h.store)
 
-    with pytest.raises(ValueError, match="stale observation"):
+    with pytest.raises(StaleOperationalStateError):
         h.service.ingest(fixture_fabric("baseline", T0, collection_id="run-old"))
 
     assert _incidents(h.store) == before

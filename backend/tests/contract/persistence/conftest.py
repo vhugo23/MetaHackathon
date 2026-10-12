@@ -44,6 +44,9 @@ def repositories(request: pytest.FixtureRequest) -> SimpleNamespace:
         def make_incidents(id_factory: Callable[[], str]) -> InMemoryIncidentRepository:
             return InMemoryIncidentRepository(store, incident_id_factory=id_factory)
 
+        from meta_rne.persistence.memory.operational_state_repository import (
+            InMemoryOperationalStateRepository,
+        )
         from meta_rne.persistence.memory.telemetry_repository import InMemoryTelemetryRepository
 
         return SimpleNamespace(
@@ -52,11 +55,15 @@ def repositories(request: pytest.FixtureRequest) -> SimpleNamespace:
             policies=InMemoryConfigurationPolicyRepository(store),
             incidents=InMemoryIncidentRepository(store),
             telemetry_samples=InMemoryTelemetryRepository(store),
+            operational_state=InMemoryOperationalStateRepository(store),
             make_incidents=make_incidents,
         )
 
     from meta_rne.persistence.sqlalchemy.device_repository import SqlAlchemyDeviceRepository
     from meta_rne.persistence.sqlalchemy.incident_repository import SqlAlchemyIncidentRepository
+    from meta_rne.persistence.sqlalchemy.operational_state_repository import (
+        SqlAlchemyOperationalStateRepository,
+    )
     from meta_rne.persistence.sqlalchemy.policy_repository import (
         SqlAlchemyConfigurationPolicyRepository,
     )
@@ -78,6 +85,7 @@ def repositories(request: pytest.FixtureRequest) -> SimpleNamespace:
         policies=SqlAlchemyConfigurationPolicyRepository(session),
         incidents=SqlAlchemyIncidentRepository(session),
         telemetry_samples=SqlAlchemyTelemetryRepository(session),
+        operational_state=SqlAlchemyOperationalStateRepository(session),
         make_incidents=make_incidents_sqlalchemy,
     )
 

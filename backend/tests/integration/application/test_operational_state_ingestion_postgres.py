@@ -16,6 +16,7 @@ from meta_rne.application.errors import DeviceNotFoundError
 from meta_rne.application.lab_device_registration import RegisterLabDevicesService
 from meta_rne.application.operational_state_ingestion import OperationalStateIngestionService
 from meta_rne.domain.operational_state import BgpSessionState
+from meta_rne.persistence.errors import StaleOperationalStateError
 from meta_rne.persistence.sqlalchemy.unit_of_work import SqlAlchemyUnitOfWork
 from operational_state_support import fixture_fabric, unavailable_fabric, with_neighbor_states
 
@@ -243,7 +244,7 @@ def test_stale_established__rolls_back_and_stays_open(
     service.ingest(fixture_fabric("degraded-active", T1))
     before = _rows(sqlalchemy_session_factory)
 
-    with pytest.raises(ValueError, match="stale observation"):
+    with pytest.raises(StaleOperationalStateError):
         service.ingest(fixture_fabric("baseline", T0, collection_id="run-old"))
 
     after = _rows(sqlalchemy_session_factory)

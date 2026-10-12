@@ -17,7 +17,7 @@ from meta_rne.domain.config import NormalizedConfiguration
 from meta_rne.domain.device import Device
 from meta_rne.domain.errors import ParseError
 from meta_rne.domain.incident import Incident, IncidentCandidate, IncidentUpsertResult
-from meta_rne.domain.operational_state import FabricOperationalState
+from meta_rne.domain.operational_state import FabricOperationalState, OperationalStateSaveOutcome
 from meta_rne.domain.policy import ConfigurationPolicy
 from meta_rne.domain.snapshot import ConfigurationSnapshot
 from meta_rne.domain.telemetry import TelemetrySample
@@ -124,6 +124,25 @@ class TelemetryRepository(Protocol):
     ) -> list[TelemetrySample]: ...
 
 
+class OperationalStateRepository(Protocol):
+    """Latest live operational state, one row per lab (NPE-1D1A).
+
+    ``save_latest`` derives the lab from the fabric's common node source
+    (``derive_fabric_source`` — an empty or mixed fabric raises) and applies
+    one atomic rule keyed on ``(lab_name, collection_id)``: a distinct,
+    strictly newer collection ``REPLACED`` (or ``CREATED``) the latest; an
+    exact replay of the stored collection is ``UNCHANGED``; an older distinct
+    collection raises ``StaleOperationalStateError``; equal timestamps with
+    different IDs, or one ``collection_id`` with a different timestamp or
+    payload, raise ``OperationalStateConflictError``. ``collection_id`` is
+    opaque and never ordered. ``get_latest`` returns ``None`` for a lab with
+    no state, and fails closed (``SerializationError``) on corrupt data."""
+
+    def save_latest(self, fabric: FabricOperationalState) -> OperationalStateSaveOutcome: ...
+
+    def get_latest(self, lab_name: str) -> FabricOperationalState | None: ...
+
+
 class UnitOfWork(Protocol):
     """One session/transaction per instance (Day 4B3's concrete
     ``SqlAlchemyUnitOfWork``); every repository below shares it."""
@@ -133,6 +152,7 @@ class UnitOfWork(Protocol):
     configuration_policies: ConfigurationPolicyRepository
     incidents: IncidentRepository
     telemetry_samples: TelemetryRepository
+    operational_state: OperationalStateRepository
 
     def commit(self) -> None: ...
     def rollback(self) -> None: ...

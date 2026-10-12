@@ -410,6 +410,90 @@ observations of the failed link differed (a read-only poll saw `Idle`; the
 ingestion collections saw `Active`); persisted evidence always matches the
 state of the collection that produced it.
 
+## Implementation status: NPE-1D1A (latest operational-state persistence)
+
+This gate makes the **latest** live operational state durable. It is
+persistence only: `NPE-1D1` (state visible to operators) is **not** complete.
+
+- **Storage.** Migration `0005_operational_state_latest` adds
+  `operational_state_latest`: one row per lab (`lab_name` TEXT primary key),
+  `collection_id` TEXT, `collected_at` TIMESTAMPTZ, `schema_version` INTEGER
+  (>= 1) and `state` JSONB (must be a JSON object), all NOT NULL, with
+  non-blank checks on `lab_name` and `collection_id`. No foreign keys, no index
+  beyond the primary key, no history table, and no change to any existing
+  table. Downgrade drops only this table.
+- **Document.** `state` holds the complete `FabricOperationalState`
+  (`schema_version` 1), encoded by a backend-owned codec
+  (`persistence/operational_state_serialization.py`, nothing imported from
+  `scripts/`). Every domain field round-trips exactly: tuples, optional
+  values, enums, `raw_state`, `UNKNOWN`, unavailable facets, addresses,
+  routes with active next hops, reachability. Malformed or unsupported JSON
+  raises `SerializationError`; nothing is defaulted. `collection_id` and
+  `collected_at` are duplicated into columns on purpose; on every read they
+  (and `lab_name`, and a single shared collector) are validated against the
+  decoded document and any disagreement fails closed rather than being
+  repaired.
+- **Source identity.** `FabricOperationalState` is unchanged. Before a fabric
+  may be persisted, `derive_fabric_source` requires a non-empty fabric whose
+  nodes all share one non-empty `lab_name` and one non-empty `collector`
+  (`EmptyFabricError`, `MixedLabNameError`, `MixedCollectorError`); the domain
+  already enforces that every node's `collection_id` / `collected_at` matches
+  the fabric. The lab is derived, never chosen from "the first node" and never
+  invented.
+- **Collection identity and ordering.** A collection is `(lab_name,
+  collection_id)`. `collection_id` stays an opaque correlation ID: it is never
+  ordered and has no global uniqueness constraint. For an existing latest row
+  of the same lab: a distinct collection with a strictly newer `collected_at`
+  replaces it (`REPLACED`; first write is `CREATED`); a distinct, older one
+  raises `StaleOperationalStateError`; a distinct one with an **equal**
+  `collected_at` raises `OperationalStateConflictError` (no truthful ordering
+  exists); the same `collection_id` with identical timestamp and state is an
+  exact idempotent replay (`UNCHANGED`); the same `collection_id` with a
+  different timestamp or different state raises `OperationalStateConflictError`
+  (a collection ID names one immutable observation). Stale and conflicting
+  observations are exceptions, not outcomes.
+- **Atomicity of the write.** `OperationalStateRepository.save_latest` is one
+  PostgreSQL `INSERT ... ON CONFLICT (lab_name) DO UPDATE ... WHERE` whose
+  predicate requires a *different* `collection_id` **and** a strictly newer
+  `collected_at`, so an older collection can never overwrite newer state and
+  the same ID with a newer timestamp is a conflict, not an update. When it
+  writes nothing, the row it conflicted with is read back inside the same
+  transaction and classified. The in-memory repository decides through the
+  same function (`decide_latest_write`) and the same shared contract tests run
+  against both. Real concurrent writers cannot regress the latest state.
+- **One transaction.** `uow.operational_state` joins both UnitOfWork
+  implementations (in-memory snapshot/commit/rollback included).
+  `OperationalStateIngestionService` derives the source, detects, validates
+  device prerequisites, saves the latest state, then upserts failure incidents
+  and resolves trustworthy recoveries, and commits **once**; events are emitted
+  only after commit. Any failure rolls the state write and every incident
+  change back together and the original exception propagates.
+- **Two intentional behavior changes, nothing else.** (1) A stale collection is
+  now rejected (`StaleOperationalStateError`) even if it would otherwise have
+  mutated no incident; previously only a stale incident-affecting observation
+  raised. (2) An **exact replay** of an already-accepted collection is a
+  whole-ingestion no-op: because the state row and the incident mutations
+  commit together, a collection already stored was already fully accepted, so
+  replaying it does not increment `occurrence_count`, advance `last_seen_at`,
+  resolve anything, rewrite the state row, or emit events. The detector's
+  anomalies are still returned; every mutation count is zero. This is distinct
+  from a **new** collection (new `collection_id`, later `collected_at`) that
+  observes the same network condition again, which still updates OPEN
+  incidents exactly as in NPE-1C3B3 and still resolves on trustworthy
+  `Established` evidence as in NPE-1C3C.
+- **CLI.** `scripts/lab_ingest_operational_state.py` remains the only (trusted)
+  write boundary and still takes no arguments. Exit codes 0-3 are unchanged;
+  new `4` means the collection was rejected as stale or conflicting
+  (nothing persisted; stderr states which). An exact replay exits as success.
+  The JSON summary gains `state_outcome` (`CREATED` / `REPLACED` /
+  `UNCHANGED`).
+- **Latest only.** No history of past states is kept; history is deferred.
+- **Not done.** No public operational-state write endpoint exists (and none is
+  planned: ingestion stays a trusted CLI). `GET /network/state` is not
+  implemented, and there are no operational-state API schemas; those are
+  `NPE-1D1B`. Topology is not stored and links are never inferred from BGP.
+  The frontend is unchanged. No RCA, remediation or AI behavior.
+
 ## Deferred
 
 - OSPF
@@ -418,7 +502,7 @@ state of the collection that produced it.
 - GRE
 - IP-in-IP
 - translation of normalized state into `TelemetrySample` (NPE-1C3B)
-- persistence of normalized state
+- history of persisted normalized state (only the latest is stored, NPE-1D1A)
 - device identity / registration of lab nodes (NPE-1C3B)
 - fault automation
 - RCA engine

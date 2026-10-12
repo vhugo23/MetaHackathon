@@ -9,10 +9,29 @@ existing ``AnomalyIncidentMapper``, fingerprinted by the existing
 No deduplication logic lives here: the repository upsert is the mechanism.
 
 This service never collects state, spawns a process, calls Docker or
-Containerlab, performs HTTP, reads a clock, persists the fabric state or any
-``TelemetrySample``, registers a device, or resolves an incident outside the
-recovery rule above. Timestamps
-come from the anomaly (``detected_at`` == ``FabricOperationalState.collected_at``).
+Containerlab, performs HTTP, reads a clock, persists any ``TelemetrySample``,
+registers a device, or resolves an incident outside the recovery rule above.
+Timestamps come from the anomaly (``detected_at`` ==
+``FabricOperationalState.collected_at``).
+
+Latest-state persistence (NPE-1D1A). The fabric itself is saved as its lab's
+latest operational state in the same transaction as the incident lifecycle
+writes, so the operator-visible state and the incident changes of one
+collection are atomic. The order is: derive the fabric's single lab identity
+(an empty or mixed fabric is rejected), detect, validate every referenced
+device, ``save_latest``, then upsert/resolve incidents, then one commit.
+
+A collection is identified by ``(lab_name, collection_id)``. The state row and
+the incident mutations commit together, so an EXACT replay of an
+already-stored collection (``OperationalStateSaveOutcome.UNCHANGED``) was
+already fully accepted: it is a whole-ingestion no-op. It does not touch
+incidents (no ``occurrence_count`` increment, no ``last_seen_at`` advance, no
+resolution, no events); the detector's anomalies are still returned. This is
+different from a NEW collection that observes the same network condition
+again, which still updates OPEN incidents. A stale or conflicting collection
+(``StaleOperationalStateError`` / ``OperationalStateConflictError``) rolls
+everything back — including when it would otherwise have caused no incident
+mutation.
 
 Every referenced device must already be registered (``RegisterLabDevicesService``
 owns that). Before anything is written, a missing device raises the existing
@@ -56,7 +75,12 @@ from meta_rne.domain.incident import (
     IncidentUpsertResult,
     compute_fingerprint,
 )
-from meta_rne.domain.operational_state import FabricOperationalState, NodeRole
+from meta_rne.domain.operational_state import (
+    FabricOperationalState,
+    NodeRole,
+    OperationalStateSaveOutcome,
+    derive_fabric_source,
+)
 from meta_rne.domain.ports import UnitOfWork
 from meta_rne.observability import IncidentEventSink, IncidentLogEvent, StdoutIncidentEventSink
 
@@ -66,6 +90,7 @@ class OperationalStateIngestionResult:
     collection_id: str
     anomalies: tuple[Anomaly, ...]
     upserts: tuple[IncidentUpsertResult, ...]
+    state_outcome: OperationalStateSaveOutcome
     incidents_created: int
     incidents_updated: int
     resolved_incidents: tuple[Incident, ...] = ()
@@ -85,7 +110,11 @@ class OperationalStateIngestionService:
 
     def ingest(self, fabric: FabricOperationalState) -> OperationalStateIngestionResult:
         uow = self._unit_of_work_factory()
+        upserts: list[IncidentUpsertResult] = []
+        resolved: list[Incident] = []
         try:
+            # Rejects an empty or mixed fabric before anything else happens.
+            derive_fabric_source(fabric)
             anomalies = OperationalStateDetector.detect(fabric)
 
             # Validate every referenced device before writing anything.
@@ -93,22 +122,25 @@ class OperationalStateIngestionService:
                 if uow.devices.get_by_id(device_id) is None:
                     raise DeviceNotFoundError(device_id)
 
-            upserts: list[IncidentUpsertResult] = []
-            for anomaly in anomalies:
-                candidate = AnomalyIncidentMapper.build_candidate(anomaly)
-                fingerprint = compute_fingerprint(
-                    candidate.device_id,
-                    candidate.source,
-                    candidate.rule_ref,
-                    candidate.affected_resource,
-                )
-                upserts.append(
-                    uow.incidents.upsert_open_incident(
-                        candidate, fingerprint, candidate.observed_at
-                    )
-                )
+            state_outcome = uow.operational_state.save_latest(fabric)
 
-            resolved = self._recover(uow, fabric, upserts)
+            # An exact replay of an already-accepted collection mutates no
+            # incident: its effects were committed together with its state.
+            if state_outcome is not OperationalStateSaveOutcome.UNCHANGED:
+                for anomaly in anomalies:
+                    candidate = AnomalyIncidentMapper.build_candidate(anomaly)
+                    fingerprint = compute_fingerprint(
+                        candidate.device_id,
+                        candidate.source,
+                        candidate.rule_ref,
+                        candidate.affected_resource,
+                    )
+                    upserts.append(
+                        uow.incidents.upsert_open_incident(
+                            candidate, fingerprint, candidate.observed_at
+                        )
+                    )
+                resolved = self._recover(uow, fabric, upserts)
 
             uow.commit()
         except Exception as original_error:
@@ -128,6 +160,7 @@ class OperationalStateIngestionService:
                 collection_id=fabric.collection_id,
                 anomalies=anomalies,
                 upserts=tuple(upserts),
+                state_outcome=state_outcome,
                 incidents_created=sum(
                     1 for upsert in upserts if upsert.outcome is IncidentUpsertOutcome.CREATED
                 ),

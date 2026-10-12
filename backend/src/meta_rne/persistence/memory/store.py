@@ -35,6 +35,10 @@ mutated in place — a ``list`` value would let two shallow-copied dicts share
 (and corrupt) the same underlying mutable object. ``_StoredTelemetrySample``
 is repository-internal metadata (an ``insertion_sequence`` tie-breaker) and
 is never merged into the domain ``TelemetrySample`` dataclass itself.
+
+``operational_states`` (NPE-1D1A) maps ``lab_name`` to that lab's latest
+``FabricOperationalState`` (frozen, replaced whole, so the shallow-copy idiom
+is safe) and participates in ``InMemoryUnitOfWork`` snapshot/commit/rollback.
 """
 
 import threading
@@ -42,6 +46,7 @@ from dataclasses import dataclass, field
 
 from meta_rne.domain.device import Device
 from meta_rne.domain.incident import Incident
+from meta_rne.domain.operational_state import FabricOperationalState
 from meta_rne.domain.policy import ConfigurationPolicy
 from meta_rne.domain.snapshot import ConfigurationSnapshot
 from meta_rne.domain.telemetry import TelemetrySample
@@ -63,3 +68,4 @@ class InMemoryStore:
     publish_lock: threading.Lock = field(default_factory=threading.Lock)
     telemetry_samples: dict[str, tuple[_StoredTelemetrySample, ...]] = field(default_factory=dict)
     telemetry_sequence: int = 0
+    operational_states: dict[str, FabricOperationalState] = field(default_factory=dict)

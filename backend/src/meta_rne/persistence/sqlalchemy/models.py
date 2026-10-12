@@ -181,4 +181,25 @@ class _TelemetrySampleModel(_Base):
     )
 
 
+class _OperationalStateLatestModel(_Base):
+    __tablename__ = "operational_state_latest"
+
+    lab_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    collection_id: Mapped[str] = mapped_column(Text, nullable=False)
+    collected_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("btrim(lab_name) <> ''", name="ck_operational_state_latest_lab_name"),
+        CheckConstraint(
+            "btrim(collection_id) <> ''", name="ck_operational_state_latest_collection_id"
+        ),
+        CheckConstraint("schema_version >= 1", name="ck_operational_state_latest_schema_version"),
+        CheckConstraint(
+            "jsonb_typeof(state) = 'object'", name="ck_operational_state_latest_state_object"
+        ),
+    )
+
+
 metadata = _Base.metadata

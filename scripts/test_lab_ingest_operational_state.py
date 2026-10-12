@@ -58,7 +58,11 @@ def _run(
     runner: Any,
     argv: list[str] | None = None,
     now: datetime = NOW,
+    collection_id: str | None = None,
 ) -> tuple[int, str, str]:
+    # One collection per instant unless told otherwise: the same ``now`` is an
+    # exact replay of the same collection, a different one is a new collection.
+    run_id = collection_id or f"run-{now.isoformat()}"
     out, err = io.StringIO(), io.StringIO()
     with redirect_stdout(out), redirect_stderr(err):
         code = lios.main(
@@ -66,7 +70,7 @@ def _run(
             environ={},
             runner=runner,
             clock=lambda: now,
-            collection_id_factory=lambda: "run-1",
+            collection_id_factory=lambda: run_id,
             unit_of_work_factory=lambda: InMemoryUnitOfWork(store),
         )
     return code, out.getvalue(), err.getvalue()
@@ -176,6 +180,100 @@ class Main(unittest.TestCase):
                 incident.pop("incident_id")  # generated, not deterministic
         self.assertEqual(first_document, second_document)
 
+    def test_ingestion_persists_the_latest_operational_state(self) -> None:
+        store = _registered_store()
+        code, out, _ = _run(store, fixture_runner("degraded-active"))
+
+        self.assertEqual(code, lios.EXIT_INGESTED)
+        self.assertEqual(json.loads(out)["state_outcome"], "CREATED")
+        self.assertEqual(list(store.operational_states), ["meta-rne-bgp"])
+        latest = store.operational_states["meta-rne-bgp"]
+        self.assertEqual(latest.collected_at, NOW)
+        self.assertEqual(latest.collection_id, f"run-{NOW.isoformat()}")
+
+        code, out, _ = _run(
+            store, fixture_runner("baseline"), now=NOW + timedelta(seconds=30)
+        )
+        self.assertEqual(json.loads(out)["state_outcome"], "REPLACED")
+        self.assertEqual(
+            store.operational_states["meta-rne-bgp"].collected_at,
+            NOW + timedelta(seconds=30),
+        )
+
+    def test_exact_replay_is_a_successful_whole_ingestion_no_op(self) -> None:
+        store = _registered_store()
+        _run(store, fixture_runner("degraded-active"))
+        incidents_before = dict(store.incidents)
+
+        code, out, err = _run(store, fixture_runner("degraded-active"))
+
+        document = json.loads(out)
+        self.assertEqual(code, lios.EXIT_INGESTED)
+        self.assertEqual(document["state_outcome"], "UNCHANGED")
+        self.assertEqual(document["anomaly_count"], 2)  # still reported
+        self.assertEqual(document["incidents_created"], 0)
+        self.assertEqual(document["incidents_updated"], 0)
+        self.assertEqual(document["incidents_resolved"], 0)
+        self.assertEqual(document["incidents"], [])
+        self.assertEqual(store.incidents, incidents_before)
+        for incident in store.incidents.values():
+            self.assertEqual(incident.occurrence_count, 1)
+        self.assertEqual(err.strip(), "")  # no duplicate incident events
+
+    def test_stale_collection_exits_4_and_persists_nothing(self) -> None:
+        store = _registered_store()
+        _run(store, fixture_runner("degraded-active"), now=NOW + timedelta(seconds=30))
+        state_before = dict(store.operational_states)
+        incidents_before = dict(store.incidents)
+
+        code, out, err = _run(store, fixture_runner("baseline"), now=NOW)
+
+        self.assertEqual(code, lios.EXIT_STATE_REJECTED)
+        self.assertEqual(lios.EXIT_STATE_REJECTED, 4)
+        self.assertEqual(out, "")
+        self.assertIn("stale operational state", err)
+        self.assertNotIn("internal error", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(store.operational_states, state_before)
+        self.assertEqual(store.incidents, incidents_before)
+
+    def test_conflicting_collection_exits_4_with_a_distinct_message(self) -> None:
+        store = _registered_store()
+        _run(store, fixture_runner("degraded-active"), collection_id="run-a")
+        state_before = dict(store.operational_states)
+
+        # Different collection_id, identical collected_at: no truthful ordering.
+        code, out, err = _run(
+            store, fixture_runner("baseline"), collection_id="run-b"
+        )
+
+        self.assertEqual(code, lios.EXIT_STATE_REJECTED)
+        self.assertEqual(out, "")
+        self.assertIn("conflicting operational state", err)
+        self.assertNotIn("stale", err)
+        self.assertEqual(store.operational_states, state_before)
+
+    def test_same_collection_id_with_other_content_exits_4(self) -> None:
+        store = _registered_store()
+        _run(store, fixture_runner("degraded-active"), collection_id="run-a")
+
+        code, out, err = _run(
+            store, fixture_runner("baseline"), collection_id="run-a"
+        )
+
+        self.assertEqual(code, lios.EXIT_STATE_REJECTED)
+        self.assertIn("conflicting operational state", err)
+
+    def test_exit_codes_are_distinct(self) -> None:
+        codes = [
+            lios.EXIT_INGESTED,
+            lios.EXIT_INCOMPLETE,
+            lios.EXIT_ERROR,
+            lios.EXIT_DEVICE_NOT_REGISTERED,
+            lios.EXIT_STATE_REJECTED,
+        ]
+        self.assertEqual(codes, [0, 1, 2, 3, 4])
+
     def test_unregistered_device_exits_3_and_persists_nothing(self) -> None:
         store = _registered_store(("lab1-leaf-1", "lab1-spine-2", "lab1-leaf-2"))
         code, out, err = _run(store, fixture_runner("degraded-active"))
@@ -184,6 +282,7 @@ class Main(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("lab_register_devices.py", err)
         self.assertEqual(store.incidents, {})
+        self.assertEqual(store.operational_states, {})
 
     def test_unavailable_facet_exits_1_and_creates_no_incident(self) -> None:
         store = _registered_store()

@@ -310,3 +310,57 @@ class FabricOperationalState:
             if node.node_id == node_id:
                 return node
         raise KeyError(node_id)
+
+
+class FabricSourceError(ValueError):
+    """A ``FabricOperationalState`` has no single, truthful collection source,
+    so no lab identity can be derived for it (NPE-1D1A)."""
+
+
+class EmptyFabricError(FabricSourceError):
+    """The fabric carries no nodes, so it names no lab."""
+
+
+class MixedLabNameError(FabricSourceError):
+    """Nodes in one fabric report different ``source.lab_name`` values."""
+
+
+class MixedCollectorError(FabricSourceError):
+    """Nodes in one fabric report different ``source.collector`` values."""
+
+
+@dataclass(frozen=True, slots=True)
+class FabricSourceIdentity:
+    lab_name: str
+    collector: str
+
+
+def derive_fabric_source(fabric: FabricOperationalState) -> FabricSourceIdentity:
+    """The one ``lab_name`` / ``collector`` every node of ``fabric`` shares.
+
+    ``FabricOperationalState`` itself accepts an empty or mixed fabric, so a
+    fabric must pass this check before it may be persisted as a lab's latest
+    state. Nothing is guessed: an empty or mixed fabric raises rather than
+    yielding an arbitrary first-node value. (``collection_id`` and
+    ``collected_at`` agreement with the fabric is already enforced by
+    ``FabricOperationalState.__post_init__``.)"""
+    if not fabric.nodes:
+        raise EmptyFabricError("a fabric with no nodes names no lab and cannot be persisted")
+    lab_names = {node.source.lab_name for node in fabric.nodes}
+    if len(lab_names) != 1:
+        raise MixedLabNameError(f"fabric nodes report different lab names: {sorted(lab_names)!r}")
+    collectors = {node.source.collector for node in fabric.nodes}
+    if len(collectors) != 1:
+        raise MixedCollectorError(
+            f"fabric nodes report different collectors: {sorted(collectors)!r}"
+        )
+    return FabricSourceIdentity(lab_name=lab_names.pop(), collector=collectors.pop())
+
+
+class OperationalStateSaveOutcome(StrEnum):
+    """Successful results of ``OperationalStateRepository.save_latest``.
+    A stale or conflicting observation is an exception, never an outcome."""
+
+    CREATED = "CREATED"
+    REPLACED = "REPLACED"
+    UNCHANGED = "UNCHANGED"

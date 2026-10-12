@@ -358,3 +358,39 @@ def test_in_memory_unit_of_work__existing_device_commit_rollback_behavior_is_unc
     assert committed.snapshots == {}
     assert committed.policies == {}
     assert committed.incidents == {}
+
+
+def test_in_memory_unit_of_work__operational_state_participates_in_commit_and_isolation() -> None:
+    from operational_state_support import rich_fixture_fabric
+
+    committed = InMemoryStore()
+    uow = InMemoryUnitOfWork(committed)
+    fabric = rich_fixture_fabric("baseline", T0)
+    uow.operational_state.save_latest(fabric)
+
+    assert InMemoryUnitOfWork(committed).operational_state.get_latest("lab1") is None
+    assert committed.operational_states == {}
+
+    uow.commit()
+
+    assert committed.operational_states == {"lab1": fabric}
+    assert InMemoryUnitOfWork(committed).operational_state.get_latest("lab1") == fabric
+
+
+def test_in_memory_unit_of_work__operational_state_rollback_restores_committed_state() -> None:
+    from operational_state_support import rich_fixture_fabric
+
+    committed = InMemoryStore()
+    first = InMemoryUnitOfWork(committed)
+    previous = rich_fixture_fabric("baseline", T0, "run-1")
+    first.operational_state.save_latest(previous)
+    first.commit()
+
+    second = InMemoryUnitOfWork(committed)
+    second.operational_state.save_latest(
+        rich_fixture_fabric("degraded-active", T0.replace(minute=5), "run-2")
+    )
+    second.rollback()
+
+    assert second.operational_state.get_latest("lab1") == previous
+    assert committed.operational_states == {"lab1": previous}

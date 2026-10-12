@@ -2,7 +2,7 @@
 
 Constructed from a ``session_factory: Callable[[], Session]`` — never an
 already-created ``Session`` — so it fully owns the Session it creates and
-gives that same Session to all four repositories, letting one transaction
+gives that same Session to every repository, letting one transaction
 span every write inside one ``UnitOfWork`` (architecture.md Section 11.1).
 ``commit()`` calls the real ``Session.commit()``; on any exception it rolls
 back and re-raises the original exception unchanged (never swallowed or
@@ -16,6 +16,9 @@ from sqlalchemy.orm import Session
 
 from meta_rne.persistence.sqlalchemy.device_repository import SqlAlchemyDeviceRepository
 from meta_rne.persistence.sqlalchemy.incident_repository import SqlAlchemyIncidentRepository
+from meta_rne.persistence.sqlalchemy.operational_state_repository import (
+    SqlAlchemyOperationalStateRepository,
+)
 from meta_rne.persistence.sqlalchemy.policy_repository import (
     SqlAlchemyConfigurationPolicyRepository,
 )
@@ -33,6 +36,7 @@ class SqlAlchemyUnitOfWork:
         self.configuration_policies = SqlAlchemyConfigurationPolicyRepository(self._session)
         self.incidents = SqlAlchemyIncidentRepository(self._session)
         self.telemetry_samples = SqlAlchemyTelemetryRepository(self._session)
+        self.operational_state = SqlAlchemyOperationalStateRepository(self._session)
 
     def commit(self) -> None:
         try:
