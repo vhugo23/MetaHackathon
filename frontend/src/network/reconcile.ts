@@ -1,3 +1,4 @@
+import type { NetworkDiagnosisResponse } from "../api/networkDiagnosisTypes";
 import type { NetworkStateResponse } from "../api/networkStateTypes";
 
 /**
@@ -16,6 +17,29 @@ export function reconcileNetworkState(
   current: NetworkStateResponse | null,
   incoming: NetworkStateResponse,
 ): NetworkStateResponse {
+  if (current === null) {
+    return incoming;
+  }
+  const currentAt = Date.parse(current.collected_at);
+  const incomingAt = Date.parse(incoming.collected_at);
+  if (incomingAt > currentAt) {
+    return incoming;
+  }
+  if (incomingAt < currentAt) {
+    return current;
+  }
+  return incoming.collection_id === current.collection_id ? incoming : current;
+}
+
+/**
+ * Same rule for GET /network/diagnosis responses: parsed collected_at instants
+ * decide; an older response never replaces a newer one, and the same instant
+ * with a different collection_id keeps the current response.
+ */
+export function reconcileNetworkDiagnosis(
+  current: NetworkDiagnosisResponse | null,
+  incoming: NetworkDiagnosisResponse,
+): NetworkDiagnosisResponse {
   if (current === null) {
     return incoming;
   }

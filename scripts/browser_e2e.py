@@ -163,8 +163,24 @@ SEED_SUPPORT_MODULE = REPO_ROOT / "backend" / "tests" / "operational_state_suppo
 SEED_FIXTURES_DIR = REPO_ROOT / "backend" / "tests" / "fixtures" / "containerlab_frr"
 
 
+def seed_run_command(project_name: str, scenario: str = "baseline") -> list[str]:
+    """The one `exec` that runs the already-copied seed for `scenario`."""
+    command = compose_command(
+        project_name,
+        "exec",
+        "-T",
+        "api",
+        "python",
+        f"{SEED_REMOTE_DIR}/{SEED_SCRIPT.name}",
+    )
+    if scenario != "baseline":
+        command += ["--scenario", scenario]
+    return command
+
+
 def seed_commands(project_name: str) -> list[list[str]]:
-    """The exact, project-scoped, api-service-only command sequence."""
+    """The exact, project-scoped, api-service-only command sequence that
+    copies the seed sources into the api container and seeds the baseline."""
     return [
         compose_command(
             project_name, "exec", "-T", "api", "mkdir", "-p", f"{SEED_REMOTE_DIR}/fixtures"
@@ -174,19 +190,13 @@ def seed_commands(project_name: str) -> list[list[str]]:
         compose_command(
             project_name, "cp", str(SEED_FIXTURES_DIR), f"api:{SEED_REMOTE_DIR}/fixtures/"
         ),
-        compose_command(
-            project_name,
-            "exec",
-            "-T",
-            "api",
-            "python",
-            f"{SEED_REMOTE_DIR}/{SEED_SCRIPT.name}",
-        ),
+        seed_run_command(project_name),
     ]
 
 
-def parse_seed_result(stdout: str) -> dict[str, Any]:
-    """The seed prints one JSON line; anything but a fresh CREATED is a failure."""
+def parse_seed_result(stdout: str, expected_outcome: str = "CREATED") -> dict[str, Any]:
+    """The seed prints one JSON line; anything but `expected_outcome` is a
+    failure (a fresh baseline is CREATED, the later degraded state REPLACED)."""
     lines = [line for line in stdout.splitlines() if line.strip()]
     if not lines:
         raise BrowserE2EError("network-state seed printed no result")
@@ -194,9 +204,44 @@ def parse_seed_result(stdout: str) -> dict[str, Any]:
         result: Any = json.loads(lines[-1])
     except json.JSONDecodeError as exc:
         raise BrowserE2EError(f"network-state seed result is not JSON: {lines[-1]!r}") from exc
-    if not isinstance(result, dict) or result.get("state_outcome") != "CREATED":
-        raise BrowserE2EError(f"network-state seed did not create the baseline: {result!r}")
+    if not isinstance(result, dict) or result.get("state_outcome") != expected_outcome:
+        raise BrowserE2EError(
+            f"network-state seed did not report {expected_outcome}: {result!r}"
+        )
     return result
+
+
+# --------------------------------------------------------------------------
+# Two-phase Playwright run (NPE-1E1C)
+#
+# Phase 1 runs every spec against the seeded healthy baseline. Phase 2 re-seeds
+# the captured `leaf-1 eth1 down` state through the same real ingestion path
+# and runs only the specs tagged RCA_DEGRADED_TAG, against the real
+# GET /network/diagnosis. No Playwright route mocking, no control plane.
+# --------------------------------------------------------------------------
+
+RCA_DEGRADED_TAG = "@rca-degraded"
+
+
+def playwright_phase_args(degraded: bool) -> list[str]:
+    """Extra args passed after `--` to `npm run test:e2e:direct`."""
+    return ["--grep", RCA_DEGRADED_TAG] if degraded else ["--grep-invert", RCA_DEGRADED_TAG]
+
+
+def verify_degraded_diagnosis(body: Any) -> None:
+    """Orchestration sanity check on the real GET /network/diagnosis body."""
+    diagnoses = body.get("diagnoses") if isinstance(body, dict) else None
+    if not isinstance(diagnoses, list) or len(diagnoses) != 1:
+        raise BrowserE2EError(f"expected exactly one seeded diagnosis, got: {body!r}")
+    diagnosis = diagnoses[0]
+    linked = diagnosis.get("linked_incidents") if isinstance(diagnosis, dict) else None
+    if (
+        diagnosis.get("diagnosis_type") != "PHYSICAL_LINK_FAILURE"
+        or diagnosis.get("confidence") != "HIGH"
+        or not isinstance(linked, list)
+        or len(linked) != 2
+    ):
+        raise BrowserE2EError(f"seeded diagnosis is not the expected one: {diagnosis!r}")
 
 
 def vite_preview_command(frontend_dir: Path, port: int) -> list[str]:
@@ -579,14 +624,41 @@ def run_browser_e2e(config: BrowserE2EConfig) -> int:
                 frontend_reservation.port, time.monotonic() + config.timeout, preview_process
             )
 
-            _log("running the Playwright browser test against the real stack")
             playwright_env = {**os.environ, "PLAYWRIGHT_BASE_URL": runtime_env["PLAYWRIGHT_BASE_URL"]}
-            playwright_result = subprocess.run(
-                [npm_executable, "run", "test:e2e:direct"],
+
+            _log("running Playwright phase 1 (healthy baseline) against the real stack")
+            phase1 = subprocess.run(
+                [npm_executable, "run", "test:e2e:direct", "--", *playwright_phase_args(False)],
                 cwd=FRONTEND_DIR,
                 env=playwright_env,
             )
-            exit_code = playwright_result.returncode
+            exit_code = phase1.returncode
+
+            if exit_code == 0:
+                _log("seeding the degraded state (real ingestion path) for the RCA phase")
+                degraded = run_subprocess(
+                    seed_run_command(config.project_name, "degraded"),
+                    cwd=REPO_ROOT,
+                    env=compose_env,
+                    timeout=max(config.timeout, 60),
+                )
+                parse_seed_result(degraded.stdout, expected_outcome="REPLACED")
+                diagnosis_status, diagnosis_raw = _http_get(
+                    f"http://127.0.0.1:{api_reservation.port}/network/diagnosis", timeout=10
+                )
+                if diagnosis_status != 200:
+                    raise BrowserE2EError(
+                        f"GET /network/diagnosis returned {diagnosis_status} after degraded seed"
+                    )
+                verify_degraded_diagnosis(json.loads(diagnosis_raw))
+
+                _log("running Playwright phase 2 (degraded RCA) against the real stack")
+                phase2 = subprocess.run(
+                    [npm_executable, "run", "test:e2e:direct", "--", *playwright_phase_args(True)],
+                    cwd=FRONTEND_DIR,
+                    env=playwright_env,
+                )
+                exit_code = phase2.returncode
         except BrowserE2EError as exc:
             orchestration_error = exc
             _log(f"ORCHESTRATION FAILURE: {exc}")

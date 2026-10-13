@@ -247,6 +247,63 @@ class NetworkStateSeedTests(unittest.TestCase):
                     browser_e2e.parse_seed_result(bad)
 
 
+class DegradedSeedAndPhaseTests(unittest.TestCase):
+    """NPE-1E1C: the real-backend RCA scenario is seeded, never mocked."""
+
+    def test_seed_run_command__baseline_is_unchanged(self) -> None:
+        command = browser_e2e.seed_run_command("meta-rne-browser-e2e-abcd1234")
+        self.assertEqual(command[-1], "/tmp/e2e-seed/seed_e2e_network_state.py")
+        self.assertNotIn("--scenario", command)
+
+    def test_seed_run_command__degraded_is_project_scoped_api_only(self) -> None:
+        command = browser_e2e.seed_run_command("meta-rne-browser-e2e-abcd1234", "degraded")
+        self.assertEqual(
+            command[:4],
+            ["docker", "compose", "--project-name", "meta-rne-browser-e2e-abcd1234"],
+        )
+        self.assertEqual(command[4:8], ["exec", "-T", "api", "python"])
+        self.assertEqual(command[-2:], ["--scenario", "degraded"])
+        self.assertNotIn("deploy", command)
+
+    def test_parse_seed_result__degraded_must_replace_the_baseline(self) -> None:
+        ok = '{"state_outcome": "REPLACED", "collection_id": "browser-e2e-degraded"}'
+        self.assertEqual(
+            browser_e2e.parse_seed_result(ok, expected_outcome="REPLACED")["state_outcome"],
+            "REPLACED",
+        )
+        with self.assertRaises(browser_e2e.BrowserE2EError):
+            browser_e2e.parse_seed_result(ok)  # default expects a fresh CREATED
+
+    def test_playwright_phases__are_complementary_by_tag(self) -> None:
+        self.assertEqual(browser_e2e.playwright_phase_args(False), ["--grep-invert", "@rca-degraded"])
+        self.assertEqual(browser_e2e.playwright_phase_args(True), ["--grep", "@rca-degraded"])
+
+    def test_verify_degraded_diagnosis__accepts_the_expected_diagnosis(self) -> None:
+        browser_e2e.verify_degraded_diagnosis(
+            {
+                "diagnoses": [
+                    {
+                        "diagnosis_type": "PHYSICAL_LINK_FAILURE",
+                        "confidence": "HIGH",
+                        "linked_incidents": [{}, {}],
+                    }
+                ]
+            }
+        )
+
+    def test_verify_degraded_diagnosis__rejects_anything_else(self) -> None:
+        bad_bodies = (
+            None,
+            {"diagnoses": []},
+            {"diagnoses": [{"diagnosis_type": "BGP_SESSION_FAILURE", "confidence": "HIGH", "linked_incidents": [{}, {}]}]},
+            {"diagnoses": [{"diagnosis_type": "PHYSICAL_LINK_FAILURE", "confidence": "HIGH", "linked_incidents": [{}]}]},
+        )
+        for body in bad_bodies:
+            with self.subTest(body=body):
+                with self.assertRaises(browser_e2e.BrowserE2EError):
+                    browser_e2e.verify_degraded_diagnosis(body)
+
+
 class NpmExecutableResolutionTests(unittest.TestCase):
     def test_resolve_npm_executable__windows(self) -> None:
         self.assertEqual(browser_e2e.resolve_npm_executable("Windows"), "npm.cmd")

@@ -1,5 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { healthyDiagnosis } from "../test/diagnosisFixtures";
 import { BASELINE_NETWORK_STATE, failureIncidents, jsonResponse } from "../test/networkFixtures";
 import { LIVE_REFRESH_INTERVAL_MS, useLiveNetworkWorkspace } from "./useLiveNetworkWorkspace";
 
@@ -171,4 +172,47 @@ test("unmount clears the timer and aborts in-flight requests", async () => {
   await vi.advanceTimersByTimeAsync(LIVE_REFRESH_INTERVAL_MS * 3);
   expect(net.count("/network/state")).toBe(1);
   expect(net.count("/incidents")).toBe(1);
+});
+
+test("each interval tick also re-reads GET /network/diagnosis, on the same 5 s cadence", async () => {
+  const net = parkedFetchByPath();
+  renderHook(() => useLiveNetworkWorkspace());
+  expect(net.count("/network/diagnosis")).toBe(1);
+  await flush(() => {
+    net.last("/network/state").settle(jsonResponse(BASELINE_NETWORK_STATE));
+    net.last("/network/diagnosis").settle(jsonResponse(healthyDiagnosis()));
+    net.last("/incidents").settle(jsonResponse(failureIncidents()));
+  });
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(LIVE_REFRESH_INTERVAL_MS);
+  });
+  expect(net.count("/network/diagnosis")).toBe(2);
+});
+
+test("a diagnosis request still in flight is not overlapped by a tick", async () => {
+  const net = parkedFetchByPath();
+  renderHook(() => useLiveNetworkWorkspace());
+  await flush(() => {
+    net.last("/network/state").settle(jsonResponse(BASELINE_NETWORK_STATE));
+    net.last("/incidents").settle(jsonResponse(failureIncidents()));
+    // The diagnosis request is deliberately left unsettled.
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(LIVE_REFRESH_INTERVAL_MS * 3);
+  });
+  expect(net.count("/network/diagnosis")).toBe(1);
+  expect(net.count("/network/state")).toBe(2); // only the first tick; later ones are in flight
+});
+
+test("unmount stops all three pollers and aborts the diagnosis request", async () => {
+  const net = parkedFetchByPath();
+  const { unmount } = renderHook(() => useLiveNetworkWorkspace());
+  unmount();
+  expect(net.last("/network/diagnosis").signal.aborted).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(LIVE_REFRESH_INTERVAL_MS * 3);
+  });
+  expect(net.count("/network/diagnosis")).toBe(1);
 });

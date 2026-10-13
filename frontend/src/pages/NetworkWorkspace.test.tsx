@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { NetworkStateResponse } from "../api/networkStateTypes";
 import type { IncidentResponse } from "../api/types";
 import { LAB1_LINKS } from "../network/lab1Topology";
+import { diagnosisResponse } from "../test/diagnosisFixtures";
 import {
   BASELINE_NETWORK_STATE,
   DEGRADED_NETWORK_STATE,
@@ -19,11 +20,19 @@ import { NetworkWorkspace } from "./NetworkWorkspace";
 
 type Responder = () => Response | Promise<Response>;
 
-function stubApi(routes: { network: Responder; incidents: Responder }) {
+function stubApi(routes: { network: Responder; incidents: Responder; diagnosis?: Responder }) {
   const fetchMock = vi.fn().mockImplementation((url: string) => {
     const path = new URL(url).pathname;
     if (path === "/network/state") {
       return Promise.resolve(routes.network());
+    }
+    if (path === "/network/diagnosis") {
+      // Default: an empty diagnosis for whatever the test serves as state.
+      return Promise.resolve(
+        routes.diagnosis === undefined
+          ? jsonResponse(diagnosisResponse([], { collection_id: "unaligned-default" }))
+          : routes.diagnosis(),
+      );
     }
     if (path === "/incidents") {
       return Promise.resolve(routes.incidents());
@@ -89,11 +98,11 @@ describe("healthy baseline", () => {
     expect(card("Presentation status")).toHaveTextContent("Healthy");
   });
 
-  test("does not render root-cause or remediation language", async () => {
+  test("does not render remediation language (RCA lives only in its own panel)", async () => {
     stubOk(DEGRADED_NETWORK_STATE, failureIncidents());
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
-    expect(document.body.textContent).not.toMatch(/root cause|remediat/i);
+    expect(document.body.textContent).not.toMatch(/remediat/i);
   });
 });
 
@@ -491,13 +500,15 @@ describe("existing incident actions remain available", () => {
     expect(await screen.findByText("RESOLVED", { selector: ".badge" })).toBeInTheDocument();
   });
 
-  test("the workspace issues only GET /network/state, GET /incidents and the resolve POST", async () => {
+  test("the workspace issues only GET /network/state, /network/diagnosis, /incidents and the resolve POST", async () => {
     const fetchMock = stubOk(BASELINE_NETWORK_STATE);
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
     const requests = fetchMock.mock.calls.map(
       ([url, init]) => `${(init as RequestInit).method} ${new URL(url as string).pathname}`,
     );
-    expect(new Set(requests)).toEqual(new Set(["GET /network/state", "GET /incidents"]));
+    expect(new Set(requests)).toEqual(
+      new Set(["GET /network/state", "GET /network/diagnosis", "GET /incidents"]),
+    );
   });
 });

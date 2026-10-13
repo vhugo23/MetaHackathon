@@ -528,7 +528,6 @@ D1B exposes the D1A latest state read-only and nothing else:
 - device identity / registration of lab nodes (NPE-1C3B)
 - fault automation
 - diagnosis persistence and history
-- frontend RCA presentation (NPE-1E1C)
 - remediation engine
 - AI operator copilot
 - evaluation harness
@@ -600,8 +599,8 @@ the engine and nothing that calls it.
 
 ## Implementation status: NPE-1E1B (RCA application correlation and read API)
 
-Backend-only. NPE-1E1 as a whole is **not** complete: the frontend (NPE-1E1C)
-and remediation are still deferred.
+Backend-only. The frontend presentation followed in NPE-1E1C (below);
+remediation is still deferred.
 
 - **On-demand, read-only.** `GetNetworkDiagnosisService` (one `UnitOfWork`, no
   commit) loads the latest `FabricOperationalState`, runs the pure
@@ -623,3 +622,32 @@ and remediation are still deferred.
   still appears at unchanged confidence; incident lifecycle (e.g. both incidents
   manually resolved while the link is still down) never changes a diagnosis.
 - **Not done.** No frontend change (NPE-1E1C), no remediation, no AI.
+
+## Implementation status: NPE-1E1C (frontend RCA presentation)
+
+Frontend-only presentation of the existing read-only `GET /network/diagnosis`
+inside the live operator workspace. No backend, RCA-rule, incident-semantics,
+persistence, migration, remediation or AI change.
+
+- **Backend-authoritative.** Diagnosis type, confidence and evidence come only
+  from the API; the frontend never derives them from network state. Types and a
+  strict runtime guard (`networkDiagnosisTypes.ts`) reject unknown enum values,
+  mismatched evidence shapes and a non-null confidence on `INSUFFICIENT_EVIDENCE`.
+- **Same polling model.** `useNetworkDiagnosis` re-reads every 5 s alongside
+  state and incidents: a tick skips an in-flight request, superseded or
+  post-unmount responses are ignored, and an older `collected_at` never replaces
+  a newer one.
+- **Snapshot alignment.** A diagnosis is shown as current only when its
+  `collection_id` equals the displayed state's; otherwise the panel shows
+  "Diagnosis updating" and nothing (no card, no link mark) is cross-correlated.
+- **Presentation.** One card per diagnosis in API order (no re-ranking, no
+  percentages), the declared link from the structured endpoints, evidence grouped
+  Supports / Contradicts / Unknown behind a native disclosure, and linked
+  incidents as "Correlated symptoms". The matching declared link is marked in the
+  topology and the physical-link table; an unmatched resource is never guessed,
+  and a BGP-session diagnosis is labelled distinctly from a physical-link one.
+- **Failures stay local.** A diagnosis error or 404 only affects the RCA panel.
+- **Browser E2E.** The real backend is seeded through the real ingestion path
+  (healthy baseline, then the captured `leaf-1 eth1 down` state with its two
+  incidents); nothing is mocked.
+- **Not done.** No diagnosis persistence or history, no remediation, no AI.

@@ -1,6 +1,8 @@
 import type { BgpAdjacencyPresentation, PhysicalLinkPresentation } from "../../network/derive";
+import { confidenceText, type DiagnosisLinkMark } from "../../network/diagnosisView";
 import {
   adjacencyPresentation,
+  diagnosisTypePresentation,
   interfaceReasonText,
   bgpEndpointPresentation,
   physicalPresentation,
@@ -10,6 +12,8 @@ import { StateBadge } from "./StateBadge";
 interface PhysicalLinkTableProps {
   links: PhysicalLinkPresentation[];
   adjacencies: BgpAdjacencyPresentation[];
+  /** Backend RCA marks keyed by declared-link id (separate from observed state). */
+  diagnosisMarks?: ReadonlyMap<string, readonly DiagnosisLinkMark[]>;
 }
 
 /**
@@ -17,7 +21,7 @@ interface PhysicalLinkTableProps {
  * (interface-derived) state and, for router-to-router links, the separate
  * BGP adjacency state with each endpoint's actual session state.
  */
-export function PhysicalLinkTable({ links, adjacencies }: PhysicalLinkTableProps) {
+export function PhysicalLinkTable({ links, adjacencies, diagnosisMarks }: PhysicalLinkTableProps) {
   const adjacencyByLink = new Map(adjacencies.map((a) => [a.link.id, a]));
 
   return (
@@ -34,11 +38,23 @@ export function PhysicalLinkTable({ links, adjacencies }: PhysicalLinkTableProps
         <tbody>
           {links.map((entry) => {
             const adjacency = adjacencyByLink.get(entry.link.id);
+            const marks = diagnosisMarks?.get(entry.link.id) ?? [];
             return (
               <tr key={entry.link.id}>
                 <th scope="row">
                   {entry.link.a.node}:{entry.link.a.interface} ↔ {entry.link.b.node}:
                   {entry.link.b.interface}
+                  {marks.map((mark, index) => (
+                    <span
+                      key={`${mark.type}:${index}`}
+                      className="cell-note rca-marker"
+                      data-testid="rca-marker"
+                    >
+                      {mark.type === "INSUFFICIENT_EVIDENCE" ? "RCA" : "Probable root cause"}:{" "}
+                      {diagnosisTypePresentation(mark.type).label} ·{" "}
+                      {confidenceText(mark.confidence)}
+                    </span>
+                  ))}
                 </th>
                 <td>
                   <StateBadge presentation={physicalPresentation(entry.state)} />

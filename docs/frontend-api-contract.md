@@ -713,15 +713,19 @@ the only write, and the browser never collects, ingests, registers or injects.
   yet" empty state; unreachable / malformed / API-error are distinct error
   states. No-incident is never read as healthy.
 - Incidents are listed individually (device, resource, rule, severity,
-  occurrences, status, manual resolve); there is no RCA, remediation or AI.
+  occurrences, status, manual resolve); RCA is presented separately from
+  `GET /network/diagnosis` (Section 8C); there is no remediation or AI.
 
-## 8C. `GET /network/diagnosis` (NPE-1E1B, backend-only)
+## 8C. `GET /network/diagnosis` (NPE-1E1B backend, NPE-1E1C consumer)
 
 Read-only, on-demand deterministic root-cause analysis of the **latest ingested**
 operational state of Lab 1. Computed per request, never stored: no diagnosis ID,
 status, history or write method (`POST`/`PUT`/`PATCH`/`DELETE` do not exist).
-No body, no query parameter. `operation_id` is `get_network_diagnosis`. There is
-no frontend consumer yet (NPE-1E1C).
+No body, no query parameter. `operation_id` is `get_network_diagnosis`. The live
+network workspace consumes it (NPE-1E1C): polled every 5 s with the network
+state, shown only when its `collection_id` equals the displayed state's
+(otherwise "Diagnosis updating"), rendered in API order with no re-ranking, and
+with failures (including a 404) local to the root-cause panel.
 
 `200` returns `NetworkDiagnosisResponse` (no envelope); a healthy network is
 `200` with `"diagnoses": []`, never `404`/`204`/`null`:
@@ -859,8 +863,8 @@ ACL is assigned inbound on `GigabitEthernet0/1`, and a
 
 Do not build frontend features assuming any of the following exist:
 
-- A frontend consumer of `GET /network/diagnosis` (Section 8C, backend-only
-  until NPE-1E1C), diagnosis persistence or history, remediation
+- Diagnosis persistence or history, remediation (`GET /network/diagnosis` has a
+  frontend consumer since NPE-1E1C)
 - A topology API, an operational-state history, or any operational-state write
   endpoint (`GET /network/state` has a frontend consumer since NPE-1D2; the
   browser never writes operational state)

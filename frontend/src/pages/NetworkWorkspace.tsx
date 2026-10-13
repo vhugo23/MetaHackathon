@@ -3,6 +3,7 @@ import { IncidentCard } from "../components/IncidentCard";
 import { IncidentEmptyState } from "../components/IncidentEmptyState";
 import { IncidentErrorState } from "../components/IncidentErrorState";
 import { LoadingState } from "../components/LoadingState";
+import { DiagnosisPanel } from "../components/network/DiagnosisPanel";
 import { NetworkSummaryStrip } from "../components/network/NetworkSummaryStrip";
 import { NodeDetailPanel } from "../components/network/NodeDetailPanel";
 import { PhysicalLinkTable } from "../components/network/PhysicalLinkTable";
@@ -14,6 +15,7 @@ import {
 } from "../hooks/useLiveNetworkWorkspace";
 import type { IncidentsState } from "../hooks/useIncidents";
 import { deriveNetworkSummary, lab1OperationalIncidents } from "../network/derive";
+import { diagnosisMarksByLink, isDiagnosisAligned } from "../network/diagnosisView";
 
 const ERROR_TITLES: Record<NetworkStateError["kind"], string> = {
   unreachable: "API unreachable",
@@ -97,7 +99,7 @@ function IncidentsSection({
 }
 
 export function NetworkWorkspace() {
-  const { network, incidents, refreshAll } = useLiveNetworkWorkspace();
+  const { network, diagnosis, incidents, refreshAll } = useLiveNetworkWorkspace();
   const { state } = network;
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
@@ -110,6 +112,17 @@ export function NetworkWorkspace() {
       : incidents.state;
   const snapshot = state.status === "success" ? state.data : null;
   const summary = snapshot === null ? null : deriveNetworkSummary(snapshot, incidentList);
+  // Only a diagnosis that belongs to the displayed collection may mark links.
+  const diagnosisMarks =
+    snapshot !== null &&
+    summary !== null &&
+    diagnosis.state.status === "success" &&
+    isDiagnosisAligned(diagnosis.state.data, snapshot)
+      ? diagnosisMarksByLink(
+          diagnosis.state.data.diagnoses,
+          summary.links.map((entry) => entry.link),
+        )
+      : undefined;
   const lastUpdatedAt =
     state.status === "success" || state.status === "no-snapshot" ? state.lastUpdatedAt : null;
   const isRefreshing =
@@ -167,6 +180,11 @@ export function NetworkWorkspace() {
             </p>
           )}
           <NetworkSummaryStrip state={snapshot} summary={summary} />
+          <DiagnosisPanel
+            diagnosis={diagnosis.state}
+            snapshot={snapshot}
+            onRetry={diagnosis.refresh}
+          />
           <div className="workspace-grid">
             <section className="workspace-section" aria-labelledby="workspace-topology-heading">
               <h2 id="workspace-topology-heading">Topology</h2>
@@ -176,8 +194,13 @@ export function NetworkWorkspace() {
                 incidents={incidentList}
                 selectedNodeId={selectedNodeId}
                 onSelect={setSelectedNodeId}
+                diagnosisMarks={diagnosisMarks}
               />
-              <PhysicalLinkTable links={summary.links} adjacencies={summary.adjacencies} />
+              <PhysicalLinkTable
+                links={summary.links}
+                adjacencies={summary.adjacencies}
+                diagnosisMarks={diagnosisMarks}
+              />
             </section>
             <section className="workspace-section" aria-labelledby="workspace-detail-heading">
               <h2 id="workspace-detail-heading">Node detail</h2>

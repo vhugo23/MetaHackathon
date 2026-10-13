@@ -1259,3 +1259,156 @@ textarea {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Root-cause analysis (NPE-1E1C): functional presentation only. */
+.diagnosis-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.diagnosis-card {
+  border: 1px solid var(--border-default);
+  border-left-width: 4px;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  padding: var(--space-3) var(--space-4);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.diagnosis-card[data-diagnosis-type="PHYSICAL_LINK_FAILURE"] {
+  border-left-color: var(--status-critical);
+}
+
+.diagnosis-card[data-diagnosis-type="BGP_SESSION_FAILURE"] {
+  border-left-color: var(--status-open-fg);
+}
+
+.diagnosis-card[data-diagnosis-type="INSUFFICIENT_EVIDENCE"] {
+  border-left-style: dashed;
+}
+
+.diagnosis-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.diagnosis-card__head h4 {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.diagnosis-card__raw {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.diagnosis-card__facts {
+  margin: var(--space-2) 0;
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+}
+
+.diagnosis-card__facts > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+}
+
+.diagnosis-card__facts dt {
+  min-width: 6.5rem;
+  color: var(--text-secondary);
+}
+
+.diagnosis-card__facts dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.diagnosis-symptoms h4 {
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: var(--text-sm);
+}
+
+.diagnosis-symptoms ul,
+.diagnosis-evidence-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.diagnosis-symptoms li {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+}
+
+.diagnosis-symptom__resource {
+  font-weight: 600;
+}
+
+.diagnosis-details {
+  margin-top: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.diagnosis-details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.diagnosis-evidence-group h5 {
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.diagnosis-evidence-group li {
+  display: grid;
+  gap: 2px;
+}
+
+.diagnosis-evidence__kind {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.diagnosis-evidence__fact {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.rca-marker {
+  margin-top: var(--space-1);
+  font-weight: 700;
+}
+
+.topology-link--diagnosed {
+  stroke-width: 6;
+}
+
+.topology-link--rca-physical_link_failure {
+  stroke: var(--status-critical);
+}
+
+.topology-link--rca-bgp_session_failure {
+  stroke: var(--status-open-fg);
+  stroke-dasharray: 2 5;
+  stroke-linecap: round;
+}
+
+.topology-link--rca-insufficient_evidence {
+  stroke-dasharray: 2 5;
+}

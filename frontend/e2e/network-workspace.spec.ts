@@ -47,6 +47,11 @@ test.describe("live network workspace (seeded baseline)", () => {
     await expect(summaryCard(page, "Host reachability")).toContainText("host-2 → 10.1.1.10 3/3");
     await expect(summaryCard(page, "Presentation status")).toContainText("Healthy");
 
+    // NPE-1E1C: the real GET /network/diagnosis of the healthy baseline.
+    const rca = page.getByRole("region", { name: "Root-cause analysis" });
+    await expect(rca).toContainText("No active root-cause diagnosis");
+    await expect(page.locator("[data-diagnosis]")).toHaveCount(0);
+
     // Observation timestamp is visible and is the seeded collection time.
     const collected = summaryCard(page, "Observation").locator("time");
     await expect(collected).toBeVisible();

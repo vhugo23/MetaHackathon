@@ -7,8 +7,10 @@ import {
   type NetworkSummary,
 } from "../../network/derive";
 import { LAB1_NODES, type TopologyNode } from "../../network/lab1Topology";
+import type { DiagnosisLinkMark } from "../../network/diagnosisView";
 import {
   adjacencyPresentation,
+  diagnosisTypePresentation,
   physicalPresentation,
   type Presentation,
 } from "../../network/presentation";
@@ -56,7 +58,18 @@ interface TopologyDiagramProps {
   incidents: readonly IncidentResponse[] | null;
   selectedNodeId: string | null;
   onSelect: (nodeId: string) => void;
+  /**
+   * Backend RCA marks keyed by declared-link id. Only links that already
+   * exist in the declared topology can be marked; never a new edge.
+   */
+  diagnosisMarks?: ReadonlyMap<string, readonly DiagnosisLinkMark[]>;
 }
+
+const DIAGNOSIS_LABEL_ROWS: Record<DiagnosisLinkMark["type"], string> = {
+  PHYSICAL_LINK_FAILURE: "RCA: link failure",
+  BGP_SESSION_FAILURE: "RCA: BGP session",
+  INSUFFICIENT_EVIDENCE: "RCA: insufficient",
+};
 
 function labelFor(p: Presentation): string {
   return `${p.glyph} ${p.label}`;
@@ -68,6 +81,7 @@ export function TopologyDiagram({
   incidents,
   selectedNodeId,
   onSelect,
+  diagnosisMarks,
 }: TopologyDiagramProps) {
   const adjacencyByLink = new Map(summary.adjacencies.map((a) => [a.link.id, a]));
   const reachabilityByHost = new Map(summary.reachability.map((r) => [r.host, r]));
@@ -112,10 +126,22 @@ export function TopologyDiagram({
           const a = POSITIONS[entry.link.a.node]!;
           const b = POSITIONS[entry.link.b.node]!;
           const presentation = physicalPresentation(entry.state);
+          const marks = diagnosisMarks?.get(entry.link.id) ?? [];
+          const markText = marks
+            .map((mark) => `root-cause analysis: ${diagnosisTypePresentation(mark.type).label}`)
+            .join("; ");
           return (
             <line
               key={entry.link.id}
-              className={`topology-link topology-link--${presentation.tone}`}
+              className={[
+                "topology-link",
+                `topology-link--${presentation.tone}`,
+                marks.length > 0 ? "topology-link--diagnosed" : "",
+                ...marks.map((mark) => `topology-link--rca-${mark.type.toLowerCase()}`),
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              data-diagnosis={marks.map((mark) => mark.type).join(" ") || undefined}
               x1={a.x}
               y1={a.y}
               x2={b.x}
@@ -123,7 +149,9 @@ export function TopologyDiagram({
               data-testid={`link-${entry.link.id}`}
             >
               <title>
-                {`${entry.link.a.node}:${entry.link.a.interface} ↔ ${entry.link.b.node}:${entry.link.b.interface} — physical ${presentation.label}`}
+                {`${entry.link.a.node}:${entry.link.a.interface} ↔ ${entry.link.b.node}:${entry.link.b.interface} — physical ${presentation.label}${
+                  markText === "" ? "" : ` — ${markText}`
+                }`}
               </title>
             </line>
           );
@@ -142,6 +170,9 @@ export function TopologyDiagram({
           const rows = [`Link ${labelFor(physical)}`];
           if (adjacency !== undefined) {
             rows.push(`BGP ${labelFor(adjacencyPresentation(adjacency.state))}`);
+          }
+          for (const mark of diagnosisMarks?.get(entry.link.id) ?? []) {
+            rows.push(DIAGNOSIS_LABEL_ROWS[mark.type]);
           }
           const height = rows.length * 16 + 6;
           const aEnd = pointBeyondBox(from, to, 12);

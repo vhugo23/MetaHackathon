@@ -6,6 +6,7 @@
  *   observed healthy (ok) · observed failure (bad/warn) · UNKNOWN (unknown) ·
  *   UNAVAILABLE / not observed (unavailable) · NOT APPLICABLE (na)
  */
+import type { DiagnosisType } from "../api/networkDiagnosisTypes";
 import type { BgpSessionState } from "../api/networkStateTypes";
 import type {
   BgpAdjacencyState,
@@ -131,4 +132,21 @@ export function statusPresentation(status: PresentationStatus): Presentation {
 
 export function interfaceStatePresentation(state: "up" | "down" | "unknown"): Presentation {
   return physicalPresentation(state);
+}
+
+/**
+ * Operator wording for a backend diagnosis type. The tones keep the three
+ * outcomes visually and textually distinct: a physical-link failure is never
+ * presented like a BGP-session failure, and an inconclusive outcome is
+ * neither.
+ */
+export function diagnosisTypePresentation(type: DiagnosisType): Presentation {
+  switch (type) {
+    case "PHYSICAL_LINK_FAILURE":
+      return make("bad", "Physical link failure");
+    case "BGP_SESSION_FAILURE":
+      return make("warn", "BGP session failure");
+    case "INSUFFICIENT_EVIDENCE":
+      return make("unknown", "Insufficient evidence");
+  }
 }
