@@ -235,8 +235,13 @@ export function NodeDetailPanel({ nodeId, state, incidents }: NodeDetailPanelPro
   const open = openIncidentsForDevice(incidents ?? [], declared?.deviceId ?? null);
 
   return (
-    <aside className="node-detail" aria-label={`${nodeId} details`}>
-      <h3>{nodeId}</h3>
+    <aside className="node-detail" aria-label={`${nodeId} details`} tabIndex={0}>
+      <div className="node-detail__head">
+        <h3>{nodeId}</h3>
+        <span className="node-detail__status">
+          {node === null ? "Not observed" : "Observed in snapshot"}
+        </span>
+      </div>
       {node === null ? (
         <p className="detail-note">
           Not observed: this node is not present in the current snapshot. Nothing is assumed about
@@ -244,15 +249,39 @@ export function NodeDetailPanel({ nodeId, state, incidents }: NodeDetailPanelPro
         </p>
       ) : (
         <>
-          <p className="detail-note">
-            {node.role === "router" ? "Router" : "Host"}
-            {node.device_id !== null && (
+          <p className="node-detail__kind">
+            {node.role === "router"
+              ? `${declared?.tier === "spine" ? "Spine" : "Leaf"} router`
+              : "Host"}
+            {node.bgp !== null && (
               <>
-                {" "}
-                · device ID <span className="mono">{node.device_id}</span>
+                {" · "}
+                <span className="mono">AS {node.bgp.local_as}</span>
               </>
             )}
           </p>
+          {node.device_id !== null && (
+            <p className="detail-note">
+              Registered with device ID <span className="mono">{node.device_id}</span>
+            </p>
+          )}
+
+          {node.role === "router" && (
+            <dl className="node-detail__stats" aria-label="Overview">
+              <div>
+                <dt>BGP Established</dt>
+                <dd>
+                  {node.bgp === null
+                    ? "unavailable"
+                    : `${node.bgp.established_count} / ${node.bgp.neighbors.length}`}
+                </dd>
+              </div>
+              <div>
+                <dt>Open incidents</dt>
+                <dd>{open.length}</dd>
+              </div>
+            </dl>
+          )}
 
           {open.length > 0 && (
             <p className="detail-incident">

@@ -294,6 +294,41 @@ export function formatDuration(ms: number): string {
   return remainderHours === 0 ? `${days} d` : `${days} d ${remainderHours} h`;
 }
 
+/**
+ * Presentation-only freshness threshold: an observation whose server-anchored
+ * age is at most this long is described relatively ("Updated 4m ago"); an
+ * older one is described by its absolute collection date ("Observed Oct 7,
+ * 2026") instead of a stale-looking "17 d ago". It never hides or alters the
+ * underlying `collected_at`, and nothing treats the data as fresher than it is.
+ */
+export const RELATIVE_OBSERVATION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** Header label for a snapshot: relative when recent, absolute (UTC date) when old. */
+export function formatObservationLabel(state: NetworkStateResponse): string {
+  const ageMs = observationAgeMs(state);
+  if (ageMs > RELATIVE_OBSERVATION_MAX_AGE_MS) {
+    const collected = new Date(state.collected_at);
+    if (Number.isNaN(collected.getTime())) {
+      return "Observed";
+    }
+    return `Observed ${collected.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      timeZone: "UTC",
+    })}`;
+  }
+  const totalSeconds = Math.floor(ageMs / 1000);
+  if (totalSeconds < 60) {
+    return `Updated ${totalSeconds}s ago`;
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `Updated ${totalMinutes}m ago`;
+  }
+  return `Updated ${Math.floor(totalMinutes / 60)}h ago`;
+}
+
 // ---------------------------------------------------------------------------
 // Incidents
 // ---------------------------------------------------------------------------

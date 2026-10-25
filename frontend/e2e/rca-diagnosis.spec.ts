@@ -3,8 +3,12 @@ import { expect, test, type Page } from "@playwright/test";
 const DIAGNOSIS_PATHNAME = "/network/diagnosis";
 const DIAGNOSED_LINK_ID = "leaf-1:eth1--spine-1:eth1";
 
+function symptomsRegion(page: Page) {
+  return page.getByRole("region", { name: "Correlated Symptoms" });
+}
+
 function rcaRegion(page: Page) {
-  return page.getByRole("region", { name: "Root-cause analysis" });
+  return page.getByRole("region", { name: "Probable Root Cause" });
 }
 
 /**
@@ -42,10 +46,13 @@ test.describe("live root-cause analysis (seeded degraded state) @rca-degraded", 
     await expect(rca).not.toContainText("Diagnosis updating");
 
     // Two correlated symptoms, listed independently.
-    const symptoms = rca.getByTestId("correlated-symptom");
+    await expect(rca).toContainText("2 correlated symptoms");
+    const symptoms = symptomsRegion(page).getByTestId("correlated-symptom");
     await expect(symptoms).toHaveCount(2);
-    await expect(symptoms.nth(0)).toContainText("lab1-leaf-1 · bgp-neighbor:10.255.0.0");
-    await expect(symptoms.nth(1)).toContainText("lab1-spine-1 · bgp-neighbor:10.255.0.1");
+    await expect(symptoms.nth(0)).toContainText("lab1-leaf-1");
+    await expect(symptoms.nth(0)).toContainText("BGP neighbor 10.255.0.0");
+    await expect(symptoms.nth(1)).toContainText("lab1-spine-1");
+    await expect(symptoms.nth(1)).toContainText("BGP neighbor 10.255.0.1");
 
     // Exactly the declared link is marked, in the topology and in the table.
     await expect(page.locator("[data-diagnosis]")).toHaveCount(1);
@@ -55,7 +62,7 @@ test.describe("live root-cause analysis (seeded degraded state) @rca-degraded", 
     );
     const table = page.getByRole("table", { name: "Declared physical links" });
     await expect(table.getByTestId("rca-marker")).toHaveCount(1);
-    const row = table.getByRole("row", { name: /leaf-1:eth1 ↔ spine-1:eth1/ });
+    const row = table.getByRole("row", { name: /^leaf-1 spine-1 eth1\s*↔\s*eth1/ });
     await expect(row.getByTestId("rca-marker")).toContainText(
       "Probable root cause: Physical link failure · HIGH confidence",
     );
@@ -67,13 +74,13 @@ test.describe("live root-cause analysis (seeded degraded state) @rca-degraded", 
     const rca = rcaRegion(page);
     await expect(rca.getByText("Physical link failure")).toBeVisible();
 
-    const details = rca.locator("details");
+    const details = rca.locator("details.diagnosis-details");
     await expect(details).not.toHaveAttribute("open", "");
-    await rca.getByText(/^Evidence details/).focus();
+    await rca.getByText(/^View evidence/).focus();
     await page.keyboard.press("Enter");
     await expect(details).toHaveAttribute("open", "");
     await expect(details).toContainText("leaf-1 eth1 — DOWN");
-    await expect(details).toContainText("Supports");
+    await expect(details).toContainText("Supporting");
   });
 
   test("390px viewport: no horizontal page overflow and the RCA content is usable", async ({
@@ -83,9 +90,9 @@ test.describe("live root-cause analysis (seeded degraded state) @rca-degraded", 
     await page.goto("/");
     const rca = rcaRegion(page);
     await expect(rca.getByText("Physical link failure")).toBeVisible();
-    await expect(rca.getByTestId("correlated-symptom")).toHaveCount(2);
-    await rca.getByText(/^Evidence details/).click();
-    await expect(rca.locator("details")).toHaveAttribute("open", "");
+    await expect(symptomsRegion(page).getByTestId("correlated-symptom")).toHaveCount(2);
+    await rca.getByText(/^View evidence/).click();
+    await expect(rca.locator("details.diagnosis-details")).toHaveAttribute("open", "");
 
     // Page-expression strings: the e2e tsconfig has no DOM lib.
     const pageOverflow = await page.evaluate<number>(
@@ -96,6 +103,20 @@ test.describe("live root-cause analysis (seeded degraded state) @rca-degraded", 
     );
     expect(pageOverflow).toBeLessThanOrEqual(0);
     expect(panelOverflow).toBeLessThanOrEqual(0);
-    await expect(rca.getByTestId("correlated-symptom").first()).toBeInViewport({ ratio: 0.1 });
+
+    // Physical Links collapse to one readable card per link (no squeezed table).
+    await expect(page.locator("table.data-table--links thead")).toBeHidden();
+    const failedLink = page.locator("tr.link-row").first();
+    await expect(failedLink).toContainText("leaf-1");
+    await expect(failedLink).toContainText("DOWN");
+    await expect(failedLink).toContainText("Probable root cause: Physical link failure");
+    const linksOverflow = await page.evaluate<number>(
+      "(() => { const p = document.querySelector('.panel--links'); return p.scrollWidth - p.clientWidth; })()",
+    );
+    expect(linksOverflow).toBeLessThanOrEqual(0);
+    await symptomsRegion(page).getByTestId("correlated-symptom").first().scrollIntoViewIfNeeded();
+    await expect(symptomsRegion(page).getByTestId("correlated-symptom").first()).toBeInViewport({
+      ratio: 0.1,
+    });
   });
 });

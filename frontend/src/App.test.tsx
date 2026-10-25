@@ -35,16 +35,21 @@ afterEach(() => {
   document.documentElement.removeAttribute("data-theme");
 });
 
-test("starts in dark mode when there is no stored preference and the OS prefers dark", () => {
-  mockSystemPreference(true);
+test("starts in dark mode when there is no stored preference", () => {
   render(<App />);
   expect(document.documentElement.dataset.theme).toBe("dark");
 });
 
-test("starts in light mode when there is no stored preference and the OS prefers light", () => {
+test("a light OS preference does not change the dark default", () => {
   mockSystemPreference(false);
   render(<App />);
-  expect(document.documentElement.dataset.theme).toBe("light");
+  expect(document.documentElement.dataset.theme).toBe("dark");
+});
+
+test("a dark OS preference with no stored choice is dark", () => {
+  mockSystemPreference(true);
+  render(<App />);
+  expect(document.documentElement.dataset.theme).toBe("dark");
 });
 
 test("a stored dark preference overrides a light OS preference", () => {
@@ -63,6 +68,7 @@ test("a stored light preference overrides a dark OS preference", () => {
 
 test('in light mode, the toggle button is named "Switch to dark mode"', () => {
   mockSystemPreference(false);
+  window.localStorage.setItem(STORAGE_KEY, "light");
   render(<App />);
   expect(screen.getByRole("button", { name: "Switch to dark mode" })).toBeInTheDocument();
 });
@@ -76,6 +82,7 @@ test('in dark mode, the toggle button is named "Switch to light mode"', () => {
 test("clicking the toggle changes the root theme attribute", async () => {
   const user = userEvent.setup();
   mockSystemPreference(false);
+  window.localStorage.setItem(STORAGE_KEY, "light");
   render(<App />);
   expect(document.documentElement.dataset.theme).toBe("light");
 
@@ -88,6 +95,7 @@ test("clicking the toggle changes the root theme attribute", async () => {
 test("clicking the toggle persists the new choice in localStorage", async () => {
   const user = userEvent.setup();
   mockSystemPreference(false);
+  window.localStorage.setItem(STORAGE_KEY, "light");
   render(<App />);
 
   await user.click(screen.getByRole("button", { name: "Switch to dark mode" }));
@@ -97,11 +105,10 @@ test("clicking the toggle persists the new choice in localStorage", async () => 
 
 test("the product title and existing static descriptor remain rendered", () => {
   mockSystemPreference(false);
+  window.localStorage.setItem(STORAGE_KEY, "light");
   render(<App />);
-  expect(screen.getByText("Meta RNE Platform")).toBeInTheDocument();
-  expect(
-    screen.getByText("Multi-vendor configuration policy and incident operations"),
-  ).toBeInTheDocument();
+  expect(screen.getByText("NetGuardian")).toBeInTheDocument();
+  expect(screen.getByText("Network Reliability & RCA Platform")).toBeInTheDocument();
 });
 
 test("toggling the theme issues no additional fetch request", async () => {
@@ -109,6 +116,7 @@ test("toggling the theme issues no additional fetch request", async () => {
   vi.stubGlobal("fetch", fetchMock);
   const user = userEvent.setup();
   mockSystemPreference(false);
+  window.localStorage.setItem(STORAGE_KEY, "light");
   render(<App />);
 
   const callCountBeforeToggle = fetchMock.mock.calls.length;

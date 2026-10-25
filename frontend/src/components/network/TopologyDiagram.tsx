@@ -2,6 +2,7 @@ import type { KeyboardEvent } from "react";
 import type { IncidentResponse } from "../../api/types";
 import type { NetworkStateResponse } from "../../api/networkStateTypes";
 import {
+  findNode,
   openIncidentsForDevice,
   summarizeRouterBgp,
   type NetworkSummary,
@@ -15,19 +16,27 @@ import {
   type Presentation,
 } from "../../network/presentation";
 
-const NODE_W = 170;
-const NODE_H = 88;
-const VIEW_W = 760;
-const VIEW_H = 480;
+const NODE_W = 190;
+const NODE_H = 100;
+const VIEW_W = 840;
+const VIEW_H = 640;
 
 const POSITIONS: Record<string, { x: number; y: number }> = {
-  "spine-1": { x: 150, y: 60 },
-  "spine-2": { x: 610, y: 60 },
-  "leaf-1": { x: 150, y: 240 },
-  "leaf-2": { x: 610, y: 240 },
-  "host-1": { x: 150, y: 410 },
-  "host-2": { x: 610, y: 410 },
+  "spine-1": { x: 115, y: 70 },
+  "spine-2": { x: 725, y: 70 },
+  "leaf-1": { x: 115, y: 320 },
+  "leaf-2": { x: 725, y: 320 },
+  "host-1": { x: 115, y: 570 },
+  "host-2": { x: 725, y: 570 },
 };
+
+const ROLE_LABELS = {
+  spine: "Spine router",
+  leaf: "Leaf router",
+  host: "Host",
+} as const;
+
+type LinkTone = "ok" | "bad" | "control" | "unknown";
 
 interface Point {
   x: number;
@@ -75,6 +84,25 @@ function labelFor(p: Presentation): string {
   return `${p.glyph} ${p.label}`;
 }
 
+/**
+ * Visual class of a declared link. A failed physical link (red) is kept
+ * distinct from a degraded BGP session over interfaces that are UP (amber,
+ * dashed control-plane treatment); anything not positively observed is
+ * grey and dashed.
+ */
+function linkTone(physical: Presentation, adjacency: Presentation | undefined): LinkTone {
+  if (physical.tone === "bad") {
+    return "bad";
+  }
+  if (physical.tone !== "ok") {
+    return "unknown";
+  }
+  if (adjacency === undefined || adjacency.tone === "ok") {
+    return "ok";
+  }
+  return adjacency.tone === "warn" ? "control" : "unknown";
+}
+
 export function TopologyDiagram({
   state,
   summary,
@@ -86,22 +114,28 @@ export function TopologyDiagram({
   const adjacencyByLink = new Map(summary.adjacencies.map((a) => [a.link.id, a]));
   const reachabilityByHost = new Map(summary.reachability.map((r) => [r.host, r]));
 
-  function nodeLines(node: TopologyNode): { lines: string[]; aria: string } {
+  function nodeLines(node: TopologyNode): { role: string; line: string; aria: string } {
     if (node.role === "router") {
       const bgp = summarizeRouterBgp(state, node.id);
-      const bgpLine = `BGP ${bgp.established}/${bgp.expected} Established${bgp.uncertain ? " ?" : ""}`;
+      const localAs = findNode(state, node.id)?.bgp?.local_as;
+      const role = `${ROLE_LABELS[node.tier]}${localAs === undefined ? "" : ` · AS ${localAs}`}`;
+      const line = `BGP ${bgp.established}/${bgp.expected} Established${bgp.uncertain ? " ?" : ""}`;
       const aria = `${bgp.established} of ${bgp.expected} expected BGP adjacencies Established${
         bgp.uncertain ? ", some not explicitly observed" : ""
       }`;
-      return { lines: [`${node.tier} · ${node.deviceId ?? ""}`, bgpLine], aria };
+      return { role, line, aria };
     }
     const reach = reachabilityByHost.get(node.id);
     if (reach === undefined || reach.probe === null) {
-      return { lines: ["host", "reachability unavailable"], aria: "reachability unavailable" };
+      return {
+        role: ROLE_LABELS.host,
+        line: "reachability unavailable",
+        aria: "reachability unavailable",
+      };
     }
-    const line = `→ ${reach.probe.target} ${reach.probe.received}/${reach.probe.sent}`;
     return {
-      lines: ["host", line],
+      role: ROLE_LABELS.host,
+      line: `→ ${reach.probe.target} ${reach.probe.received}/${reach.probe.sent}`,
       aria: `reachability ${reach.probe.received} of ${reach.probe.sent} replies from ${reach.probe.target}`,
     };
   }
@@ -126,6 +160,10 @@ export function TopologyDiagram({
           const a = POSITIONS[entry.link.a.node]!;
           const b = POSITIONS[entry.link.b.node]!;
           const presentation = physicalPresentation(entry.state);
+          const adjacency = adjacencyByLink.get(entry.link.id);
+          const adjacencyView =
+            adjacency === undefined ? undefined : adjacencyPresentation(adjacency.state);
+          const tone = linkTone(presentation, adjacencyView);
           const marks = diagnosisMarks?.get(entry.link.id) ?? [];
           const markText = marks
             .map((mark) => `root-cause analysis: ${diagnosisTypePresentation(mark.type).label}`)
@@ -135,7 +173,8 @@ export function TopologyDiagram({
               key={entry.link.id}
               className={[
                 "topology-link",
-                `topology-link--${presentation.tone}`,
+                `topology-link--${tone}`,
+                entry.link.kind === "access" ? "topology-link--access" : "",
                 marks.length > 0 ? "topology-link--diagnosed" : "",
                 ...marks.map((mark) => `topology-link--rca-${mark.type.toLowerCase()}`),
               ]
@@ -157,42 +196,52 @@ export function TopologyDiagram({
           );
         })}
 
-        {/* Link labels and interface names. */}
+        {/* Link status chips and interface names. */}
         {summary.links.map((entry) => {
           const from = POSITIONS[entry.link.a.node]!;
           const to = POSITIONS[entry.link.b.node]!;
           const adjacency = adjacencyByLink.get(entry.link.id);
           const isVertical = from.x === to.x;
-          const mid = isVertical
-            ? { x: from.x, y: entry.link.kind === "fabric" ? 150 : 325 }
-            : lerp(from, to, 0.35);
+          // Diagonal fabric links cross at their midpoint, so their chips sit
+          // on the leaf side of the crossing, never on top of each other.
+          const mid = isVertical ? lerp(from, to, 0.5) : lerp(from, to, 0.33);
           const physical = physicalPresentation(entry.state);
-          const rows = [`Link ${labelFor(physical)}`];
-          if (adjacency !== undefined) {
-            rows.push(`BGP ${labelFor(adjacencyPresentation(adjacency.state))}`);
+          const adjacencyView =
+            adjacency === undefined ? undefined : adjacencyPresentation(adjacency.state);
+          const tone = linkTone(physical, adjacencyView);
+          const marks = diagnosisMarks?.get(entry.link.id) ?? [];
+          // Healthy links carry only a minimal chip ("✓ UP", "✓ Established");
+          // anything else keeps the full, prefixed detail. The Physical Links
+          // table and Selected Node hold the complete observations.
+          const quiet = tone === "ok" && marks.length === 0;
+          const rows = quiet ? [labelFor(physical)] : [`Link ${labelFor(physical)}`];
+          if (adjacencyView !== undefined) {
+            rows.push(quiet ? labelFor(adjacencyView) : `BGP ${labelFor(adjacencyView)}`);
           }
-          for (const mark of diagnosisMarks?.get(entry.link.id) ?? []) {
+          for (const mark of marks) {
             rows.push(DIAGNOSIS_LABEL_ROWS[mark.type]);
           }
-          const height = rows.length * 16 + 6;
-          const aEnd = pointBeyondBox(from, to, 12);
-          const bEnd = pointBeyondBox(to, from, 12);
+          const chipWidth = quiet ? 100 : 140;
+          const rowGap = 17;
+          const height = rows.length * rowGap + 8;
+          const aEnd = pointBeyondBox(from, to, 16);
+          const bEnd = pointBeyondBox(to, from, 16);
           return (
             <g key={`label-${entry.link.id}`} className="topology-label-group">
               <rect
-                className={`topology-label topology-label--${physical.tone}`}
-                x={mid.x - 62}
+                className={`topology-label topology-label--${tone}${quiet ? " topology-label--quiet" : ""}`}
+                x={mid.x - chipWidth / 2}
                 y={mid.y - height / 2}
-                width={124}
+                width={chipWidth}
                 height={height}
-                rx={4}
+                rx={5}
               />
               {rows.map((row, index) => (
                 <text
                   key={row}
                   className="topology-label__text"
                   x={mid.x}
-                  y={mid.y - height / 2 + 15 + index * 16}
+                  y={mid.y - height / 2 + 16 + index * rowGap}
                   textAnchor="middle"
                 >
                   {row}
@@ -210,7 +259,7 @@ export function TopologyDiagram({
 
         {LAB1_NODES.map((node) => {
           const pos = POSITIONS[node.id]!;
-          const { lines, aria } = nodeLines(node);
+          const { role, line, aria } = nodeLines(node);
           const open = openIncidentsForDevice(incidents ?? [], node.deviceId);
           const selected = selectedNodeId === node.id;
           const badges = [
@@ -230,12 +279,15 @@ export function TopologyDiagram({
           ]
             .filter((part) => part !== null)
             .join(", ");
+          const left = pos.x - NODE_W / 2 + 16;
+          const top = pos.y - NODE_H / 2;
           return (
             <g
               key={node.id}
               className={[
                 "topology-node",
                 `topology-node--${node.role}`,
+                `topology-node--${node.tier}`,
                 selected ? "topology-node--selected" : "",
                 open.length > 0 ? "topology-node--incident" : "",
               ]
@@ -252,34 +304,22 @@ export function TopologyDiagram({
               <rect
                 className="topology-node__box"
                 x={pos.x - NODE_W / 2}
-                y={pos.y - NODE_H / 2}
+                y={top}
                 width={NODE_W}
                 height={NODE_H}
                 rx={8}
               />
-              <text
-                className="topology-node__name"
-                x={pos.x - NODE_W / 2 + 12}
-                y={pos.y - NODE_H / 2 + 20}
-              >
+              <text className="topology-node__name" x={left} y={top + 28}>
                 {node.id}
               </text>
-              {lines.map((line, index) => (
-                <text
-                  key={line}
-                  className="topology-node__line"
-                  x={pos.x - NODE_W / 2 + 12}
-                  y={pos.y - NODE_H / 2 + 38 + index * 16}
-                >
-                  {line}
-                </text>
-              ))}
+              <text className="topology-node__role" x={left} y={top + 49}>
+                {role}
+              </text>
+              <text className="topology-node__line" x={left} y={top + 70}>
+                {line}
+              </text>
               {badges !== "" && (
-                <text
-                  className="topology-node__badges"
-                  x={pos.x - NODE_W / 2 + 12}
-                  y={pos.y - NODE_H / 2 + 76}
-                >
+                <text className="topology-node__badges" x={left} y={top + 90}>
                   {badges}
                 </text>
               )}

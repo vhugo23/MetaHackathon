@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { IncidentCard } from "../components/IncidentCard";
-import { IncidentEmptyState } from "../components/IncidentEmptyState";
+import { HeaderStatus } from "../components/HeaderStatus";
 import { IncidentErrorState } from "../components/IncidentErrorState";
 import { LoadingState } from "../components/LoadingState";
+import { CorrelatedSymptomsPanel } from "../components/network/CorrelatedSymptomsPanel";
 import { DiagnosisPanel } from "../components/network/DiagnosisPanel";
 import { NetworkSummaryStrip } from "../components/network/NetworkSummaryStrip";
 import { NodeDetailPanel } from "../components/network/NodeDetailPanel";
+import { OpenIncidentsTable } from "../components/network/OpenIncidentsTable";
 import { PhysicalLinkTable } from "../components/network/PhysicalLinkTable";
 import { TopologyDiagram } from "../components/network/TopologyDiagram";
 import type { NetworkStateError } from "../hooks/useNetworkState";
@@ -14,8 +15,13 @@ import {
   useLiveNetworkWorkspace,
 } from "../hooks/useLiveNetworkWorkspace";
 import type { IncidentsState } from "../hooks/useIncidents";
-import { deriveNetworkSummary, lab1OperationalIncidents } from "../network/derive";
+import {
+  deriveNetworkSummary,
+  formatObservationLabel,
+  lab1OperationalIncidents,
+} from "../network/derive";
 import { diagnosisMarksByLink, isDiagnosisAligned } from "../network/diagnosisView";
+import { nodeById } from "../network/lab1Topology";
 
 const ERROR_TITLES: Record<NetworkStateError["kind"], string> = {
   unreachable: "API unreachable",
@@ -53,22 +59,19 @@ function NetworkErrorState({ error, onRetry }: { error: NetworkStateError; onRet
 
 interface IncidentsSectionProps {
   incidents: IncidentsState;
-  resolvingIds: ReadonlySet<string>;
-  resolveErrors: Readonly<Record<string, string>>;
-  onResolve: (incidentId: string) => void;
   onRefresh: () => void;
 }
 
-function IncidentsSection({
-  incidents,
-  resolvingIds,
-  resolveErrors,
-  onResolve,
-  onRefresh,
-}: IncidentsSectionProps) {
+/**
+ * Compact, read-only list of the open Lab 1 incidents. Resolution and the
+ * full incident cards stay, unchanged, under Incidents & Tools (#tools).
+ */
+function IncidentsSection({ incidents, onRefresh }: IncidentsSectionProps) {
   return (
-    <section className="workspace-section" aria-labelledby="workspace-incidents-heading">
-      <h2 id="workspace-incidents-heading">Incidents</h2>
+    <section className="panel panel--incidents" aria-labelledby="workspace-incidents-heading">
+      <h2 id="workspace-incidents-heading" className="panel__title">
+        Open Incidents
+      </h2>
       {incidents.status === "loading" && <LoadingState />}
       {incidents.status === "error" && (
         <IncidentErrorState message={incidents.message} onRetry={onRefresh} />
@@ -78,22 +81,7 @@ function IncidentsSection({
           Incident refresh failed ({incidents.refreshError}). Showing the last loaded list.
         </p>
       )}
-      {incidents.status === "success" && incidents.data.length === 0 && (
-        <IncidentEmptyState onRefresh={onRefresh} isRefreshing={incidents.isRefreshing} />
-      )}
-      {incidents.status === "success" && incidents.data.length > 0 && (
-        <div className="incident-list">
-          {incidents.data.map((incident) => (
-            <IncidentCard
-              key={incident.incident_id}
-              incident={incident}
-              isResolving={resolvingIds.has(incident.incident_id)}
-              resolveError={resolveErrors[incident.incident_id]}
-              onResolve={onResolve}
-            />
-          ))}
-        </div>
-      )}
+      {incidents.status === "success" && <OpenIncidentsTable incidents={incidents.data} />}
     </section>
   );
 }
@@ -101,7 +89,7 @@ function IncidentsSection({
 export function NetworkWorkspace() {
   const { network, diagnosis, incidents, refreshAll } = useLiveNetworkWorkspace();
   const { state } = network;
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [manualNodeId, setManualNodeId] = useState<string | null>(null);
 
   // Workspace scope: Lab 1 operational (ANOMALY on Lab 1 routers) incidents,
   // OPEN and RESOLVED history. Everything else lives, unchanged, at #tools.
@@ -123,43 +111,90 @@ export function NetworkWorkspace() {
           summary.links.map((entry) => entry.link),
         )
       : undefined;
+  // Until the user picks a node, the first node named by an aligned backend
+  // diagnosis resource is shown in Selected Node. A manual choice always wins;
+  // a healthy (empty) diagnosis selects nothing.
+  const diagnosedNodeId =
+    snapshot !== null && diagnosis.state.status === "success" && diagnosisMarks !== undefined
+      ? (diagnosis.state.data.diagnoses[0]?.resource.endpoint_a.node_id ?? null)
+      : null;
+  const selectedNodeId =
+    manualNodeId ??
+    (diagnosedNodeId !== null && nodeById(diagnosedNodeId) !== undefined ? diagnosedNodeId : null);
+  const fabricLinkCount =
+    summary === null ? 0 : summary.links.filter((entry) => entry.link.kind === "fabric").length;
+  const accessLinkCount = summary === null ? 0 : summary.links.length - fabricLinkCount;
   const lastUpdatedAt =
     state.status === "success" || state.status === "no-snapshot" ? state.lastUpdatedAt : null;
   const isRefreshing =
     (state.status === "success" || state.status === "no-snapshot") && state.isRefreshing;
 
+  const connectionBroken =
+    state.status === "error" || (state.status === "success" && state.refreshError !== null);
+  const connection =
+    state.status === "loading"
+      ? "Connecting…"
+      : state.status === "error"
+        ? ERROR_TITLES[state.error.kind]
+        : connectionBroken
+          ? "Connection issue"
+          : "Connected";
+  const connectionTone = connectionBroken ? "bad" : state.status === "loading" ? "unknown" : "ok";
+
   return (
-    <main>
-      <header className="incident-dashboard__header">
-        <div className="incident-dashboard__heading-group">
+    <main className="workspace">
+      <HeaderStatus>
+        <ul className="header-status" aria-label="Connection status">
+          <li className="header-status__item">
+            <span
+              aria-hidden="true"
+              className={`header-status__dot header-status__dot--${connectionTone}`}
+            />
+            {connection}
+          </li>
+          <li className="header-status__item">Lab 1</li>
+          <li className="header-status__item">Auto-refresh {LIVE_REFRESH_INTERVAL_MS / 1000}s</li>
+          {snapshot !== null && (
+            <li
+              className="header-status__item"
+              title="Age of the snapshot when the API served it (retrieved_at − collected_at)"
+            >
+              {formatObservationLabel(snapshot)}
+            </li>
+          )}
+        </ul>
+      </HeaderStatus>
+
+      <header className="page-head">
+        <div className="page-head__title">
           <h1>Live Network</h1>
-          <p className="page-description">
-            Lab 1 leaf–spine fabric as last ingested. The topology is the fixed declared one; every
-            status comes from GET /network/state and GET /incidents.
-          </p>
+          <p className="page-head__sub">Lab 1 leaf–spine fabric · Read-only operational view</p>
+          {snapshot !== null && (
+            <p className="page-head__meta">
+              Collection <span className="mono">{snapshot.collection_id}</span> · collected{" "}
+              <time dateTime={snapshot.collected_at} title={snapshot.collected_at}>
+                {new Date(snapshot.collected_at).toLocaleString()}
+              </time>
+            </p>
+          )}
+          {snapshot === null && lastUpdatedAt !== null && (
+            <p className="page-head__meta">
+              Last fetched{" "}
+              <time dateTime={lastUpdatedAt} title={lastUpdatedAt}>
+                {new Date(lastUpdatedAt).toLocaleString()}
+              </time>
+            </p>
+          )}
+        </div>
+        <div className="page-head__actions">
+          <span role="status" aria-live="polite" className="page-head__refreshing">
+            {isRefreshing ? "Refreshing network state…" : ""}
+          </span>
+          <button type="button" className="incident-dashboard__refresh" onClick={refreshAll}>
+            Refresh all
+          </button>
         </div>
       </header>
-
-      <div className="dashboard-toolbar">
-        {lastUpdatedAt !== null && (
-          <p>
-            Last fetched{" "}
-            <time dateTime={lastUpdatedAt} title={lastUpdatedAt}>
-              {new Date(lastUpdatedAt).toLocaleString()}
-            </time>
-          </p>
-        )}
-        <p>
-          Auto-refresh every {LIVE_REFRESH_INTERVAL_MS / 1000} s (re-reads the API only; it does not
-          collect the network).
-        </p>
-        <span role="status" aria-live="polite">
-          {isRefreshing ? "Refreshing network state…" : ""}
-        </span>
-        <button type="button" className="incident-dashboard__refresh" onClick={refreshAll}>
-          Refresh all
-        </button>
-      </div>
 
       {state.status === "loading" && (
         <p className="status-message" role="status" aria-live="polite">
@@ -179,31 +214,49 @@ export function NetworkWorkspace() {
               ). Showing the last received snapshot.
             </p>
           )}
-          <NetworkSummaryStrip state={snapshot} summary={summary} />
+          <NetworkSummaryStrip summary={summary} />
           <DiagnosisPanel
             diagnosis={diagnosis.state}
             snapshot={snapshot}
             onRetry={diagnosis.refresh}
           />
-          <div className="workspace-grid">
-            <section className="workspace-section" aria-labelledby="workspace-topology-heading">
-              <h2 id="workspace-topology-heading">Topology</h2>
+          <div className="workspace-main">
+            <section className="panel panel--topology" aria-labelledby="workspace-topology-heading">
+              <h2 id="workspace-topology-heading" className="panel__title">
+                Network Topology
+              </h2>
               <TopologyDiagram
                 state={snapshot}
                 summary={summary}
                 incidents={incidentList}
                 selectedNodeId={selectedNodeId}
-                onSelect={setSelectedNodeId}
+                onSelect={setManualNodeId}
                 diagnosisMarks={diagnosisMarks}
               />
+            </section>
+            <CorrelatedSymptomsPanel diagnosis={diagnosis.state} snapshot={snapshot} />
+          </div>
+          <div className="workspace-lower">
+            <section className="panel panel--links" aria-labelledby="workspace-links-heading">
+              <h2 id="workspace-links-heading" className="panel__title">
+                Physical Links
+                <span className="panel__count">
+                  {fabricLinkCount} fabric links · {accessLinkCount} host access links
+                </span>
+              </h2>
               <PhysicalLinkTable
                 links={summary.links}
                 adjacencies={summary.adjacencies}
                 diagnosisMarks={diagnosisMarks}
               />
             </section>
-            <section className="workspace-section" aria-labelledby="workspace-detail-heading">
-              <h2 id="workspace-detail-heading">Node detail</h2>
+            <section
+              className={`panel panel--node${selectedNodeId === null ? " panel--compact" : ""}`}
+              aria-labelledby="workspace-detail-heading"
+            >
+              <h2 id="workspace-detail-heading" className="panel__title">
+                Selected Node
+              </h2>
               {selectedNodeId === null ? (
                 <p className="detail-note">
                   Select a node in the topology to see what was observed.
@@ -220,13 +273,7 @@ export function NetworkWorkspace() {
         </div>
       )}
 
-      <IncidentsSection
-        incidents={scopedIncidentsState}
-        resolvingIds={incidents.resolvingIds}
-        resolveErrors={incidents.resolveErrors}
-        onResolve={incidents.resolveIncident}
-        onRefresh={incidents.refresh}
-      />
+      <IncidentsSection incidents={scopedIncidentsState} onRefresh={incidents.refresh} />
     </main>
   );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useState } from "react";
+import { HeaderStatusSlotContext } from "./components/headerStatusSlot";
 import { IncidentDashboard } from "./pages/IncidentDashboard";
 import { NetworkWorkspace } from "./pages/NetworkWorkspace";
 import { resolveInitialTheme, storeTheme, type Theme } from "./theme";
@@ -18,6 +19,7 @@ function viewFromHash(): View {
 export function App() {
   const [view, setView] = useState<View>(viewFromHash);
   const [theme, setTheme] = useState<Theme>(() => resolveInitialTheme());
+  const [statusSlot, setStatusSlot] = useState<HTMLElement | null>(null);
 
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -38,27 +40,38 @@ export function App() {
   const toggleLabel = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
 
   return (
-    <div className="app">
+    <div className={`app app--${view}`}>
       <header className="app-header">
-        <div className="app-header__identity">
-          <p className="app-title">Meta RNE Platform</p>
-          <p className="app-descriptor">
-            Multi-vendor configuration policy and incident operations
-          </p>
+        <div className="app-brand">
+          <span className="app-brand__mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22" focusable="false">
+              <circle cx="12" cy="5" r="2.4" />
+              <circle cx="5" cy="19" r="2.4" />
+              <circle cx="19" cy="19" r="2.4" />
+              <path d="M12 7.4 6.2 16.9M12 7.4l5.8 9.5M7.4 19h9.2" />
+            </svg>
+          </span>
+          <div className="app-header__identity">
+            <p className="app-title">NetGuardian</p>
+            <p className="app-descriptor">Network Reliability &amp; RCA Platform</p>
+          </div>
         </div>
+        <nav className="app-nav" aria-label="Primary">
+          <a href="#network" aria-current={view === "network" ? "page" : undefined}>
+            Live Network
+          </a>
+          <a href="#tools" aria-current={view === "tools" ? "page" : undefined}>
+            Incidents &amp; Tools
+          </a>
+        </nav>
+        <div className="app-header__status" ref={setStatusSlot} />
         <button type="button" className="theme-toggle" onClick={toggleTheme}>
           {toggleLabel}
         </button>
       </header>
-      <nav className="app-nav" aria-label="Primary">
-        <a href="#network" aria-current={view === "network" ? "page" : undefined}>
-          Live Network
-        </a>
-        <a href="#tools" aria-current={view === "tools" ? "page" : undefined}>
-          Incidents &amp; tools
-        </a>
-      </nav>
-      {view === "network" ? <NetworkWorkspace /> : <IncidentDashboard />}
+      <HeaderStatusSlotContext.Provider value={statusSlot}>
+        {view === "network" ? <NetworkWorkspace /> : <IncidentDashboard />}
+      </HeaderStatusSlotContext.Provider>
     </div>
   );
 }

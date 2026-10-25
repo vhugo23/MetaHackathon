@@ -84,6 +84,17 @@ export function diagnosisMarksByLink(
   return marks;
 }
 
+/** Operator wording for the backend's `affected_resource` identifier. */
+export function humanizeResource(resource: string): string {
+  if (resource.startsWith("bgp-neighbor:")) {
+    return `BGP neighbor ${resource.slice("bgp-neighbor:".length)}`;
+  }
+  if (resource.startsWith("interface:")) {
+    return `Interface ${resource.slice("interface:".length)}`;
+  }
+  return resource;
+}
+
 const KIND_LABELS: Record<DiagnosisEvidence["kind"], string> = {
   INTERFACE_STATE: "Interface state",
   BGP_SESSION: "BGP session",

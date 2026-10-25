@@ -21,6 +21,8 @@ import {
   derivePhysicalLinks,
   deriveReachability,
   formatDuration,
+  formatObservationLabel,
+  RELATIVE_OBSERVATION_MAX_AGE_MS,
   lab1OperationalIncidents,
   openIncidents,
   openIncidentsForDevice,
@@ -451,5 +453,37 @@ describe("observation age", () => {
     [90_000_000, "1 d 1 h"],
   ])("formats %d ms as %s", (ms, expected) => {
     expect(formatDuration(ms)).toBe(expected);
+  });
+});
+
+describe("formatObservationLabel (presentation-only freshness threshold)", () => {
+  function snapshotAged(ms: number) {
+    const collected = Date.parse("2026-10-07T12:00:00Z");
+    return {
+      ...BASELINE_NETWORK_STATE,
+      collected_at: new Date(collected).toISOString(),
+      retrieved_at: new Date(collected + ms).toISOString(),
+    };
+  }
+
+  test("recent observations are relative: seconds, minutes, hours", () => {
+    expect(formatObservationLabel(snapshotAged(12_000))).toBe("Updated 12s ago");
+    expect(formatObservationLabel(snapshotAged(4 * 60_000 + 30_000))).toBe("Updated 4m ago");
+    expect(formatObservationLabel(snapshotAged(2 * 3_600_000 + 5 * 60_000))).toBe("Updated 2h ago");
+  });
+
+  test("the threshold is inclusive at 24 hours", () => {
+    expect(formatObservationLabel(snapshotAged(RELATIVE_OBSERVATION_MAX_AGE_MS))).toBe(
+      "Updated 24h ago",
+    );
+  });
+
+  test("older observations show the absolute collection date, never '17 d ago'", () => {
+    const label = formatObservationLabel(snapshotAged(RELATIVE_OBSERVATION_MAX_AGE_MS + 1000));
+    expect(label).toBe("Observed Oct 7, 2026");
+    expect(formatObservationLabel(snapshotAged(17 * 86_400_000 + 12 * 3_600_000))).toBe(
+      "Observed Oct 7, 2026",
+    );
+    expect(label).not.toMatch(/ago/);
   });
 });

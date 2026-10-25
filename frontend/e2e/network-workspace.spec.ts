@@ -40,22 +40,39 @@ test.describe("live network workspace (seeded baseline)", () => {
     }
 
     // BGP, ECMP, reachability from the real snapshot.
-    await expect(summaryCard(page, "BGP adjacencies")).toContainText("4 / 4 Established");
-    await expect(summaryCard(page, "ECMP redundancy")).toContainText("leaf-1: 2 paths");
-    await expect(summaryCard(page, "ECMP redundancy")).toContainText("leaf-2: 2 paths");
-    await expect(summaryCard(page, "Host reachability")).toContainText("host-1 → 10.1.2.10 3/3");
-    await expect(summaryCard(page, "Host reachability")).toContainText("host-2 → 10.1.1.10 3/3");
-    await expect(summaryCard(page, "Presentation status")).toContainText("Healthy");
+    await expect(summaryCard(page, "BGP Sessions")).toContainText("4 / 4 Established");
+    await expect(summaryCard(page, "ECMP")).toContainText("leaf-1: 2 paths");
+    await expect(summaryCard(page, "ECMP")).toContainText("leaf-2: 2 paths");
+    await expect(summaryCard(page, "Reachability")).toContainText("host-1 → 10.1.2.10 3/3");
+    await expect(summaryCard(page, "Reachability")).toContainText("host-2 → 10.1.1.10 3/3");
+    await expect(summaryCard(page, "Network Health")).toContainText("Healthy");
+    await expect(summaryCard(page, "BGP Sessions")).toContainText("4 / 4");
 
     // NPE-1E1C: the real GET /network/diagnosis of the healthy baseline.
-    const rca = page.getByRole("region", { name: "Root-cause analysis" });
+    const rca = page.getByRole("region", { name: "Probable Root Cause" });
     await expect(rca).toContainText("No active root-cause diagnosis");
     await expect(page.locator("[data-diagnosis]")).toHaveCount(0);
 
     // Observation timestamp is visible and is the seeded collection time.
-    const collected = summaryCard(page, "Observation").locator("time");
+    const collected = page.locator(".page-head__meta time");
     await expect(collected).toBeVisible();
     await expect(collected).toHaveAttribute("datetime", body.collected_at);
+
+    // First visit with no stored preference is the dark console (Playwright's
+    // default OS colour scheme is light, so this is not the OS preference).
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+
+    // NetGuardian shell: product identity, accurate polling language, no streaming claim.
+    await expect(page.getByText("NetGuardian", { exact: true })).toBeVisible();
+    const status = page.getByRole("list", { name: "Connection status" });
+    await expect(status).toContainText("Connected");
+    await expect(status).toContainText("Lab 1");
+    await expect(status).toContainText("Auto-refresh 5s");
+    // The seeded snapshot is old, so the header says when it was observed, not "17 d ago".
+    await expect(status).toContainText("Observed Oct 7, 2026");
+    await expect(status).not.toContainText("ago");
+    // Healthy: no diagnosis, no forced node selection, compact calm panels.
+    await expect(page.getByRole("complementary")).toHaveCount(0);
 
     // Hosts carry no invented device ID and no BGP status.
     for (const host of ["host-1", "host-2"]) {
@@ -76,7 +93,7 @@ test.describe("live network workspace (seeded baseline)", () => {
     );
 
     // The existing tools stay reachable.
-    await page.getByRole("link", { name: "Incidents & tools" }).click();
+    await page.getByRole("link", { name: "Incidents & Tools" }).click();
     await expect(page.getByRole("heading", { name: "Network Incidents", level: 1 })).toBeVisible();
     await expect(
       page.getByRole("heading", { name: "Submit device configuration", level: 2 }),

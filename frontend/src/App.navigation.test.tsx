@@ -39,14 +39,14 @@ test("the live network workspace is the default view", async () => {
 test("existing incident, configuration and telemetry tools stay reachable via the nav", async () => {
   const user = userEvent.setup();
   render(<App />);
-  await user.click(screen.getByRole("link", { name: "Incidents & tools" }));
+  await user.click(screen.getByRole("link", { name: "Incidents & Tools" }));
   expect(
     await screen.findByRole("heading", { name: "Network Incidents", level: 1 }),
   ).toBeInTheDocument();
   expect(
     screen.getByRole("heading", { name: "Submit device configuration", level: 2 }),
   ).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Incidents & tools" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "Incidents & Tools" })).toHaveAttribute(
     "aria-current",
     "page",
   );

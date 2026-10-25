@@ -50,8 +50,10 @@ function stubOk(state: NetworkStateResponse, incidents: IncidentResponse[] = [])
   });
 }
 
+const LEAF1_SPINE1_ROW = /^leaf-1 spine-1 eth1\s*↔\s*eth1/;
+
 function card(name: string): HTMLElement {
-  return screen.getByRole("heading", { name }).closest(".summary-card") as HTMLElement;
+  return screen.getByRole("heading", { name, level: 3 }).closest(".summary-card") as HTMLElement;
 }
 
 beforeEach(() => {
@@ -85,17 +87,24 @@ describe("healthy baseline", () => {
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
 
-    expect(card("BGP adjacencies")).toHaveTextContent("4 / 4 Established");
-    const ecmp = card("ECMP redundancy");
+    expect(card("BGP Sessions")).toHaveTextContent("4 / 4 Established");
+    const ecmp = card("ECMP");
     expect(ecmp).toHaveTextContent("leaf-1: 2 paths");
     expect(ecmp).toHaveTextContent("leaf-2: 2 paths");
-    const reach = card("Host reachability");
+    const reach = card("Reachability");
     expect(reach).toHaveTextContent("host-1 → 10.1.2.10 3/3");
     expect(reach).toHaveTextContent("host-2 → 10.1.1.10 3/3");
-    expect(card("Open incidents")).toHaveTextContent("0");
-    expect(card("Observation")).toHaveTextContent("Observed 3 s ago");
-    expect(card("Observation")).toHaveTextContent("Collected");
-    expect(card("Presentation status")).toHaveTextContent("Healthy");
+    // The KPI counts HOSTS (2 / 2); the per-host detail counts probe replies (3/3).
+    expect(reach).toHaveTextContent("2 / 2 Hosts reachable");
+    expect(reach).not.toHaveTextContent("3 / 3 Hosts");
+    expect(card("Open Incidents")).toHaveTextContent("0");
+    expect(screen.getByText("Updated 3s ago")).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText("Auto-refresh 5s")).toBeInTheDocument();
+    expect(document.querySelector(".page-head__meta")).toHaveTextContent(
+      "Collection collection-baseline",
+    );
+    expect(card("Network Health")).toHaveTextContent("Healthy");
   });
 
   test("does not render remediation language (RCA lives only in its own panel)", async () => {
@@ -112,30 +121,30 @@ describe("degraded state with two device-scoped incidents", () => {
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
 
-    expect(card("BGP adjacencies")).toHaveTextContent("3 / 4 Established");
-    expect(card("BGP adjacencies")).toHaveTextContent("1 degraded");
-    expect(card("ECMP redundancy")).toHaveTextContent("leaf-1: 1 path");
-    expect(card("ECMP redundancy")).toHaveTextContent("Reduced");
-    expect(card("Host reachability")).toHaveTextContent("3/3");
-    expect(card("Open incidents")).toHaveTextContent("2");
-    expect(card("Presentation status")).toHaveTextContent("Degraded");
+    expect(card("BGP Sessions")).toHaveTextContent("3 / 4 Established");
+    expect(card("BGP Sessions")).toHaveTextContent("1 degraded");
+    expect(card("ECMP")).toHaveTextContent("leaf-1: 1 path");
+    expect(card("ECMP")).toHaveTextContent("Reduced");
+    expect(card("Reachability")).toHaveTextContent("3/3");
+    expect(card("Open Incidents")).toHaveTextContent("2");
+    expect(card("Network Health")).toHaveTextContent("Degraded");
 
     // The failed physical link no longer presents as UP; its BGP shows the real states.
     const table = screen.getByRole("table", { name: "Declared physical links" });
-    const failedRow = within(table).getByRole("row", { name: /leaf-1:eth1 ↔ spine-1:eth1/ });
+    const failedRow = within(table).getByRole("row", { name: LEAF1_SPINE1_ROW });
     expect(failedRow).toHaveTextContent("DOWN");
     expect(failedRow).toHaveTextContent("Degraded");
     expect(failedRow).toHaveTextContent("leaf-1: Active; spine-1: Active");
 
     // Two separate incident cards (no merging into one root cause).
-    expect(await screen.findAllByRole("article")).toHaveLength(2);
+    expect(await screen.findAllByTestId("open-incident-row")).toHaveLength(2);
   });
 
   test("routers with OPEN incidents are indicated on the node (text, not colour only)", async () => {
     stubOk(DEGRADED_NETWORK_STATE, failureIncidents());
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
-    await screen.findAllByRole("article");
+    await screen.findAllByTestId("open-incident-row");
 
     expect(screen.getByTestId("node-leaf-1")).toHaveAccessibleName(/1 open incident/);
     expect(screen.getByTestId("node-leaf-1")).toHaveTextContent("⚠ 1 open");
@@ -144,17 +153,24 @@ describe("degraded state with two device-scoped incidents", () => {
     expect(screen.getByTestId("node-host-1")).not.toHaveTextContent("open");
   });
 
-  test("incident cards expose severity, resource, rule, occurrences and status", async () => {
+  test("the compact open-incidents table exposes severity, device, resource, status and occurrences", async () => {
     stubOk(DEGRADED_NETWORK_STATE, failureIncidents());
     render(<NetworkWorkspace />);
-    const [first] = await screen.findAllByRole("article");
-    expect(first).toHaveTextContent("lab1-leaf-1");
-    expect(first).toHaveTextContent("bgp-neighbor:10.255.0.0");
+    const [first] = await screen.findAllByTestId("open-incident-row");
     expect(first).toHaveTextContent("Critical");
+    expect(first).toHaveTextContent("lab1-leaf-1");
+    expect(first).toHaveTextContent("BGP neighbor 10.255.0.0");
     expect(first).toHaveTextContent("OPEN");
-    expect(first).toHaveTextContent("RULE-BGP-DOWN");
-    expect(first).toHaveTextContent("Occurrences");
-    expect(within(first!).getByRole("button", { name: "Resolve incident" })).toBeInTheDocument();
+    const table = screen.getByRole("table", { name: "Open Incidents" });
+    for (const header of ["Severity", "Device", "Resource", "Status", "Occurrences"]) {
+      expect(within(table).getByRole("columnheader", { name: header })).toBeInTheDocument();
+    }
+    // Management stays in Incidents & Tools: no resolve control, no full cards.
+    expect(screen.queryByRole("button", { name: "Resolve incident" })).toBeNull();
+    expect(screen.queryByRole("article")).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Manage incidents in the tools view" }),
+    ).toHaveAttribute("href", "#tools");
   });
 });
 
@@ -170,26 +186,26 @@ describe("incident scope and endpoint skew in the workspace", () => {
     stubOk(recoveredNetworkState(), failureIncidents());
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
-    await screen.findAllByRole("article");
-    expect(card("Presentation status")).toHaveTextContent("Healthy");
-    expect(card("BGP adjacencies")).toHaveTextContent("4 / 4 Established");
-    expect(card("Open incidents")).toHaveTextContent("2");
+    await screen.findAllByTestId("open-incident-row");
+    expect(card("Network Health")).toHaveTextContent("Healthy");
+    expect(card("BGP Sessions")).toHaveTextContent("4 / 4 Established");
+    expect(card("Open Incidents")).toHaveTextContent("2");
   });
 
   test("unrelated incidents are neither listed nor counted, and do not change status", async () => {
     stubOk(BASELINE_NETWORK_STATE, [unrelated]);
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
-    expect(await screen.findByText("No incidents detected.")).toBeInTheDocument();
-    expect(screen.queryByRole("article")).toBeNull();
-    expect(card("Open incidents")).toHaveTextContent("0");
-    expect(card("Presentation status")).toHaveTextContent("Healthy");
+    expect(await screen.findByText("No open incidents.")).toBeInTheDocument();
+    expect(screen.queryByTestId("open-incident-row")).toBeNull();
+    expect(card("Open Incidents")).toHaveTextContent("0");
+    expect(card("Network Health")).toHaveTextContent("Healthy");
   });
 
   test("Lab 1 OPEN incidents appear in the workspace list", async () => {
     stubOk(DEGRADED_NETWORK_STATE, [...failureIncidents(), unrelated]);
     render(<NetworkWorkspace />);
-    expect(await screen.findAllByRole("article")).toHaveLength(2);
+    expect(await screen.findAllByTestId("open-incident-row")).toHaveLength(2);
   });
 });
 
@@ -198,12 +214,12 @@ describe("recovery", () => {
     stubOk(recoveredNetworkState(), resolvedFailureIncidents());
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
-    expect(card("BGP adjacencies")).toHaveTextContent("4 / 4 Established");
-    expect(card("ECMP redundancy")).toHaveTextContent("leaf-1: 2 paths");
-    expect(card("Open incidents")).toHaveTextContent("0");
-    const articles = await screen.findAllByRole("article");
-    expect(articles).toHaveLength(2);
-    expect(articles[0]).toHaveTextContent("RESOLVED");
+    expect(card("BGP Sessions")).toHaveTextContent("4 / 4 Established");
+    expect(card("ECMP")).toHaveTextContent("leaf-1: 2 paths");
+    expect(card("Open Incidents")).toHaveTextContent("0");
+    expect(await screen.findByText("No open incidents.")).toBeInTheDocument();
+    expect(screen.queryAllByTestId("open-incident-row")).toHaveLength(0);
+    expect(screen.getByText(/2 resolved incidents in history/)).toBeInTheDocument();
     expect(screen.getByTestId("node-leaf-1")).not.toHaveTextContent("open");
   });
 });
@@ -303,7 +319,7 @@ describe("UNKNOWN and unavailable messaging", () => {
     expect(lo).not.toHaveTextContent("DOWN");
     // lo is not an endpoint of any declared link, so every link stays UP.
     expect(LAB1_LINKS.some((l) => [l.a, l.b].some((e) => e.interface === "lo"))).toBe(false);
-    expect(card("Presentation status")).toHaveTextContent("Healthy");
+    expect(card("Network Health")).toHaveTextContent("Healthy");
   });
 
   test("BGP facets unavailable are Unknown (not Down, not Established) and never Healthy", async () => {
@@ -312,10 +328,10 @@ describe("UNKNOWN and unavailable messaging", () => {
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
 
-    expect(card("BGP adjacencies")).toHaveTextContent("0 / 4 Established");
-    expect(card("BGP adjacencies")).toHaveTextContent("4 unknown / not observed");
-    expect(card("Presentation status")).toHaveTextContent("Unknown");
-    expect(card("Presentation status")).not.toHaveTextContent("Healthy");
+    expect(card("BGP Sessions")).toHaveTextContent("0 / 4 Established");
+    expect(card("BGP Sessions")).toHaveTextContent("4 unknown / not observed");
+    expect(card("Network Health")).toHaveTextContent("Unknown");
+    expect(card("Network Health")).not.toHaveTextContent("Healthy");
     expect(screen.getByTestId("node-leaf-1")).toHaveTextContent("BGP 0/2 Established ?");
 
     await user.click(screen.getByTestId("node-leaf-1"));
@@ -349,7 +365,7 @@ describe("UNKNOWN and unavailable messaging", () => {
     await user.click(screen.getByTestId("node-leaf-1"));
     const detail = screen.getByRole("complementary", { name: "leaf-1 details" });
     expect(detail).toHaveTextContent("raw_state: Clearing");
-    expect(card("BGP adjacencies")).toHaveTextContent("1 unknown / not observed");
+    expect(card("BGP Sessions")).toHaveTextContent("1 unknown / not observed");
   });
 
   test("missing ECMP route is 'not observed', not 0 paths", async () => {
@@ -360,8 +376,8 @@ describe("UNKNOWN and unavailable messaging", () => {
     stubOk(state);
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
-    expect(card("ECMP redundancy")).toHaveTextContent("leaf-1: not observed");
-    expect(card("ECMP redundancy")).not.toHaveTextContent("leaf-1: 0");
+    expect(card("ECMP")).toHaveTextContent("leaf-1: not observed");
+    expect(card("ECMP")).not.toHaveTextContent("leaf-1: 0");
   });
 
   test("an unavailable reachability probe says unavailable, not failure", async () => {
@@ -374,8 +390,8 @@ describe("UNKNOWN and unavailable messaging", () => {
     const user = userEvent.setup();
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
-    expect(card("Host reachability")).toHaveTextContent("host-1: probe unavailable");
-    expect(card("Host reachability")).not.toHaveTextContent("Loss observed");
+    expect(card("Reachability")).toHaveTextContent("host-1: probe unavailable");
+    expect(card("Reachability")).not.toHaveTextContent("Loss observed");
 
     await user.click(screen.getByTestId("node-host-1"));
     const detail = screen.getByRole("complementary", { name: "host-1 details" });
@@ -393,7 +409,7 @@ describe("UNKNOWN and unavailable messaging", () => {
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
     const table = screen.getByRole("table", { name: "Declared physical links" });
-    const row = within(table).getByRole("row", { name: /leaf-1:eth1 ↔ spine-1:eth1/ });
+    const row = within(table).getByRole("row", { name: LEAF1_SPINE1_ROW });
     expect(row).toHaveTextContent("UNKNOWN");
     expect(row).toHaveTextContent("interfaces facet unavailable");
     expect(row).not.toHaveTextContent("UP");
@@ -410,7 +426,7 @@ describe("no snapshot, errors, and refresh failures", () => {
     expect(screen.queryByTestId("node-leaf-1")).toBeNull();
     expect(document.body.textContent).not.toMatch(/healthy/i);
     // Incidents are independently available.
-    expect(await screen.findByRole("heading", { name: "Incidents" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Open Incidents" })).toBeInTheDocument();
   });
 
   test("API unreachable and malformed responses are distinct errors", async () => {
@@ -452,7 +468,7 @@ describe("no snapshot, errors, and refresh failures", () => {
     expect(await screen.findByText(/Refresh failed: API unreachable/)).toBeInTheDocument();
     expect(screen.getByText(/Showing the last received snapshot/)).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Network summary" })).toBeInTheDocument();
-    expect(card("BGP adjacencies")).toHaveTextContent("4 / 4 Established");
+    expect(card("BGP Sessions")).toHaveTextContent("4 / 4 Established");
     expect(screen.getByTestId("node-leaf-1")).toBeInTheDocument();
   });
 
@@ -464,40 +480,19 @@ describe("no snapshot, errors, and refresh failures", () => {
     });
     render(<NetworkWorkspace />);
     await screen.findByRole("region", { name: "Network summary" });
-    expect(card("Open incidents")).toHaveTextContent("Unavailable");
+    expect(card("Open Incidents")).toHaveTextContent("Unavailable");
     // Network status comes from the network observations only.
-    expect(card("Presentation status")).toHaveTextContent("Healthy");
+    expect(card("Network Health")).toHaveTextContent("Healthy");
     expect(await screen.findByText("Unable to load incidents.")).toBeInTheDocument();
   });
 });
 
 describe("existing incident actions remain available", () => {
-  test("Resolve incident on an OPEN card calls the existing endpoint", async () => {
-    const user = userEvent.setup();
-    const [first] = failureIncidents();
-    const resolved = {
-      ...first!,
-      status: "RESOLVED",
-      resolved_at: "2026-10-07T12:05:00Z",
-      updated_at: "2026-10-07T12:05:00Z",
-    };
-    const fetchMock = vi.fn().mockImplementation((url: string, init: RequestInit) => {
-      const path = new URL(url).pathname;
-      if (init.method === "POST") {
-        return Promise.resolve(jsonResponse(resolved));
-      }
-      return Promise.resolve(
-        path === "/network/state" ? jsonResponse(DEGRADED_NETWORK_STATE) : jsonResponse([first]),
-      );
-    });
-    vi.stubGlobal("fetch", fetchMock);
+  test("incident resolution is still reachable through Incidents & Tools (#tools), not duplicated here", async () => {
+    stubOk(DEGRADED_NETWORK_STATE, failureIncidents());
     render(<NetworkWorkspace />);
-    await user.click(await screen.findByRole("button", { name: "Resolve incident" }));
-    expect(fetchMock).toHaveBeenCalledWith(
-      `http://localhost:8080/incidents/${first!.incident_id}/resolve`,
-      expect.objectContaining({ method: "POST" }),
-    );
-    expect(await screen.findByText("RESOLVED", { selector: ".badge" })).toBeInTheDocument();
+    await screen.findAllByTestId("open-incident-row");
+    expect(screen.queryByRole("button", { name: /resolve/i })).toBeNull();
   });
 
   test("the workspace issues only GET /network/state, /network/diagnosis, /incidents and the resolve POST", async () => {

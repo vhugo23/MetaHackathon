@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Diagnosis, NetworkDiagnosisResponse } from "../api/networkDiagnosisTypes";
@@ -52,8 +52,14 @@ function stubDegraded(diagnoses: Diagnosis[], overrides: Partial<NetworkDiagnosi
   });
 }
 
+function symptomsPanel(): HTMLElement {
+  return screen.getByRole("region", { name: "Correlated Symptoms" });
+}
+
+const LEAF1_SPINE1_ROW = /^leaf-1 spine-1 eth1\s*↔\s*eth1/;
+
 function rcaPanel(): HTMLElement {
-  return screen.getByRole("region", { name: "Root-cause analysis" });
+  return screen.getByRole("region", { name: "Probable Root Cause" });
 }
 
 async function renderDegraded(diagnoses: Diagnosis[], overrides = {}) {
@@ -103,7 +109,7 @@ describe("B. physical-link diagnosis", () => {
   test("never shows confidence as a percentage or probability", async () => {
     await renderDegraded([physicalDiagnosis()]);
     await within(rcaPanel()).findByText("Physical link failure");
-    expect(rcaPanel().textContent).not.toMatch(/\d\s?%|probab/i);
+    expect(rcaPanel().textContent).not.toMatch(/\d\s?%|probability/i);
     expect(rcaPanel().querySelector("progress, meter, [role='progressbar']")).toBeNull();
   });
 });
@@ -134,10 +140,10 @@ describe("D. INSUFFICIENT_EVIDENCE", () => {
     const details = panel.querySelector("details")!;
     expect(details).toHaveAttribute("open");
     expect(within(details).getByRole("heading", { name: "Unknown (1)" })).toBeInTheDocument();
-    expect(within(details).getByRole("heading", { name: "Contradicts (1)" })).toBeInTheDocument();
+    expect(within(details).getByRole("heading", { name: "Contradicting (1)" })).toBeInTheDocument();
     expect(details).toHaveTextContent("leaf-1 eth1 — UNKNOWN");
     expect(details).toHaveTextContent("spine-1 → 10.255.0.1 — Established");
-    expect(within(details).queryByRole("heading", { name: /^Supports/ })).toBeNull();
+    expect(within(details).getByRole("heading", { name: "Supporting (0)" })).toBeInTheDocument();
   });
 });
 
@@ -147,9 +153,11 @@ describe("E. zero linked incidents", () => {
     const panel = rcaPanel();
     expect(await within(panel).findByText("Physical link failure")).toBeInTheDocument();
     expect(panel).toHaveTextContent("HIGH");
-    expect(panel).toHaveTextContent("Correlated symptoms (0)");
-    expect(panel).toHaveTextContent("No matching open incident records");
-    expect(within(panel).queryAllByTestId("correlated-symptom")).toHaveLength(0);
+    expect(panel).toHaveTextContent("0 correlated symptoms");
+    const symptoms = symptomsPanel();
+    expect(symptoms).toHaveTextContent("Correlated symptoms (0)");
+    expect(symptoms).toHaveTextContent("No matching open incident records");
+    expect(within(symptoms).queryAllByTestId("correlated-symptom")).toHaveLength(0);
   });
 });
 
@@ -158,15 +166,19 @@ describe("F. two linked incidents / one linked incident", () => {
     await renderDegraded([physicalDiagnosis()]);
     const panel = rcaPanel();
     await within(panel).findByText("Physical link failure");
-    const symptoms = within(panel).getAllByTestId("correlated-symptom");
+    expect(panel).toHaveTextContent("2 correlated symptoms");
+    const symptoms = within(symptomsPanel()).getAllByTestId("correlated-symptom");
     expect(symptoms).toHaveLength(2);
-    expect(symptoms[0]).toHaveTextContent("lab1-leaf-1 · bgp-neighbor:10.255.0.0");
+    expect(symptoms[0]).toHaveTextContent("lab1-leaf-1");
+    expect(symptoms[0]).toHaveTextContent("BGP neighbor 10.255.0.0");
     expect(symptoms[0]).toHaveTextContent("Critical");
     expect(symptoms[0]).toHaveTextContent("OPEN");
-    expect(symptoms[0]).toHaveTextContent("seen 1×");
-    expect(symptoms[1]).toHaveTextContent("lab1-spine-1 · bgp-neighbor:10.255.0.1");
-    expect(panel).toHaveTextContent("Correlated symptoms (2)");
+    expect(symptoms[0]).toHaveTextContent("1 occurrence");
+    expect(symptoms[1]).toHaveTextContent("lab1-spine-1");
+    expect(symptoms[1]).toHaveTextContent("BGP neighbor 10.255.0.1");
+    expect(symptomsPanel()).toHaveTextContent("Correlated symptoms (2)");
     expect(panel).not.toHaveTextContent(/causes/i);
+    expect(symptomsPanel()).not.toHaveTextContent(/causes/i);
   });
 
   test("one correlated symptom", async () => {
@@ -175,7 +187,7 @@ describe("F. two linked incidents / one linked incident", () => {
     ]);
     const panel = rcaPanel();
     await within(panel).findByText("Physical link failure");
-    expect(within(panel).getAllByTestId("correlated-symptom")).toHaveLength(1);
+    expect(within(symptomsPanel()).getAllByTestId("correlated-symptom")).toHaveLength(1);
   });
 
   test("the occurrence count of a linked incident is shown", async () => {
@@ -184,8 +196,9 @@ describe("F. two linked incidents / one linked incident", () => {
         linked_incidents: [linkedIncident("lab1-leaf-1", "10.255.0.0", { occurrence_count: 7 })],
       }),
     ]);
-    expect(await within(rcaPanel()).findByTestId("correlated-symptom")).toHaveTextContent(
-      "seen 7×",
+    await within(rcaPanel()).findByText("Physical link failure");
+    expect(within(symptomsPanel()).getByTestId("correlated-symptom")).toHaveTextContent(
+      "7 occurrences",
     );
   });
 });
@@ -199,11 +212,11 @@ describe("evidence presentation", () => {
 
     const details = panel.querySelector("details")!;
     expect(details).not.toHaveAttribute("open");
-    await user.click(within(details).getByText("Evidence details (6)"));
+    await user.click(within(details).getByText("View evidence (6)"));
     expect(details).toHaveAttribute("open");
 
-    expect(within(details).getByRole("heading", { name: "Supports (4)" })).toBeInTheDocument();
-    expect(within(details).getByRole("heading", { name: "Contradicts (1)" })).toBeInTheDocument();
+    expect(within(details).getByRole("heading", { name: "Supporting (4)" })).toBeInTheDocument();
+    expect(within(details).getByRole("heading", { name: "Contradicting (1)" })).toBeInTheDocument();
     expect(within(details).getByRole("heading", { name: "Unknown (1)" })).toBeInTheDocument();
     expect(details).toHaveTextContent("leaf-1 eth1 — DOWN");
     expect(details).toHaveTextContent("leaf-1 → 10.255.0.0 — Active");
@@ -220,7 +233,7 @@ describe("evidence presentation", () => {
 
   test("the evidence disclosure is a native <details>/<summary> (keyboard toggle proven in the browser E2E)", async () => {
     await renderDegraded([physicalDiagnosis()]);
-    const summary = await within(rcaPanel()).findByText("Evidence details (6)");
+    const summary = await within(rcaPanel()).findByText("View evidence (6)");
     expect(summary.tagName).toBe("SUMMARY");
     expect(summary.parentElement?.tagName).toBe("DETAILS");
     summary.focus();
@@ -253,7 +266,7 @@ describe("G. multiple diagnoses", () => {
     await within(rcaPanel()).findByText("BGP session failure");
     const row = within(screen.getByRole("table", { name: "Declared physical links" })).getByRole(
       "row",
-      { name: new RegExp(`leaf-1:eth1 ↔ spine-1:eth1`) },
+      { name: LEAF1_SPINE1_ROW },
     );
     const markers = within(row).getAllByTestId("rca-marker");
     expect(markers.map((m) => m.textContent)).toEqual([
@@ -323,7 +336,7 @@ describe("loading, 404 and error states (I)", () => {
     expect(alert).toHaveTextContent("Database failure.");
     expect(screen.getByRole("group", { name: "Lab 1 physical topology" })).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Declared physical links" })).toBeInTheDocument();
-    expect(await screen.findAllByRole("article")).toHaveLength(2);
+    expect(await screen.findAllByTestId("open-incident-row")).toHaveLength(2);
     // Only the RCA panel carries the error; the workspace has no other alert.
     expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
@@ -376,7 +389,7 @@ describe("loading, 404 and error states (I)", () => {
     stubApi({ network: notFoundNoSnapshotResponse, diagnosis: notFoundNoSnapshotResponse });
     render(<NetworkWorkspace />);
     expect(await screen.findByText("No live network snapshot yet.")).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "Root-cause analysis" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Probable Root Cause" })).toBeNull();
     expect(screen.queryByText(/diagnosis unavailable/i)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -445,7 +458,7 @@ describe("topology highlighting", () => {
       diagnosis: () => jsonResponse(healthyDiagnosis()),
     });
     render(<NetworkWorkspace />);
-    await within(await screen.findByRole("region", { name: "Root-cause analysis" })).findByText(
+    await within(await screen.findByRole("region", { name: "Probable Root Cause" })).findByText(
       "No active root-cause diagnosis",
     );
     expect(document.querySelector("[data-diagnosis]")).toBeNull();
@@ -458,7 +471,7 @@ describe("physical link table", () => {
     await within(rcaPanel()).findByText("Physical link failure");
 
     const table = screen.getByRole("table", { name: "Declared physical links" });
-    const row = within(table).getByRole("row", { name: /leaf-1:eth1 ↔ spine-1:eth1/ });
+    const row = within(table).getByRole("row", { name: LEAF1_SPINE1_ROW });
     expect(within(row).getByTestId("rca-marker")).toHaveTextContent(
       "Probable root cause: Physical link failure · HIGH confidence",
     );
@@ -476,7 +489,7 @@ describe("physical link table", () => {
       .getAllByRole("row")
       .filter((row) => within(row).queryByTestId("rca-marker") !== null);
     expect(withMarker).toHaveLength(1);
-    expect(withMarker[0]).toHaveTextContent("leaf-1:eth1 ↔ spine-1:eth1");
+    expect(withMarker[0]).toHaveTextContent(/leaf-1.*spine-1.*eth1 ↔ eth1/);
   });
 
   test("a BGP diagnosis marks its row as BGP and does not say the link is down", async () => {
@@ -500,7 +513,7 @@ describe("existing workspace behavior is unchanged", () => {
   test("incident cards (workspace scope) are not changed by a diagnosis", async () => {
     await renderDegraded([physicalDiagnosis()]);
     await within(rcaPanel()).findByText("Physical link failure");
-    expect(await screen.findAllByRole("article")).toHaveLength(2);
+    expect(await screen.findAllByTestId("open-incident-row")).toHaveLength(2);
   });
 
   test("the RCA panel never offers remediation", async () => {
@@ -531,8 +544,9 @@ describe("J. long identifiers", () => {
     ]);
     const panel = rcaPanel();
     await within(panel).findByText("Physical link failure");
-    expect(panel).toHaveTextContent(`incident-${LONG}`);
-    expect(panel).toHaveTextContent(`bgp-neighbor:${LONG}`);
+    expect(panel).toHaveTextContent(`leaf-1:eth1--spine-1:eth1-${LONG}`);
+    expect(symptomsPanel()).toHaveTextContent(`incident-${LONG}`);
+    expect(symptomsPanel()).toHaveTextContent(`BGP neighbor ${LONG}`);
     // jsdom has no layout engine: the actual no-overflow proof is the
     // Playwright 390px scenario; here the wrapping container is asserted.
     expect(panel.querySelector("li.diagnosis-card")).not.toBeNull();
@@ -542,5 +556,117 @@ describe("J. long identifiers", () => {
 describe("DEGRADED fixtures stay aligned", () => {
   test("the fixture helper's collection id matches the degraded state", () => {
     expect(DEGRADED_COLLECTION_ID).toBe(DEGRADED_NETWORK_STATE.collection_id);
+  });
+});
+
+describe("evidence density (preview + full)", () => {
+  /** Ten supporting facts (the seeded degraded state's shape), API order preserved. */
+  function tenSupporting(): Diagnosis {
+    const base = physicalDiagnosis();
+    const supporting = base.evidence.filter((item) => item.role === "SUPPORTS");
+    const evidence = [...supporting, ...supporting, ...supporting.slice(0, 2)];
+    return { ...base, evidence };
+  }
+
+  test("lists the first facts of each role in API order and keeps the rest one click away", async () => {
+    const user = userEvent.setup();
+    await renderDegraded([tenSupporting()]);
+    const panel = rcaPanel();
+    await within(panel).findByText("Physical link failure");
+
+    const details = panel.querySelector<HTMLElement>("details.diagnosis-details")!;
+    await user.click(within(details).getByText("View evidence (10)"));
+    const supporting = within(details)
+      .getByRole("heading", { name: "Supporting (10)" })
+      .closest("section")!;
+    // Four previewed facts, then the remaining six behind a native disclosure.
+    expect(supporting.querySelectorAll(":scope > ul > li")).toHaveLength(4);
+    const more = supporting.querySelector<HTMLElement>("details.evidence-more")!;
+    expect(more).not.toHaveAttribute("open");
+    expect(within(more).getByText("Show remaining 6").tagName).toBe("SUMMARY");
+    expect(more.querySelectorAll("li")).toHaveLength(6);
+    // Nothing is dropped: preview + remainder is the whole supporting group.
+    expect(supporting.querySelectorAll("li")).toHaveLength(10);
+    await user.click(within(more).getByText("Show remaining 6"));
+    expect(more).toHaveAttribute("open");
+  });
+
+  test("a group within the preview limit has no disclosure; empty roles keep their count", async () => {
+    await renderDegraded([physicalDiagnosis()]);
+    const details = rcaPanel().querySelector<HTMLElement>("details.diagnosis-details")!;
+    const supporting = within(details)
+      .getByRole("heading", { name: "Supporting (4)" })
+      .closest("section")!;
+    expect(supporting.querySelector("details.evidence-more")).toBeNull();
+    expect(supporting.querySelectorAll("li")).toHaveLength(4);
+
+    const onlySupport = {
+      ...physicalDiagnosis(),
+      evidence: physicalDiagnosis().evidence.filter((e) => e.role === "SUPPORTS"),
+    };
+    cleanup();
+    await renderDegraded([onlySupport]);
+    const again = rcaPanel().querySelector<HTMLElement>("details.diagnosis-details")!;
+    const none = within(again)
+      .getByRole("heading", { name: "Contradicting (0)" })
+      .closest("section")!;
+    expect(none.querySelector("li")).toBeNull();
+  });
+});
+
+describe("Selected Node follows the diagnosis until the user chooses", () => {
+  test("a diagnosis selects the first affected node initially", async () => {
+    await renderDegraded([physicalDiagnosis()]);
+    await within(rcaPanel()).findByText("Physical link failure");
+    expect(screen.getByRole("complementary", { name: "leaf-1 details" })).toBeInTheDocument();
+    expect(screen.getByTestId("node-leaf-1")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("a manual selection is respected afterwards", async () => {
+    const user = userEvent.setup();
+    await renderDegraded([physicalDiagnosis()]);
+    await within(rcaPanel()).findByText("Physical link failure");
+    await user.click(screen.getByTestId("node-spine-2"));
+    expect(screen.getByRole("complementary", { name: "spine-2 details" })).toBeInTheDocument();
+    expect(screen.getByTestId("node-leaf-1")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("a healthy state does not force a selection", async () => {
+    stubApi({
+      network: () => jsonResponse(BASELINE_NETWORK_STATE),
+      diagnosis: () => jsonResponse(healthyDiagnosis()),
+    });
+    render(<NetworkWorkspace />);
+    await within(await screen.findByRole("region", { name: "Probable Root Cause" })).findByText(
+      "No active root-cause diagnosis",
+    );
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(
+      screen.getByText("Select a node in the topology to see what was observed."),
+    ).toBeInTheDocument();
+  });
+
+  test("a mismatched (stale) diagnosis never selects a node", async () => {
+    await renderDegraded([physicalDiagnosis()], { collection_id: "collection-older" });
+    await screen.findByText("Diagnosis updating.");
+    expect(screen.queryByRole("complementary")).toBeNull();
+  });
+});
+
+describe("physical-link rows keep the structure the mobile card layout relies on", () => {
+  test("each link row labels its Physical / BGP / RCA cells and keeps both interface names", async () => {
+    await renderDegraded([physicalDiagnosis()]);
+    await within(rcaPanel()).findByText("Physical link failure");
+    const row = within(screen.getByRole("table", { name: "Declared physical links" })).getByRole(
+      "row",
+      {
+        name: LEAF1_SPINE1_ROW,
+      },
+    );
+    expect(
+      [...row.querySelectorAll("td[data-label]")].map((cell) => cell.getAttribute("data-label")),
+    ).toEqual(["Physical", "BGP", "RCA"]);
+    expect(row.querySelector(".link-row__iface-a")).toHaveTextContent("eth1");
+    expect(row.querySelector(".link-row__iface-b")).toHaveTextContent("eth1");
   });
 });

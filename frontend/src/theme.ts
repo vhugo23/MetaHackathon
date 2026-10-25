@@ -6,13 +6,12 @@ function isTheme(value: unknown): value is Theme {
   return value === "light" || value === "dark";
 }
 
-/** The operating system's preference, read fresh each call (never cached). */
-export function getSystemTheme(): Theme {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-    return "light";
-  }
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
+/**
+ * The approved product identity is the dark infrastructure console, so a
+ * first visit is dark regardless of the OS preference; only an explicit,
+ * stored choice changes it.
+ */
+export const DEFAULT_THEME: Theme = "dark";
 
 /** The user's explicitly persisted choice, or `null` if none was ever made. */
 export function getStoredTheme(): Theme | null {
@@ -41,7 +40,7 @@ export function storeTheme(theme: Theme): void {
   }
 }
 
-/** A stored user choice always takes precedence over the OS preference. */
+/** A stored user choice wins; otherwise the dark default applies. */
 export function resolveInitialTheme(): Theme {
-  return getStoredTheme() ?? getSystemTheme();
+  return getStoredTheme() ?? DEFAULT_THEME;
 }

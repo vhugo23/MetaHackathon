@@ -1,25 +1,19 @@
-import type {
-  Diagnosis,
-  DiagnosisEvidence,
-  EvidenceRole,
-  LinkedIncident,
-} from "../../api/networkDiagnosisTypes";
+import type { Diagnosis, DiagnosisEvidence, EvidenceRole } from "../../api/networkDiagnosisTypes";
 import type { NetworkStateResponse } from "../../api/networkStateTypes";
 import type { NetworkDiagnosisViewState } from "../../hooks/useNetworkDiagnosis";
 import {
-  CONFIDENCE_UNAVAILABLE_TEXT,
   EVIDENCE_ROLE_ORDER,
+  confidenceText,
   describeEvidence,
   groupEvidenceByRole,
   isDiagnosisAligned,
   resourceText,
 } from "../../network/diagnosisView";
 import { diagnosisTypePresentation } from "../../network/presentation";
-import { StateBadge } from "./StateBadge";
 
 const ROLE_HEADINGS: Record<EvidenceRole, string> = {
-  SUPPORTS: "Supports",
-  CONTRADICTS: "Contradicts",
+  SUPPORTS: "Supporting",
+  CONTRADICTS: "Contradicting",
   UNKNOWN: "Unknown",
 };
 
@@ -27,66 +21,85 @@ const INSUFFICIENT_EVIDENCE_COPY =
   "Symptoms are present, but the current observations do not support a definitive " +
   "physical-link or BGP-session attribution.";
 
-function formatTimestamp(iso: string): string {
-  const parsed = new Date(iso);
-  return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
+/**
+ * How many facts of each role are listed before the rest sit behind a
+ * "Show remaining" disclosure. The API's own (deterministic) order is kept;
+ * this only decides where the preview ends, never what is shown or ranked.
+ */
+const EVIDENCE_PREVIEW_COUNT: Record<EvidenceRole, number> = {
+  SUPPORTS: 4,
+  CONTRADICTS: 3,
+  UNKNOWN: 2,
+};
+
+function EvidenceItem({ item }: { item: DiagnosisEvidence }) {
+  const line = describeEvidence(item);
+  return (
+    <li>
+      <span className="diagnosis-evidence__kind">{line.label}</span>
+      {line.facts.map((fact) => (
+        <span key={fact} className="diagnosis-evidence__fact">
+          {fact}
+        </span>
+      ))}
+    </li>
+  );
+}
+
+function evidenceKey(item: DiagnosisEvidence, index: number): string {
+  return `${item.kind}:${item.node_id}:${item.subject}:${index}`;
 }
 
 function EvidenceGroup({ role, items }: { role: EvidenceRole; items: DiagnosisEvidence[] }) {
-  if (items.length === 0) {
-    return null;
-  }
+  const limit = EVIDENCE_PREVIEW_COUNT[role];
+  const preview = items.slice(0, limit);
+  const rest = items.slice(limit);
   return (
     <section className={`diagnosis-evidence-group diagnosis-evidence-group--${role.toLowerCase()}`}>
       <h5>
         {ROLE_HEADINGS[role]} ({items.length})
       </h5>
-      <ul>
-        {items.map((item, index) => {
-          const line = describeEvidence(item);
-          return (
-            <li key={`${item.kind}:${item.node_id}:${item.subject}:${index}`}>
-              <span className="diagnosis-evidence__kind">{line.label}</span>
-              {line.facts.map((fact) => (
-                <span key={fact} className="diagnosis-evidence__fact">
-                  {fact}
-                </span>
-              ))}
-            </li>
-          );
-        })}
-      </ul>
+      {items.length > 0 && (
+        <ul>
+          {preview.map((item, index) => (
+            <EvidenceItem key={evidenceKey(item, index)} item={item} />
+          ))}
+        </ul>
+      )}
+      {rest.length > 0 && (
+        <details className="evidence-more">
+          <summary>Show remaining {rest.length}</summary>
+          <ul>
+            {rest.map((item, index) => (
+              <EvidenceItem key={evidenceKey(item, limit + index)} item={item} />
+            ))}
+          </ul>
+        </details>
+      )}
     </section>
   );
 }
 
-function CorrelatedSymptoms({ incidents }: { incidents: LinkedIncident[] }) {
-  return (
-    <section className="diagnosis-symptoms" aria-label="Correlated symptoms">
-      <h4>Correlated symptoms ({incidents.length})</h4>
-      {incidents.length === 0 ? (
-        <p className="detail-note">No matching open incident records</p>
-      ) : (
-        <ul>
-          {incidents.map((incident) => (
-            <li key={incident.incident_id} data-testid="correlated-symptom">
-              <span className="diagnosis-symptom__resource">
-                {incident.device_id} · {incident.affected_resource}
-              </span>
-              <span className="cell-note">
-                {incident.severity} · {incident.status} · seen {incident.occurrence_count}× · last
-                seen{" "}
-                <time dateTime={incident.last_seen_at} title={incident.last_seen_at}>
-                  {formatTimestamp(incident.last_seen_at)}
-                </time>
-              </span>
-              <span className="cell-note">Incident {incident.incident_id}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
+/**
+ * Plain-language association drawn only from the evidence the backend itself
+ * marked as supporting: it names which symptom kinds are present, never a
+ * mechanism ("causing"), and invents nothing the evidence does not carry.
+ */
+function associationText(diagnosis: Diagnosis): string {
+  if (diagnosis.diagnosis_type === "INSUFFICIENT_EVIDENCE") {
+    return INSUFFICIENT_EVIDENCE_COPY;
+  }
+  const supporting = diagnosis.evidence.filter((item) => item.role === "SUPPORTS");
+  const parts: string[] = [];
+  if (supporting.some((item) => item.kind === "BGP_SESSION")) {
+    parts.push("BGP session loss");
+  }
+  if (supporting.some((item) => item.kind === "ECMP_PATHS")) {
+    parts.push("reduced ECMP redundancy");
+  }
+  return parts.length > 0
+    ? `Associated with ${parts.join(" and ")}.`
+    : "Associated with the correlated symptoms beside the topology.";
 }
 
 function DiagnosisCard({ diagnosis }: { diagnosis: Diagnosis }) {
@@ -95,62 +108,66 @@ function DiagnosisCard({ diagnosis }: { diagnosis: Diagnosis }) {
   const groups = groupEvidenceByRole(diagnosis.evidence);
   const isInsufficient = type === "INSUFFICIENT_EVIDENCE";
   const isBgp = type === "BGP_SESSION_FAILURE";
+  const symptomCount = diagnosis.linked_incidents.length;
 
   return (
-    <li className="diagnosis-card" data-diagnosis-type={type}>
-      <div className="diagnosis-card__head">
-        <h4>
-          <StateBadge presentation={presentation} />
-        </h4>
-        <span className="diagnosis-card__raw" title="Backend diagnosis type">
-          {type}
-        </span>
+    <li
+      className={`diagnosis-card diagnosis-card--${presentation.tone}`}
+      data-diagnosis-type={type}
+    >
+      <div className="diagnosis-card__main">
+        <p className="diagnosis-card__eyebrow">Probable Root Cause</p>
+        <h3 className="diagnosis-card__title">
+          <span aria-hidden="true" className="diagnosis-card__glyph">
+            {presentation.glyph}
+          </span>
+          {presentation.label}
+        </h3>
+        <p className="diagnosis-card__resource">
+          <span className="diagnosis-card__label">
+            {isBgp ? "Declared adjacency" : "Declared link"}
+          </span>
+          <span className="diagnosis-card__endpoints mono">{resourceText(diagnosis.resource)}</span>
+        </p>
+        <p className="diagnosis-card__association">{associationText(diagnosis)}</p>
       </div>
 
-      <dl className="diagnosis-card__facts">
-        <div>
-          <dt>Confidence</dt>
-          <dd>{diagnosis.confidence ?? CONFIDENCE_UNAVAILABLE_TEXT}</dd>
-        </div>
-        <div>
-          <dt>{isBgp ? "Declared adjacency" : "Declared link"}</dt>
-          <dd>
-            {resourceText(diagnosis.resource)}
-            <span className="cell-note diagnosis-card__resource-id">
-              {diagnosis.resource.resource_id}
-            </span>
-          </dd>
-        </div>
-        <div>
-          <dt>Evidence</dt>
-          <dd>
-            {groups.SUPPORTS.length} supporting · {groups.CONTRADICTS.length} contradicting ·{" "}
-            {groups.UNKNOWN.length} unknown
-          </dd>
-        </div>
-      </dl>
-
-      {isInsufficient && <p className="detail-note">{INSUFFICIENT_EVIDENCE_COPY}</p>}
-
-      <CorrelatedSymptoms incidents={diagnosis.linked_incidents} />
+      <div className="diagnosis-card__aside">
+        <p className="diagnosis-card__confidence">{confidenceText(diagnosis.confidence)}</p>
+        <p className="diagnosis-card__counts">
+          {symptomCount} correlated {symptomCount === 1 ? "symptom" : "symptoms"}
+          <span aria-hidden="true"> · </span>
+          {diagnosis.evidence.length} evidence {diagnosis.evidence.length === 1 ? "item" : "items"}
+        </p>
+        <p className="diagnosis-card__ids">
+          <span title="Backend diagnosis type">{type}</span>
+          <span className="diagnosis-card__resource-id">{diagnosis.resource.resource_id}</span>
+        </p>
+      </div>
 
       <details className="diagnosis-details" open={isInsufficient}>
-        <summary>Evidence details ({diagnosis.evidence.length})</summary>
-        {EVIDENCE_ROLE_ORDER.map((role) => (
-          <EvidenceGroup key={role} role={role} items={groups[role]} />
-        ))}
-        <section className="diagnosis-evidence-group">
-          <h5>Symptom keys ({diagnosis.symptom_keys.length})</h5>
-          <ul>
-            {diagnosis.symptom_keys.map((key) => (
-              <li key={`${key.device_id}:${key.affected_resource}`}>
-                <span className="diagnosis-evidence__fact">
-                  {key.device_id} · {key.affected_resource}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </section>
+        <summary>View evidence ({diagnosis.evidence.length})</summary>
+        <p className="diagnosis-details__tally">
+          {groups.SUPPORTS.length} supporting · {groups.CONTRADICTS.length} contradicting ·{" "}
+          {groups.UNKNOWN.length} unknown
+        </p>
+        <div className="diagnosis-details__groups">
+          {EVIDENCE_ROLE_ORDER.map((role) => (
+            <EvidenceGroup key={role} role={role} items={groups[role]} />
+          ))}
+          <section className="diagnosis-evidence-group">
+            <h5>Symptom keys ({diagnosis.symptom_keys.length})</h5>
+            <ul>
+              {diagnosis.symptom_keys.map((key) => (
+                <li key={`${key.device_id}:${key.affected_resource}`}>
+                  <span className="diagnosis-evidence__fact">
+                    {key.device_id} · {key.affected_resource}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        </div>
       </details>
     </li>
   );
@@ -212,9 +229,11 @@ export function DiagnosisPanel({ diagnosis, snapshot, onRetry }: DiagnosisPanelP
           </p>
         )}
         {aligned && data.diagnoses.length === 0 && (
-          <p className="detail-note" role="status">
-            <strong>No active root-cause diagnosis</strong> for this snapshot. Incidents and other
-            conditions are reported separately.
+          <p className="diagnosis-calm" role="status">
+            <span className="diagnosis-calm__title">No active root-cause diagnosis</span>
+            <span className="diagnosis-calm__note">
+              No current network observations require RCA attribution.
+            </span>
           </p>
         )}
         {aligned && data.diagnoses.length > 0 && (
@@ -232,8 +251,7 @@ export function DiagnosisPanel({ diagnosis, snapshot, onRetry }: DiagnosisPanelP
   }
 
   return (
-    <section className="workspace-section diagnosis-panel" aria-labelledby="workspace-rca-heading">
-      <h2 id="workspace-rca-heading">Root-cause analysis</h2>
+    <section className="diagnosis-panel" aria-label="Probable Root Cause">
       {body}
     </section>
   );
