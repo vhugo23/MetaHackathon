@@ -5,6 +5,7 @@ import { IncidentErrorState } from "../components/IncidentErrorState";
 import { LoadingState } from "../components/LoadingState";
 import { TelemetryPanel } from "../components/TelemetryPanel";
 import { useIncidents } from "../hooks/useIncidents";
+import { DEMO_READ_ONLY_LABEL, isDemoReadOnly } from "../demoMode";
 
 function incidentCountLabel(count: number): string {
   return count === 1 ? "1 incident" : `${count} incidents`;
@@ -12,6 +13,7 @@ function incidentCountLabel(count: number): string {
 
 export function IncidentDashboard() {
   const { state, refresh, resolvingIds, resolveErrors, resolveIncident } = useIncidents();
+  const readOnly = isDemoReadOnly();
 
   return (
     <main>
@@ -24,11 +26,23 @@ export function IncidentDashboard() {
         </div>
       </header>
 
-      <ConfigurationSubmissionForm
-        onSubmissionSuccess={() => {
-          refresh();
-        }}
-      />
+      {readOnly ? (
+        <section className="configuration-submission" aria-labelledby="read-only-demo-heading">
+          <div className="configuration-submission__intro">
+            <h2 id="read-only-demo-heading">Submit device configuration</h2>
+            <p className="configuration-submission__description">
+              {DEMO_READ_ONLY_LABEL}: configuration submission and incident resolution are turned
+              off. Incidents, telemetry, network state and diagnosis can still be inspected.
+            </p>
+          </div>
+        </section>
+      ) : (
+        <ConfigurationSubmissionForm
+          onSubmissionSuccess={() => {
+            refresh();
+          }}
+        />
+      )}
 
       <TelemetryPanel />
 
@@ -73,6 +87,7 @@ export function IncidentDashboard() {
                   isResolving={resolvingIds.has(incident.incident_id)}
                   resolveError={resolveErrors[incident.incident_id]}
                   onResolve={resolveIncident}
+                  readOnly={readOnly}
                 />
               ))}
             </div>

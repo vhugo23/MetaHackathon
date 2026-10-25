@@ -9,6 +9,8 @@ interface IncidentCardProps {
   isResolving: boolean;
   resolveError: string | undefined;
   onResolve: (incidentId: string) => void;
+  /** Public read-only demo: the resolve control is not offered at all. */
+  readOnly?: boolean;
 }
 
 const VIOLATION_TYPE_LABELS: Record<string, string> = {
@@ -35,6 +37,7 @@ export function IncidentCard({
   isResolving,
   resolveError,
   onResolve,
+  readOnly = false,
 }: IncidentCardProps) {
   const isOpen = incident.status === "OPEN";
   // `IncidentResponse.evidence` is a rule_ref-discriminated union (Day
@@ -112,7 +115,7 @@ export function IncidentCard({
         )}
       </dl>
 
-      {isOpen && (
+      {isOpen && !readOnly && (
         <div className="incident-card__actions">
           <button
             type="button"

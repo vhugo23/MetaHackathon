@@ -2426,3 +2426,29 @@ textarea {
     color: var(--text-tertiary);
   }
 }
+
+/* Public read-only demo marker (VITE_DEMO_READ_ONLY=true). */
+.demo-badge {
+  margin-left: auto;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--tone-info);
+  border-radius: 999px;
+  background: var(--tone-info-bg);
+  color: var(--tone-info);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.demo-badge + .app-header__status {
+  margin-left: 0;
+}
+
+@media (max-width: 640px) {
+  .demo-badge {
+    grid-column: 1 / -1;
+    justify-self: start;
+    margin-left: 0;
+  }
+}

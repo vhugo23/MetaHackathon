@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { HeaderStatusSlotContext } from "./components/headerStatusSlot";
+import { DEMO_READ_ONLY_LABEL, isDemoReadOnly } from "./demoMode";
 import { IncidentDashboard } from "./pages/IncidentDashboard";
 import { NetworkWorkspace } from "./pages/NetworkWorkspace";
 import { resolveInitialTheme, storeTheme, type Theme } from "./theme";
@@ -64,6 +65,7 @@ export function App() {
             Incidents &amp; Tools
           </a>
         </nav>
+        {isDemoReadOnly() && <span className="demo-badge">{DEMO_READ_ONLY_LABEL}</span>}
         <div className="app-header__status" ref={setStatusSlot} />
         <button type="button" className="theme-toggle" onClick={toggleTheme}>
           {toggleLabel}

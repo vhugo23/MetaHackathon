@@ -33,6 +33,7 @@ from meta_rne.api.dependencies import (
     seed_slice1_policies,
 )
 from meta_rne.api.errors import register_exception_handlers
+from meta_rne.api.read_only import DemoReadOnlyMiddleware, demo_read_only_from_environment
 from meta_rne.api.routes import build_router
 from meta_rne.application.config_ingestion import ConfigIngestionService
 from meta_rne.application.device_drift import GetDeviceDriftService
@@ -57,6 +58,7 @@ def create_app(
     adapter_registry: AdapterRegistry | None = None,
     seed_on_startup: bool = True,
     cors_allowed_origins: tuple[str, ...] = (),
+    demo_read_only: bool = False,
 ) -> FastAPI:
     registry = adapter_registry or build_production_adapter_registry()
 
@@ -100,6 +102,11 @@ def create_app(
 
     app = FastAPI(title="Meta RNE Platform", lifespan=lifespan)
 
+    # Added before CORS so CORS stays outermost: a blocked request's 403 still
+    # carries the CORS headers the browser needs to read it.
+    if demo_read_only:
+        app.add_middleware(DemoReadOnlyMiddleware)
+
     if cors_allowed_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -137,5 +144,9 @@ def create_app(
 # Production wiring: cors_allowed_origins's own Python-level default is an
 # empty tuple (non-permissive) — reading META_RNE_CORS_ALLOWED_ORIGINS is an
 # explicit choice made here, at the one real Uvicorn entrypoint, not a
-# hidden env-var fallback inside create_app itself.
-app = create_app(cors_allowed_origins=cors_allowed_origins_from_environment())
+# hidden env-var fallback inside create_app itself. The same goes for
+# META_RNE_DEMO_READ_ONLY (public-demo HTTP write guard, default off).
+app = create_app(
+    cors_allowed_origins=cors_allowed_origins_from_environment(),
+    demo_read_only=demo_read_only_from_environment(),
+)
